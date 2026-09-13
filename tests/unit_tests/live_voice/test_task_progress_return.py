@@ -21,7 +21,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ScopeRef,
     TerminalOutcome,
 )
-from jiuwenswarm.server.live_voice.formal_task_models import (
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
     ExecutorObservation,
     ExecutorResolution,
     FormalAttemptState,
@@ -33,19 +33,19 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     TaskRetryProductRequestFingerprint,
     TaskRetryAuthoritySnapshot,
 )
-from jiuwenswarm.server.live_voice.durability_recovery_facts import (
+from jiuwenswarm.server.runtime.durability.durability_recovery_facts import (
     ExecutorRecoveryFacts,
 )
-from jiuwenswarm.server.live_voice.progress_notification_arbiter import (
+from jiuwenswarm.server.runtime.presentation.progress_notification_arbiter import (
     ForegroundFact,
     ForegroundSnapshot,
     ProgressNotificationArbiter,
     SpeechPolicy,
 )
-from jiuwenswarm.server.live_voice.task_event_subscription import (
+from jiuwenswarm.server.runtime.formal_tasks.task_event_subscription import (
     TaskEventSubscription,
 )
-from jiuwenswarm.server.live_voice.task_progress_return import (
+from jiuwenswarm.server.runtime.presentation.task_progress_return import (
     TASK_PROGRESS_PRESENTABLE_EVENTS,
     TaskProgressHandoffKind,
     TaskProgressNotificationIntent,
@@ -61,7 +61,7 @@ from jiuwenswarm.server.live_voice.task_progress_return import (
     _evidence_id,
     project_task_progress_event,
 )
-from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
+from jiuwenswarm.server.runtime.formal_tasks.task_store import SqliteTaskStore
 
 NOW = "2026-08-06T10:00:00Z"
 EXPIRY = "2026-08-06T11:00:00Z"
@@ -1825,7 +1825,7 @@ async def test_consumer_bridge_projects_real_store_recovery_attempt_boundary(
     expected = [
         event.seq
         for event in store.events(task_id, task.scope)
-        if event.event_type in {"task.running", *TASK_PROGRESS_PRESENTABLE_EVENTS}
+        if event.event_type in {"task.accepted", "task.running", *TASK_PROGRESS_PRESENTABLE_EVENTS}
     ]
     for _ in range(1000):
         delivered = delivered_voice or delivered_text
@@ -1889,7 +1889,7 @@ async def test_consumer_voice_rolls_more_than_256_presentable_store_events(
     activation = await bridge.activate()
     assert activation.active
     expected_count = sum(
-        event.event_type in {"task.running", *TASK_PROGRESS_PRESENTABLE_EVENTS}
+        event.event_type in {"task.accepted", "task.running", *TASK_PROGRESS_PRESENTABLE_EVENTS}
         for event in store.events(task_id, _scope())
     )
     for _ in range(4000):
@@ -1928,7 +1928,7 @@ async def test_consumer_bridge_replays_unread_across_cancelled_retry_attempts(
     expected = [
         event.seq
         for event in authority_events
-        if event.event_type in {"task.running", *TASK_PROGRESS_PRESENTABLE_EVENTS}
+        if event.event_type in {"task.accepted", "task.running", *TASK_PROGRESS_PRESENTABLE_EVENTS}
     ]
     assert len({event.attempt_id for event in authority_events}) == 2
     consumer_scope = _scope(session_id="session-consumer-retry-reconnect")

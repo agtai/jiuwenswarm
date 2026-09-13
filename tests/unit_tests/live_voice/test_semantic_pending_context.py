@@ -9,8 +9,8 @@ import sqlite3
 import pytest
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import Assurance, ScopeRef
-from jiuwenswarm.server.live_voice.formal_task_models import FormalTaskViolation
-from jiuwenswarm.server.live_voice.unified_committed_input import (
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import FormalTaskViolation
+from jiuwenswarm.server.runtime.formal_tasks.unified_committed_input import (
     SqliteUnifiedCommittedInputJournal,
 )
 
@@ -246,7 +246,7 @@ def test_expired_source_cannot_mint_a_new_proposal_after_reopen(tmp_path, consum
 def test_pending_anchor_capacity_fails_closed_instead_of_forgetting_sources(
     tmp_path, monkeypatch
 ):
-    from jiuwenswarm.server.live_voice import unified_committed_input as module
+    import jiuwenswarm.server.runtime.formal_tasks.unified_committed_input as module
 
     monkeypatch.setattr(module, "P3_CONFIRMATION_MAX_CAPACITY", 1)
     journal = SqliteUnifiedCommittedInputJournal(tmp_path / "unified.sqlite")

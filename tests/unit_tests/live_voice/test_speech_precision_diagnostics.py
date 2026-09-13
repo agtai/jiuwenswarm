@@ -8,9 +8,9 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from jiuwenswarm.server.live_voice import batch_speech as batch
-from jiuwenswarm.server.live_voice import openai_streaming_speech as streaming
-from jiuwenswarm.server.live_voice import speech_http_diagnostics as http_diagnostics
+import jiuwenswarm.channels.live_voice.batch_speech as batch
+import jiuwenswarm.channels.live_voice.openai_streaming_speech as streaming
+import jiuwenswarm.channels.live_voice.speech_http_diagnostics as http_diagnostics
 from tests.unit_tests.live_voice.test_batch_speech import (
     CONTEXT, _recognize_request, _service, _cancel_request,
 )

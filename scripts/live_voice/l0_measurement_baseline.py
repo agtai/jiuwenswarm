@@ -18,7 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from jiuwenswarm.server.live_voice.latency_measurement import (  # noqa: E402
+from jiuwenswarm.channels.live_voice.latency_measurement import (  # noqa: E402
     L0EvidenceSource,
     L0MeasurementCollector,
     L0Milestone,
@@ -33,7 +33,7 @@ from jiuwenswarm.server.live_voice.latency_measurement import (  # noqa: E402
     load_l0_corpus_manifest,
     load_l0_jsonl,
 )
-from jiuwenswarm.server.live_voice.observability import (  # noqa: E402
+from jiuwenswarm.common.telemetry.observability import (  # noqa: E402
     LiveVoiceObservabilityCollector,
 )
 
@@ -450,7 +450,7 @@ async def build_provider_component_baseline(
         raise ValueError("provider profiles require at least 20 successful rounds")
     if max_attempts < successful_rounds:
         raise ValueError("provider max attempts cannot be below the success target")
-    from jiuwenswarm.server.live_voice.batch_speech import (
+    from jiuwenswarm.channels.live_voice.batch_speech import (
         ProviderRecognitionRequest,
         ProviderSynthesisRequest,
         create_environment_batch_speech_provider,

@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from jiuwenswarm.server.live_voice import production_task_classifier as classifier_module
-from jiuwenswarm.server.live_voice.production_task_classifier import ProductionTaskIntentClassifier
+import jiuwenswarm.server.runtime.formal_tasks.production_task_classifier as classifier_module
+from jiuwenswarm.server.runtime.formal_tasks.production_task_classifier import ProductionTaskIntentClassifier
 
 CORPUS = Path(__file__).resolve().parents[2] / "fixtures/live_voice_p3_6_intent_corpus_v1/cases.jsonl"
 

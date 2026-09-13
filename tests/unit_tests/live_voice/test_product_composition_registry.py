@@ -37,7 +37,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     TurnCommit,
     TurnCommitLedger,
 )
-from jiuwenswarm.server.live_voice.formal_task_models import (
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
     ExecutorDeliveryResult,
     ExecutorObservation,
     ExecutorResolution,
@@ -57,16 +57,16 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     TaskRetryAuthoritySnapshot,
     TaskRetryProductRequestFingerprint,
 )
-from jiuwenswarm.server.live_voice.agent_bridge import AgentEvent
-from jiuwenswarm.server.live_voice.agent_conversation_runtime import (
+from jiuwenswarm.channels.live_voice.agent_bridge import AgentEvent
+from jiuwenswarm.channels.live_voice.agent_conversation_runtime import (
     AgentConversationNotification,
 )
-from jiuwenswarm.server.live_voice.conversation_runtime import (
+from jiuwenswarm.channels.live_voice.conversation_runtime import (
     CancelState,
     ResponseState,
 )
-from jiuwenswarm.server.live_voice.critical_token_safety import EvidenceSource
-from jiuwenswarm.server.live_voice.live_voice_configuration_declaration import (
+from jiuwenswarm.channels.live_voice.critical_token_safety import EvidenceSource
+from jiuwenswarm.common.schema.live_voice_configuration_declaration import (
     LIVE_VOICE_CONFIGURATION_CONTRACT_VERSION,
     AuthenticationMode,
     DurabilityLevel,
@@ -77,32 +77,32 @@ from jiuwenswarm.server.live_voice.live_voice_configuration_declaration import (
     ValidatedExecutorConfiguration,
     ValidatedLiveVoiceConfiguration,
 )
-from jiuwenswarm.server.live_voice.interaction_engine import InteractionAction
-from jiuwenswarm.server.live_voice.native_interaction_carrier import (
+from jiuwenswarm.channels.live_voice.interaction_engine import InteractionAction
+from jiuwenswarm.channels.live_voice.native_interaction_carrier import (
     NativeInteractionProposal,
 )
-from jiuwenswarm.server.live_voice.native_interaction_config import (
+from jiuwenswarm.channels.live_voice.native_interaction_config import (
     InteractionEngineKind,
 )
-from jiuwenswarm.server.live_voice.native_interaction_contract import (
+from jiuwenswarm.common.schema.native_interaction_contract import (
     NATIVE_INTERACTION_CONTRACT_VERSION,
     NativeDelegateProposal,
     NativeInputTranscript,
     NativeInteractionBinding,
     NativeTurnCommit,
 )
-from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
+from jiuwenswarm.channels.live_voice.openai_realtime_native_engine import (
     NativeAudioOutput,
     NativeEngineEvent,
     NativeProviderDone,
 )
 from jiuwenswarm.gateway.app_gateway import _inject_live_voice_gateway_voice_claim
 from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
-from jiuwenswarm.server.live_voice.batch_speech import (
+from jiuwenswarm.channels.live_voice.batch_speech import (
     FormalBatchSpeechService,
     UnavailableBatchSpeechProvider,
 )
-from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
+from jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition import (
     AuthenticatedPrincipal,
     NativeP3ActivationAuthority,
     P3_OPERATIONS,
@@ -113,23 +113,23 @@ from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
     PreparedProductionIntentAuthority,
     ResolvedAuthority,
 )
-from jiuwenswarm.server.live_voice.persistent_task_core import PersistentTaskCore
-from jiuwenswarm.server.live_voice.p2_response_generation_store import (
+from jiuwenswarm.server.runtime.formal_tasks.persistent_task_core import PersistentTaskCore
+from jiuwenswarm.server.runtime.presentation.p2_response_generation_store import (
     SqliteP2ResponseGenerationOwner,
 )
-from jiuwenswarm.server.live_voice.p3_confirmation import (
+from jiuwenswarm.server.runtime.formal_tasks.p3_confirmation import (
     BoundedP3ConfirmationOwner,
     P3ConfirmationBinding,
     P3ConfirmationOwnerContext,
 )
-from jiuwenswarm.server.live_voice.p3_product_confirmation import (
+from jiuwenswarm.server.runtime.formal_tasks.p3_product_confirmation import (
     ProductP3ConfirmationForwarder,
 )
-from jiuwenswarm.server.live_voice.product_authority import (
+from jiuwenswarm.server.runtime.authority.product_authority import (
     AuthorityResourceBinding,
     TrustedAuthorityCandidate,
 )
-from jiuwenswarm.server.live_voice.product_observability_runtime import (
+from jiuwenswarm.channels.live_voice.product_observability_runtime import (
     BoundedInMemoryOtelBackend,
     PRODUCT_OBSERVABILITY_BACKEND_ENV,
     PRODUCT_OBSERVABILITY_BACKEND_ID,
@@ -138,7 +138,7 @@ from jiuwenswarm.server.live_voice.product_observability_runtime import (
     ProductObservabilityRuntime,
     create_product_observability_runtime_from_environment,
 )
-from jiuwenswarm.server.live_voice.product_composition_registry import (
+from jiuwenswarm.channels.live_voice.product_composition_registry import (
     AgentServerProductCompositionRegistry,
     PRODUCT_COMPOSITION_ENABLE_ENV,
     PRODUCT_CRITICAL_INPUT_ENABLE_ENV,
@@ -149,35 +149,35 @@ from jiuwenswarm.server.live_voice.product_composition_registry import (
     _VoiceTaskOrigin,
     create_product_composition_registry_from_environment,
 )
-from jiuwenswarm.server.live_voice.product_p2_interaction_adapter import (
+from jiuwenswarm.channels.live_voice.product_p2_interaction_adapter import (
     P2LeaseCloseStatus,
     P2LeaseState,
 )
-from jiuwenswarm.server.live_voice import product_composition_registry
-from jiuwenswarm.server.live_voice.latency_measurement import L0Milestone
-from jiuwenswarm.server.live_voice.presentation_ledger import (
+import jiuwenswarm.channels.live_voice.product_composition_registry as product_composition_registry
+from jiuwenswarm.channels.live_voice.latency_measurement import L0Milestone
+from jiuwenswarm.server.runtime.presentation.presentation_ledger import (
     PresentationState,
     PresentationSurface,
     PresentationUnit,
     TaskPresentationDelivery,
 )
-from jiuwenswarm.server.live_voice.product_p3_text_adapter import (
+from jiuwenswarm.server.runtime.formal_tasks.product_p3_text_adapter import (
     ProductP3AuthorizedQuery,
 )
-from jiuwenswarm.server.live_voice.production_task_intent import (
+from jiuwenswarm.server.runtime.formal_tasks.production_task_intent import (
     AuthenticatedTaskFact,
     TaskAuthorityRead,
 )
-from jiuwenswarm.server.live_voice.p3_production_intent_composition import (
+from jiuwenswarm.server.runtime.formal_tasks.p3_production_intent_composition import (
     StoreProductionTaskAuthorityReader,
 )
-from jiuwenswarm.server.live_voice.presentation_ledger import (
+from jiuwenswarm.server.runtime.presentation.presentation_ledger import (
     TaskPresentationConsumptionOwner,
 )
-from jiuwenswarm.server.live_voice.task_event_subscription import (
+from jiuwenswarm.server.runtime.formal_tasks.task_event_subscription import (
     TaskEventSubscription,
 )
-from jiuwenswarm.server.live_voice.task_progress_return import (
+from jiuwenswarm.server.runtime.presentation.task_progress_return import (
     TASK_PROGRESS_PRESENTABLE_EVENTS,
     TaskProgressNotificationIntent,
     TaskProgressOriginBinding,
@@ -190,21 +190,21 @@ from jiuwenswarm.server.live_voice.task_progress_return import (
 from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
     FormalContextSnapshot,
 )
-from jiuwenswarm.server.live_voice.project_code_executor import (
+from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
     DirectProjectCodeExecutorAdapter,
     FORMAL_PROJECT_EXECUTOR_ID,
     ProjectExecutionBinding,
 )
-from jiuwenswarm.server.live_voice.task_store import (
+from jiuwenswarm.server.runtime.formal_tasks.task_store import (
     SqliteTaskStore,
     TaskDurabilityDiagnosticSnapshot,
     TaskOutboxDiagnosticFact,
 )
-from jiuwenswarm.server.live_voice.task_core import AttemptState, TaskState
-from jiuwenswarm.server.live_voice.unified_committed_input import (
+from jiuwenswarm.server.runtime.formal_tasks.task_core import AttemptState, TaskState
+from jiuwenswarm.server.runtime.formal_tasks.unified_committed_input import (
     SqliteUnifiedCommittedInputJournal,
 )
-from jiuwenswarm.server.live_voice.voice_task_bridge import (
+from jiuwenswarm.server.runtime.formal_tasks.voice_task_bridge import (
     VoiceTaskBridgeViolation,
 )
 
@@ -477,6 +477,23 @@ class _AgentManager:
         self.pins = 0
         self.unpins = 0
 
+    def get_agent_nowait(self, *, channel_id, mode, project_dir, sub_mode=None):
+        if (channel_id, mode, project_dir, sub_mode) not in self.get_calls:
+            return None
+        return self.code_agent if mode == "code" else self.agent
+
+    async def cancel_all_inflight_work(self, prefix):
+        pass
+
+    async def cleanup(self):
+        pass
+
+    async def begin_foreground_chat(self) -> None:
+        pass
+
+    async def end_foreground_chat(self) -> None:
+        pass
+
     async def get_agent(self, *args):
         self.get_calls.append(args)
         mode = str(args[1]) if len(args) > 1 else "agent"
@@ -720,8 +737,8 @@ class _P3Composition(P3AuthenticatedComposition):
         Business/Store semantics are owned by test_semantic_registry. These
         isolated lifecycle fixtures explicitly default to a dialogue model.
         """
-        from jiuwenswarm.server.live_voice.task_semantics import TaskSemanticContext, TaskSemanticResolver
-        from jiuwenswarm.server.live_voice.p3_model_resolution import ResolvedP3Model
+        from jiuwenswarm.server.runtime.formal_tasks.task_semantics import TaskSemanticContext, TaskSemanticResolver
+        from jiuwenswarm.server.runtime.agent_adapter.p3_model_resolution import ResolvedP3Model
         from tests.support.live_voice.semantic_model import decision
 
         if self.fail_authority is not None:
@@ -1744,6 +1761,16 @@ class _StoreMutationP3Composition(_MutationP3Composition):
         return P3RouteResult(stored.ok, stored.to_dict())
 
 
+def _shared_test_runtime(manager):
+    """Real session/admission owner with only dependency startup replaced."""
+    from jiuwenswarm.runtime.service import AgentRuntime
+
+    async def initialized():
+        pass
+
+    return AgentRuntime(agent_manager=manager, initializer=initialized)
+
+
 def _voice_mutation_registry(
     tmp_path: Path,
     *,
@@ -1758,6 +1785,7 @@ def _voice_mutation_registry(
     )
     forwarder = ProductP3ConfirmationForwarder(owner)
     composition = _MutationP3Composition(tmp_path, forwarder)
+    manager = _AgentManager()
 
     async def push(_message: dict[str, object]) -> bool:
         return True
@@ -1769,7 +1797,8 @@ def _voice_mutation_registry(
             p3_mutation_enabled=True,
         ),
         p3_composition=composition,
-        agent_manager=_AgentManager(),
+        agent_manager=manager,
+        runtime=_shared_test_runtime(manager),
         push_text_event=push,
         p3_confirmation_owner=owner,
         p3_confirmation_forwarder=forwarder,
@@ -1808,6 +1837,7 @@ def _registry(
         ),
         p3_composition=p3_composition,
         agent_manager=manager,
+        runtime=_shared_test_runtime(manager),
         push_text_event=push,
         commit_ledger=commit_ledger,
         unified_journal=(
@@ -1855,6 +1885,7 @@ def _unified_registry(
         ),
         p3_composition=composition,
         agent_manager=manager,
+        runtime=_shared_test_runtime(manager),
         push_text_event=push,
         unified_journal=SqliteUnifiedCommittedInputJournal(
             tmp_path / "unified.sqlite3"
@@ -5853,7 +5884,7 @@ async def test_unified_foreground_ack_keeps_running_progress_silent(
     """Foreground ACK must not release a notice for an already-running Task."""
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_composition_registry.utc_now",
+        "jiuwenswarm.channels.live_voice.product_composition_registry.utc_now",
         lambda: ACK_NOW,
     )
     project, store, task_id, source_events = _running_presentation_store(tmp_path)
@@ -6575,7 +6606,7 @@ async def test_terminal_notification_waits_for_activation_then_uses_p2_ack_repla
         assert registry._pending_terminal_notifications == {}
         assert registry._terminal_text_event(pending) is None
         monkeypatch.setattr(
-            "jiuwenswarm.server.live_voice.product_composition_registry._P2_NOTIFICATION_LONG_POLL_TIMEOUT_SECONDS",
+            "jiuwenswarm.channels.live_voice.product_composition_registry._P2_NOTIFICATION_LONG_POLL_TIMEOUT_SECONDS",
             0.01,
         )
     else:
@@ -6833,7 +6864,7 @@ async def test_current_p2_poll_retries_terminal_progress_after_foreground_recove
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_composition_registry._P2_NOTIFICATION_LONG_POLL_TIMEOUT_SECONDS",
+        "jiuwenswarm.channels.live_voice.product_composition_registry._P2_NOTIFICATION_LONG_POLL_TIMEOUT_SECONDS",
         0.01,
     )
     project, store, task_id, _source_events = _running_presentation_store(tmp_path)
@@ -6902,6 +6933,7 @@ async def test_current_p2_poll_retries_terminal_progress_after_foreground_recove
         settings=ProductCompositionSettings(p2_enabled=True, p3_text_enabled=True),
         p3_composition=composition,
         agent_manager=manager,
+        runtime=_shared_test_runtime(manager),
         push_text_event=lambda _message: asyncio.sleep(0, result=True),
     )
     assert (
@@ -8724,6 +8756,7 @@ async def test_real_itinerary_fixture_matches_store_agent_answer_and_applied_art
         ),
         p3_composition=composition,
         agent_manager=manager,
+        runtime=_shared_test_runtime(manager),
         push_text_event=push,
         unified_journal=SqliteUnifiedCommittedInputJournal(
             tmp_path / "itinerary-unified.sqlite3"
@@ -9160,6 +9193,7 @@ async def test_p2_composes_observability_worker_into_the_same_root_lease(
         ),
         p3_composition=p3,
         agent_manager=manager,
+        runtime=_shared_test_runtime(manager),
         push_text_event=push,
         observability_exporter=exporter,
     )
@@ -9233,6 +9267,7 @@ async def test_p2_real_authority_adapter_runtime_codec_backend_lifecycle(
         ),
         p3_composition=p3,
         agent_manager=manager,
+        runtime=_shared_test_runtime(manager),
         push_text_event=push,
         observability_runtime=runtime,
     )
@@ -10083,7 +10118,7 @@ async def test_requested_voice_progress_without_exact_origin_is_explicit_text_fa
         logged.append(cast(dict[str, object], kwargs["extra"]))
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_composition_registry.logger.info",
+        "jiuwenswarm.channels.live_voice.product_composition_registry.logger.info",
         capture_log,
     )
     registry, p3, _manager, pushed = _registry(tmp_path)
@@ -10145,7 +10180,7 @@ async def test_exact_voice_origin_is_visible_text_when_no_audible_consumer_exist
         logged.append(cast(dict[str, object], kwargs["extra"]))
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_composition_registry.logger.info",
+        "jiuwenswarm.channels.live_voice.product_composition_registry.logger.info",
         capture_log,
     )
     registry, _p3, _manager, pushed = _registry(tmp_path)
@@ -10209,7 +10244,7 @@ async def test_superseded_cr_voice_response_projects_visible_text_with_stable_re
         logged.append(cast(dict[str, object], kwargs["extra"]))
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_composition_registry.logger.info",
+        "jiuwenswarm.channels.live_voice.product_composition_registry.logger.info",
         capture_log,
     )
     binding = TaskProgressOriginBinding(
@@ -10606,7 +10641,7 @@ async def test_real_store_failed_journey_links_mutation_executor_generation_and_
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_composition_registry.utc_now",
+        "jiuwenswarm.channels.live_voice.product_composition_registry.utc_now",
         lambda: ACK_NOW,
     )
     project = tmp_path / "actual-failed-journey-project"
@@ -11157,7 +11192,7 @@ async def test_real_store_progress_replays_unread_predecessor_before_retry_attem
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_composition_registry.utc_now",
+        "jiuwenswarm.channels.live_voice.product_composition_registry.utc_now",
         lambda: ACK_NOW,
     )
     project, store, task_id, source_events = _cancelled_retry_presentation_store(
@@ -11181,6 +11216,7 @@ async def test_real_store_progress_replays_unread_predecessor_before_retry_attem
         settings=ProductCompositionSettings(p2_enabled=True, p3_text_enabled=True),
         p3_composition=composition,
         agent_manager=manager,
+        runtime=_shared_test_runtime(manager),
         push_text_event=push,
     )
     session_b = "session-product-retry-reconnect"
@@ -11258,7 +11294,7 @@ async def test_real_store_voice_replays_unread_predecessor_before_retry_attempt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_composition_registry.utc_now",
+        "jiuwenswarm.channels.live_voice.product_composition_registry.utc_now",
         lambda: ACK_NOW,
     )
     project, store, task_id, source_events = _cancelled_retry_presentation_store(
@@ -11282,6 +11318,7 @@ async def test_real_store_voice_replays_unread_predecessor_before_retry_attempt(
         settings=ProductCompositionSettings(p2_enabled=True, p3_text_enabled=True),
         p3_composition=composition,
         agent_manager=manager,
+        runtime=_shared_test_runtime(manager),
         push_text_event=push,
     )
     session_b = "session-product-voice-retry-reconnect"
@@ -11425,7 +11462,7 @@ async def test_real_store_text_projects_recovery_attempt_boundary(
 ) -> None:
     recovery_now = "2026-08-05T12:05:00Z"
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_composition_registry.utc_now",
+        "jiuwenswarm.channels.live_voice.product_composition_registry.utc_now",
         lambda: recovery_now,
     )
     project, store, task_id, task_scope, source_events = _recovery_presentation_store(
@@ -11459,6 +11496,7 @@ async def test_real_store_text_projects_recovery_attempt_boundary(
         settings=ProductCompositionSettings(p2_enabled=True, p3_text_enabled=True),
         p3_composition=composition,
         agent_manager=manager,
+        runtime=_shared_test_runtime(manager),
         push_text_event=push,
     )
     session_id = "session-product-recovery-text"
@@ -11552,7 +11590,7 @@ async def test_real_store_audio_projects_recovery_attempt_boundary(
 ) -> None:
     recovery_now = "2026-08-05T12:05:00Z"
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_composition_registry.utc_now",
+        "jiuwenswarm.channels.live_voice.product_composition_registry.utc_now",
         lambda: recovery_now,
     )
     project, store, task_id, task_scope, source_events = _recovery_presentation_store(
@@ -11581,6 +11619,7 @@ async def test_real_store_audio_projects_recovery_attempt_boundary(
         settings=ProductCompositionSettings(p2_enabled=True, p3_text_enabled=True),
         p3_composition=composition,
         agent_manager=manager,
+        runtime=_shared_test_runtime(manager),
         push_text_event=push,
     )
     session_id = "session-product-recovery-audio"
@@ -11735,7 +11774,7 @@ async def test_real_store_audio_resumes_nonzero_watermark_in_fresh_registry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_composition_registry.utc_now",
+        "jiuwenswarm.channels.live_voice.product_composition_registry.utc_now",
         lambda: ACK_NOW,
     )
     project, store, task_id, _source_events = _failed_presentation_store(tmp_path)
@@ -11755,6 +11794,7 @@ async def test_real_store_audio_resumes_nonzero_watermark_in_fresh_registry(
                 ),
                 p3_composition=composition,
                 agent_manager=manager,
+        runtime=_shared_test_runtime(manager),
                 push_text_event=push,
             ),
             manager,
@@ -11958,7 +11998,7 @@ async def test_real_store_progress_drains_gap_and_recycles_one_slot_capacity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_composition_registry.utc_now",
+        "jiuwenswarm.channels.live_voice.product_composition_registry.utc_now",
         lambda: ACK_NOW,
     )
     project, store, task_id, source_events = _failed_presentation_store(tmp_path)
@@ -11976,6 +12016,7 @@ async def test_real_store_progress_drains_gap_and_recycles_one_slot_capacity(
         settings=ProductCompositionSettings(p2_enabled=True, p3_text_enabled=True),
         p3_composition=composition,
         agent_manager=manager,
+        runtime=_shared_test_runtime(manager),
         push_text_event=push,
     )
     registry._task_presentation_owner = TaskPresentationConsumptionOwner(
@@ -12065,7 +12106,7 @@ async def test_real_store_progress_reconnects_in_fresh_session_and_fences_late_a
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_composition_registry.utc_now",
+        "jiuwenswarm.channels.live_voice.product_composition_registry.utc_now",
         lambda: ACK_NOW,
     )
     project, store, task_id, source_events = _blocked_presentation_store(tmp_path)
@@ -12095,6 +12136,7 @@ async def test_real_store_progress_reconnects_in_fresh_session_and_fences_late_a
         settings=ProductCompositionSettings(p2_enabled=True, p3_text_enabled=True),
         p3_composition=composition,
         agent_manager=manager,
+        runtime=_shared_test_runtime(manager),
         push_text_event=push,
         observability_runtime=runtime,
     )
@@ -12278,7 +12320,7 @@ async def test_real_store_progress_reconnect_skips_durably_consumed_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_composition_registry.utc_now",
+        "jiuwenswarm.channels.live_voice.product_composition_registry.utc_now",
         lambda: ACK_NOW,
     )
     project, store, task_id, source_events = _failed_presentation_store(tmp_path)
@@ -12295,6 +12337,7 @@ async def test_real_store_progress_reconnect_skips_durably_consumed_prefix(
         settings=ProductCompositionSettings(p2_enabled=True, p3_text_enabled=True),
         p3_composition=composition,
         agent_manager=manager,
+        runtime=_shared_test_runtime(manager),
         push_text_event=push,
     )
     assert (
@@ -12446,7 +12489,7 @@ async def test_text_runtime_ack_then_core_before_commit_failure_retries_exactly_
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_composition_registry.utc_now",
+        "jiuwenswarm.channels.live_voice.product_composition_registry.utc_now",
         lambda: ACK_NOW,
     )
     failed_once = False
@@ -12474,6 +12517,7 @@ async def test_text_runtime_ack_then_core_before_commit_failure_retries_exactly_
         settings=ProductCompositionSettings(p2_enabled=True, p3_text_enabled=True),
         p3_composition=composition,
         agent_manager=manager,
+        runtime=_shared_test_runtime(manager),
         push_text_event=push,
     )
     assert (
@@ -12565,7 +12609,7 @@ async def test_audio_runtime_ack_then_core_before_commit_failure_rearms_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_composition_registry.utc_now",
+        "jiuwenswarm.channels.live_voice.product_composition_registry.utc_now",
         lambda: ACK_NOW,
     )
     failed_once = False
@@ -12591,6 +12635,7 @@ async def test_audio_runtime_ack_then_core_before_commit_failure_rearms_retry(
         settings=ProductCompositionSettings(p2_enabled=True, p3_text_enabled=True),
         p3_composition=composition,
         agent_manager=manager,
+        runtime=_shared_test_runtime(manager),
         push_text_event=push,
     )
     assert (
@@ -12720,7 +12765,7 @@ async def test_audio_ack_wins_progress_close_race_and_consumes_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_composition_registry.utc_now",
+        "jiuwenswarm.channels.live_voice.product_composition_registry.utc_now",
         lambda: ACK_NOW,
     )
     ack_entered = threading.Event()
@@ -12747,6 +12792,7 @@ async def test_audio_ack_wins_progress_close_race_and_consumes_once(
         settings=ProductCompositionSettings(p2_enabled=True, p3_text_enabled=True),
         p3_composition=composition,
         agent_manager=manager,
+        runtime=_shared_test_runtime(manager),
         push_text_event=push,
     )
     assert (
@@ -12904,6 +12950,7 @@ async def test_p2_close_settles_shared_task_presentation_before_progress_close(
         settings=ProductCompositionSettings(p2_enabled=True, p3_text_enabled=True),
         p3_composition=composition,
         agent_manager=manager,
+        runtime=_shared_test_runtime(manager),
         push_text_event=push,
     )
     assert (
@@ -13055,7 +13102,7 @@ async def test_agent_ack_drains_deferred_voice_task_presentation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_composition_registry.utc_now",
+        "jiuwenswarm.channels.live_voice.product_composition_registry.utc_now",
         lambda: ACK_NOW,
     )
     project, store, task_id, source_events = _blocked_presentation_store(tmp_path)
@@ -13072,6 +13119,7 @@ async def test_agent_ack_drains_deferred_voice_task_presentation(
         settings=ProductCompositionSettings(p2_enabled=True, p3_text_enabled=True),
         p3_composition=composition,
         agent_manager=manager,
+        runtime=_shared_test_runtime(manager),
         push_text_event=push,
         unified_journal=SqliteUnifiedCommittedInputJournal(tmp_path / "unified.sqlite3"),
     )
@@ -13290,7 +13338,7 @@ async def test_audio_playout_failure_falls_back_to_text_without_voice_consumptio
     foreground_busy: bool,
 ) -> None:
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_composition_registry.utc_now",
+        "jiuwenswarm.channels.live_voice.product_composition_registry.utc_now",
         lambda: ACK_NOW,
     )
     project, store, task_id, source_events = _blocked_presentation_store(tmp_path)
@@ -13311,6 +13359,7 @@ async def test_audio_playout_failure_falls_back_to_text_without_voice_consumptio
         settings=ProductCompositionSettings(p2_enabled=True, p3_text_enabled=True),
         p3_composition=composition,
         agent_manager=manager,
+        runtime=_shared_test_runtime(manager),
         push_text_event=push,
         unified_journal=SqliteUnifiedCommittedInputJournal(tmp_path / "unified.sqlite3"),
     )
@@ -13641,7 +13690,7 @@ async def test_later_audio_failure_replays_the_class_isolated_text_prefix(
     """A failed later AUDIO event must not strand TEXT behind its own cursor."""
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_composition_registry.utc_now",
+        "jiuwenswarm.channels.live_voice.product_composition_registry.utc_now",
         lambda: ACK_NOW,
     )
     project, store, task_id, source_events = _blocked_presentation_store(tmp_path)
@@ -17657,7 +17706,7 @@ async def test_resolver_exception_is_content_free_on_wire_and_in_logs(
         logged.append((message, cast(dict[str, object], kwargs["extra"])))
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_composition_registry.logger.warning",
+        "jiuwenswarm.channels.live_voice.product_composition_registry.logger.warning",
         capture_warning,
     )
 
@@ -17726,7 +17775,7 @@ async def test_untyped_resolver_exception_is_content_free_and_releases_authority
             raise RuntimeError(sentinel)
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_composition_registry.logger.warning",
+        "jiuwenswarm.channels.live_voice.product_composition_registry.logger.warning",
         capture_warning,
     )
     registry._task_intent_bridge = cast(object, _FailingResolver())
@@ -18428,7 +18477,7 @@ async def test_idle_notification_poll_returns_effect_free_keepalive_before_gatew
 ) -> None:
     registry, _p3, manager, _pushed = _registry(tmp_path)
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_composition_registry._P2_NOTIFICATION_LONG_POLL_TIMEOUT_SECONDS",
+        "jiuwenswarm.channels.live_voice.product_composition_registry._P2_NOTIFICATION_LONG_POLL_TIMEOUT_SECONDS",
         0.001,
     )
     activated = await registry.handle_p2_activate(

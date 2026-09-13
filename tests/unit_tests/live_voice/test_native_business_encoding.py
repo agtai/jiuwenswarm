@@ -5,8 +5,8 @@ from decimal import Decimal
 
 import pytest
 
-from jiuwenswarm.server.live_voice.native_business_encoding import compact_native_business_output
-from jiuwenswarm.server.live_voice.openai_realtime_session import _encode_client_event
+from jiuwenswarm.channels.live_voice.native_business_encoding import compact_native_business_output
+from jiuwenswarm.channels.live_voice.openai_realtime_session import _encode_client_event
 
 
 @pytest.mark.parametrize("text", [

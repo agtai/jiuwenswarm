@@ -7,12 +7,12 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ScopeRef,
     TerminalOutcome,
 )
-from jiuwenswarm.server.live_voice.executor_port import (
+from tests.support.live_voice.executor_port import (
     ExecutorPort,
     ExecutorPortViolation,
     ExecutorState,
 )
-from jiuwenswarm.server.live_voice.task_core import DispatchIntent, TaskSpec
+from jiuwenswarm.server.runtime.formal_tasks.task_core import DispatchIntent, TaskSpec
 
 
 def intent(instruction: str = "work") -> DispatchIntent:

@@ -29,7 +29,7 @@ from jiuwenswarm.gateway.live_voice.speech_rpc import (
     SYNTHESIZE_BATCH_METHOD,
     register_speech_rpc_handlers,
 )
-from jiuwenswarm.server.live_voice.batch_speech import (
+from jiuwenswarm.channels.live_voice.batch_speech import (
     BatchSpeechProvider,
     FormalBatchSpeechService,
     ProviderCapability,

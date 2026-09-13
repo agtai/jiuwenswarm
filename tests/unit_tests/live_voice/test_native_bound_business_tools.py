@@ -4,10 +4,10 @@ import json
 
 import pytest
 
-from jiuwenswarm.server.live_voice.native_business_tools import (
+from jiuwenswarm.channels.live_voice.native_business_tools import (
     native_business_tools, native_business_proposal_from_function_call,
 )
-from jiuwenswarm.server.live_voice.native_business_contract import NativeBusinessViolation
+from jiuwenswarm.channels.live_voice.native_business_contract import NativeBusinessViolation
 from tests.unit_tests.live_voice import test_native_business_tools as tools_fixture
 from tests.unit_tests.live_voice import test_openai_realtime_native_engine as f
 

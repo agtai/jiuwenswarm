@@ -147,7 +147,7 @@ test('current Python capability and full legal 48 kHz capture cross the Web cont
   const venv = fileURLToPath(new URL(process.platform === 'win32'
     ? '../../../../../.venv/Scripts/python.exe' : '../../../../../.venv/bin/python', import.meta.url));
   const generated = spawnSync(process.env.PYTHON ?? (existsSync(venv) ? venv : 'python'), ['-c',
-    'import json; from types import SimpleNamespace; from jiuwenswarm.server.live_voice.batch_speech import FormalBatchSpeechService, ProviderCapability; print(json.dumps(FormalBatchSpeechService(SimpleNamespace(capability=lambda:ProviderCapability("cross-language-test",True,True,True)),authorization_resolver=lambda binding:None).capability_payload()))',
+    'import json; from types import SimpleNamespace; from jiuwenswarm.channels.live_voice.batch_speech import FormalBatchSpeechService, ProviderCapability; print(json.dumps(FormalBatchSpeechService(SimpleNamespace(capability=lambda:ProviderCapability("cross-language-test",True,True,True)),authorization_resolver=lambda binding:None).capability_payload()))',
   ], { cwd: repository, encoding: 'utf8', timeout: 30_000 });
   assert.equal(generated.status, 0, generated.stderr);
   const payload = JSON.parse(generated.stdout.trim());

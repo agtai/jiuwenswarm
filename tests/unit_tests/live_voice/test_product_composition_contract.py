@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from jiuwenswarm.server.live_voice.product_composition_contract import (
+from jiuwenswarm.channels.live_voice.product_composition_contract import (
     PRODUCT_COMPOSITION_CONTRACT_VERSION,
     ProductCompositionManifest,
     ProductCompositionContractViolation,

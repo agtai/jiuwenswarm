@@ -10,7 +10,7 @@ import pytest
 
 def _module(name: str) -> ModuleType:
     try:
-        return importlib.import_module(f"jiuwenswarm.server.live_voice.{name}")
+        return importlib.import_module(f"tests.support.live_voice.{name}")
     except ModuleNotFoundError:
         pytest.fail(f"P3-8A contract module is missing: {name}")
 

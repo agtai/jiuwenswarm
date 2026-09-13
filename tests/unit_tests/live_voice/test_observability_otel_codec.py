@@ -10,7 +10,7 @@ from types import ModuleType
 
 import pytest
 
-from jiuwenswarm.server.live_voice.observability import (
+from jiuwenswarm.common.telemetry.observability import (
     LIVE_VOICE_CONTRACT_VERSION,
     OBSERVABILITY_SCHEMA_VERSION,
     LiveVoiceMetric,
@@ -26,7 +26,7 @@ CORRELATION_ID = "corr-p3-8a"
 def _codec() -> ModuleType:
     try:
         return importlib.import_module(
-            "jiuwenswarm.server.live_voice.observability_otel_codec"
+            "jiuwenswarm.channels.live_voice.observability_otel_codec"
         )
     except ModuleNotFoundError:
         pytest.fail("the current observability owner has no OTel backend codec")

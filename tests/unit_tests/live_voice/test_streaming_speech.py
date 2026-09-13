@@ -13,7 +13,7 @@ from tests.unit_tests.live_voice.speech_authority_support import (
 )
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import ResponseRef
-from jiuwenswarm.server.live_voice.speech_ports import (
+from jiuwenswarm.channels.live_voice.speech_ports import (
     ProviderRef,
     RecognitionAlternative,
     RecognitionEventKind,
@@ -21,7 +21,7 @@ from jiuwenswarm.server.live_voice.speech_ports import (
     SpeechMode,
     SynthesisEventKind,
 )
-from jiuwenswarm.server.live_voice.streaming_speech import (
+from jiuwenswarm.channels.live_voice.streaming_speech import (
     CapabilityProvenance,
     CaptureRef,
     ProviderControlKind,
@@ -257,7 +257,7 @@ def test_server_vad_default_tolerates_a_natural_breath_pause() -> None:
 
 
 def test_server_vad_silence_hold_honours_environment_override(monkeypatch) -> None:
-    from jiuwenswarm.server.live_voice.streaming_speech import SERVER_VAD_SILENCE_MS_ENV
+    from jiuwenswarm.channels.live_voice.streaming_speech import SERVER_VAD_SILENCE_MS_ENV
 
     monkeypatch.setenv(SERVER_VAD_SILENCE_MS_ENV, "1200")
     assert RecognitionTurnDetection.server_vad_default().server_vad.silence_duration_ms == 1_200

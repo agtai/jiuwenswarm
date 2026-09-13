@@ -9,7 +9,7 @@ import {
   ProductTextProgressAckOwner,
   ProductTextProgressDomAdoptionOwner,
   productTextProgressPresentationBinding,
-} from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/productTextProgress.js';
+} from '../node_modules/.cache/live-voice-integrated-web/features/tasks/productTextProgress.js';
 
 function progressEvent(overrides = {}) {
   const sessionId = overrides.session_id ?? 'session-1';

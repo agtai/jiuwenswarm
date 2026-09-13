@@ -22,59 +22,59 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     WorkProgressEventV2,
     canonical_json_bytes,
 )
-from jiuwenswarm.server.live_voice.agent_conversation_runtime import (
+from jiuwenswarm.channels.live_voice.agent_conversation_runtime import (
     AgentConversationNotification,
     AgentConversationNotificationLease,
     AgentConversationRuntime,
     AgentConversationRuntimeViolation,
     AgentConversationShutdownStatus,
 )
-from jiuwenswarm.server.live_voice.agent_bridge_runtime import (
+from jiuwenswarm.channels.live_voice.agent_bridge_runtime import (
     AgentBridgeRuntime,
     AgentBridgeRuntimeViolation,
 )
-from jiuwenswarm.server.live_voice.conversation_runtime_loop import (
+from jiuwenswarm.channels.live_voice.conversation_runtime_loop import (
     ConversationRuntimeLoopViolation,
 )
-from jiuwenswarm.server.live_voice.conversation_runtime import (
+from jiuwenswarm.channels.live_voice.conversation_runtime import (
     ConversationRuntimeViolation,
     ResponseState,
 )
-from jiuwenswarm.server.live_voice import formal_history_writer as history_writer_module
-from jiuwenswarm.server.live_voice.formal_history_writer import (
+import jiuwenswarm.channels.live_voice.formal_history_writer as history_writer_module
+from jiuwenswarm.channels.live_voice.formal_history_writer import (
     SessionFormalHistoryWriter,
 )
-from jiuwenswarm.server.live_voice.jiuwenswarm_round_harness import (
+from jiuwenswarm.server.runtime.agent_adapter.jiuwenswarm_round_harness import (
     HarnessReservationState,
     HarnessRoundBinding,
     HarnessRoundViolation,
     JiuWenSwarmRoundHarness,
 )
-from jiuwenswarm.server.live_voice.native_interaction_contract import (
+from jiuwenswarm.common.schema.native_interaction_contract import (
     NATIVE_INTERACTION_CONTRACT_VERSION,
     NativeInteractionBinding,
     NativeTurnCommit,
 )
-from jiuwenswarm.server.live_voice.native_interaction_runtime import (
+from jiuwenswarm.channels.live_voice.native_interaction_runtime import (
     NativeHistoryAdmission,
     NativeInteractionRuntimeOwner,
     NativeUserHistoryAdmission,
 )
-from jiuwenswarm.server.live_voice.presentation_ledger import (
+from jiuwenswarm.server.runtime.presentation.presentation_ledger import (
     PresentationAck,
     PresentationLedgerViolation,
     PresentationState,
     PresentationSurface,
     PresentationUnit,
 )
-from jiuwenswarm.server.live_voice.formal_task_models import PersistentTaskEvent
-from jiuwenswarm.server.live_voice.progress_notification_arbiter import (
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import PersistentTaskEvent
+from jiuwenswarm.server.runtime.presentation.progress_notification_arbiter import (
     ForegroundFact,
     ForegroundSnapshot,
     ProgressNotificationArbiter,
     SpeechPolicy,
 )
-from jiuwenswarm.server.live_voice.task_progress_return import (
+from jiuwenswarm.server.runtime.presentation.task_progress_return import (
     TaskProgressNotificationIntent,
     TaskProgressOriginBinding,
     TaskProgressOriginKind,
@@ -953,7 +953,7 @@ async def test_native_delegate_server_deadline_cancels_once_and_closes_bounded()
 @pytest.mark.asyncio
 @pytest.mark.parametrize("before_start", [False, True])
 async def test_native_foreground_interrupt_cancels_exact_round_without_replay(before_start) -> None:
-    from jiuwenswarm.server.live_voice.native_foreground import NativeForegroundControl
+    from jiuwenswarm.server.runtime.work.native_foreground import NativeForegroundControl
     lower = LowerFormalAdapter(final="forbidden late result", release=asyncio.Event())
     current, owner, binding, source, delegated, context = await _prepare_native_delegate_execution(lower, suffix="interrupt")
     control = NativeForegroundControl(source, {})

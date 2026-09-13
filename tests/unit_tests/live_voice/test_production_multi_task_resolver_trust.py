@@ -17,7 +17,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     TerminalOutcome,
     TurnCommit,
 )
-from jiuwenswarm.server.live_voice.production_task_intent import (
+from jiuwenswarm.server.runtime.formal_tasks.production_task_intent import (
     AuthenticatedTaskFact,
     BoundedClarificationOwner,
     ClarificationAnswer,
@@ -33,8 +33,8 @@ from jiuwenswarm.server.live_voice.production_task_intent import (
     TrustedConfirmationConsumptionReceipt,
     TrustedProductionOriginReceipt,
 )
-from jiuwenswarm.server.live_voice.task_core import AttemptState, TaskState
-from jiuwenswarm.server.live_voice.voice_task_bridge import VoiceTaskBridge
+from jiuwenswarm.server.runtime.formal_tasks.task_core import AttemptState, TaskState
+from jiuwenswarm.server.runtime.formal_tasks.voice_task_bridge import VoiceTaskBridge
 
 SCOPE = ScopeRef("subject-a", "project-a", "session-a", Assurance.AUTHENTICATED)
 ZERO_EFFECTS = (

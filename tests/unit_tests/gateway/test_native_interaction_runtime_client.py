@@ -28,19 +28,19 @@ from jiuwenswarm.gateway.live_voice.native_interaction_runtime_client import (
     GatewayNativeInteractionRuntimeClient,
     NativeRuntimeClientError,
 )
-from jiuwenswarm.server.live_voice.interaction_engine import InteractionAction
-from jiuwenswarm.server.live_voice.native_interaction_contract import (
+from jiuwenswarm.channels.live_voice.interaction_engine import InteractionAction
+from jiuwenswarm.common.schema.native_interaction_contract import (
     NATIVE_INTERACTION_CONTRACT_VERSION,
     NativeDelegateProposal,
     NativeInteractionBinding,
     NativeInputTranscript,
 )
-from jiuwenswarm.server.live_voice.native_business_contract import NATIVE_BUSINESS_CONTRACT_VERSION
-from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
+from jiuwenswarm.channels.live_voice.native_business_contract import NATIVE_BUSINESS_CONTRACT_VERSION
+from jiuwenswarm.channels.live_voice.openai_realtime_native_engine import (
     NativeAudioOutput,
     NativeEngineEvent,
 )
-from jiuwenswarm.server.live_voice.presentation_ledger import (
+from jiuwenswarm.server.runtime.presentation.presentation_ledger import (
     PresentationAck,
     PresentationSurface,
 )
@@ -331,8 +331,8 @@ async def test_business_context_closed_result_and_bounds_reject_before_release(d
 
 @pytest.mark.asyncio
 async def test_business_proposal_real_wire_roundtrip_and_large_real_receipt():
-    from jiuwenswarm.server.live_voice.native_business_contract import NativeBusinessProposal, NativeBusinessAction
-    from jiuwenswarm.server.live_voice.native_interaction_carrier import NativeInteractionProposal
+    from jiuwenswarm.channels.live_voice.native_business_contract import NativeBusinessProposal, NativeBusinessAction
+    from jiuwenswarm.channels.live_voice.native_interaction_carrier import NativeInteractionProposal
     action = NativeBusinessAction("work.get", "a" * 64, "work-1", None, None, None, None)
     legacy = delegate_event()
     proposal = NativeBusinessProposal(**{key: getattr(legacy.delegate, key) for key in legacy.delegate.__dataclass_fields__}, business=action)

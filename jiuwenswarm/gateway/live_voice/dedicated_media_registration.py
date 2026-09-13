@@ -100,7 +100,7 @@ from jiuwenswarm.gateway.live_voice.streaming_synthesis_route import (
     StreamingSynthesisRouteOwner,
     StreamingSynthesisRouteViolation,
 )
-from jiuwenswarm.server.live_voice.batch_speech import (
+from jiuwenswarm.channels.live_voice.batch_speech import (
     CONTRACT_VERSION as SPEECH_CONTRACT_VERSION,
     FormalBatchSpeechService,
     RECOGNIZE_OPERATION,
@@ -110,15 +110,15 @@ from jiuwenswarm.server.live_voice.batch_speech import (
     SpeechRpcContext,
     parse_synthesis_batch_request,
 )
-from jiuwenswarm.server.live_voice.interaction_engine import InteractionAction
-from jiuwenswarm.server.live_voice.latency_measurement import (
+from jiuwenswarm.channels.live_voice.interaction_engine import InteractionAction
+from jiuwenswarm.channels.live_voice.latency_measurement import (
     L0Milestone,
     L0RoundBinding,
     L0RoundClassification,
     emit_runtime_l0_milestone,
     register_runtime_l0_binding,
 )
-from jiuwenswarm.server.live_voice.streaming_speech import (
+from jiuwenswarm.channels.live_voice.streaming_speech import (
     authorize_stream_request,
     SpeechResponseAuthority,
     SpeechStreamAuthority,
@@ -131,8 +131,8 @@ from jiuwenswarm.server.live_voice.streaming_speech import (
     SynthesisStreamRequest,
     TextSpan,
 )
-from jiuwenswarm.server.live_voice.openai_streaming_speech import SpeechRouteTier
-from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
+from jiuwenswarm.channels.live_voice.openai_streaming_speech import SpeechRouteTier
+from jiuwenswarm.channels.live_voice.openai_realtime_native_engine import (
     NATIVE_PCM_SAMPLE_RATE,
     NativeAudioOutput,
     NativeEngineEvent,
@@ -140,16 +140,16 @@ from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
     NativeProviderDone,
     OpenAIRealtimeNativeInteractionEngine,
 )
-from jiuwenswarm.server.live_voice.native_interaction_contract import (
+from jiuwenswarm.common.schema.native_interaction_contract import (
     NATIVE_INTERACTION_CONTRACT_VERSION,
     NativeInteractionBinding,
     NativePresentationCursor,
 )
-from jiuwenswarm.server.live_voice.presentation_ledger import (
+from jiuwenswarm.server.runtime.presentation.presentation_ledger import (
     PresentationAck,
     PresentationSurface,
 )
-from jiuwenswarm.server.live_voice.observability import (
+from jiuwenswarm.common.telemetry.observability import (
     LIVE_VOICE_CONTRACT_VERSION,
     OBSERVABILITY_SCHEMA_VERSION,
     LiveVoiceObservabilityCollector,

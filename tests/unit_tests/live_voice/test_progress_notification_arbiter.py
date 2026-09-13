@@ -19,10 +19,8 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ScopeRef,
     WorkSourceAuthority,
 )
-from jiuwenswarm.server.live_voice import (
-    progress_notification_arbiter as arbiter_module,
-)
-from jiuwenswarm.server.live_voice.progress_notification_arbiter import (
+import jiuwenswarm.server.runtime.presentation.progress_notification_arbiter as arbiter_module
+from jiuwenswarm.server.runtime.presentation.progress_notification_arbiter import (
     ForegroundFact,
     ForegroundSnapshot,
     NoProjectionAdvanceDisposition,
@@ -33,7 +31,7 @@ from jiuwenswarm.server.live_voice.progress_notification_arbiter import (
     SpeechDisposition,
     SpeechPolicy,
 )
-from jiuwenswarm.server.live_voice.formal_task_models import PersistentTaskEvent
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import PersistentTaskEvent
 
 
 def scope(

@@ -12,7 +12,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ScopeRef,
     TurnCommit,
 )
-from jiuwenswarm.server.live_voice.critical_token_safety import (
+from jiuwenswarm.channels.live_voice.critical_token_safety import (
     AuthorizationState,
     ClarificationState,
     CommittedSpeechCandidate,

@@ -11,10 +11,10 @@ from datetime import UTC, datetime
 import pytest
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import ResponseRef
-from jiuwenswarm.server.live_voice.formal_task_models import FormalTaskViolation
-from jiuwenswarm.server.live_voice.semantic_continuity import SemanticContinuity
-from jiuwenswarm.server.live_voice.task_semantics import TaskSemanticResolver
-from jiuwenswarm.server.live_voice.unified_committed_input import (
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import FormalTaskViolation
+from jiuwenswarm.channels.live_voice.semantic_continuity import SemanticContinuity
+from jiuwenswarm.server.runtime.formal_tasks.task_semantics import TaskSemanticResolver
+from jiuwenswarm.server.runtime.formal_tasks.unified_committed_input import (
     SqliteUnifiedCommittedInputJournal,
 )
 from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
@@ -30,7 +30,7 @@ from tests.unit_tests.live_voice.test_task_semantics import (
 
 
 def test_confirmation_clock_precision_does_not_reject_already_issued_context(tmp_path, monkeypatch):
-    from jiuwenswarm.server.live_voice import unified_committed_input as module
+    import jiuwenswarm.server.runtime.formal_tasks.unified_committed_input as module
 
     instant = datetime(2026, 9, 3, 12, 0, 0, 123456, tzinfo=UTC)
     issued = instant.timestamp()
@@ -135,7 +135,7 @@ async def test_history_retains_unanswered_committed_user_without_inventing_answe
 
 @pytest.mark.asyncio
 async def test_proposal_lifetime_survives_playout_without_extending_confirmation(tmp_path, monkeypatch):
-    from jiuwenswarm.server.live_voice import unified_committed_input as module
+    import jiuwenswarm.server.runtime.formal_tasks.unified_committed_input as module
 
     source = analysis()
     issued = datetime.fromisoformat(source.presented_at).timestamp()

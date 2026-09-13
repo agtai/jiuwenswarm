@@ -24,30 +24,30 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ResponseRef,
 )
 from jiuwenswarm.common.schema.message import ReqMethod
-from jiuwenswarm.server.live_voice.native_interaction_carrier import (
+from jiuwenswarm.channels.live_voice.native_interaction_carrier import (
     NATIVE_NOTIFICATION_WAKE_VERSION,
     NativeInteractionProposal,
 )
-from jiuwenswarm.server.live_voice.native_interaction_contract import (
+from jiuwenswarm.common.schema.native_interaction_contract import (
     MAX_NATIVE_AUDIO_PROPOSAL_BATCH,
     MAX_NATIVE_TRANSCRIPT_UTF8_BYTES,
     NATIVE_INTERACTION_CONTRACT_VERSION,
     NativeInteractionBinding,
     NativePresentationCursor,
 )
-from jiuwenswarm.server.live_voice.native_business_contract import (
+from jiuwenswarm.channels.live_voice.native_business_contract import (
     NATIVE_BUSINESS_CONTRACT_VERSION,
     NativeBusinessProposal,
 )
-from jiuwenswarm.server.live_voice.native_business_observation import (
+from jiuwenswarm.common.schema.native_business_observation import (
     NATIVE_BUSINESS_OBSERVATION_VERSION, MAX_OBSERVATION_WAIT_MS, observation_cursor,
 )
-from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
+from jiuwenswarm.channels.live_voice.openai_realtime_native_engine import (
     MAX_NATIVE_DELEGATE_RESULT_UTF8_BYTES,
     NativeEngineEvent,
 )
-from jiuwenswarm.server.live_voice.presentation_ledger import PresentationAck
-from jiuwenswarm.server.live_voice.voice_task_bridge import (
+from jiuwenswarm.server.runtime.presentation.presentation_ledger import PresentationAck
+from jiuwenswarm.server.runtime.formal_tasks.voice_task_bridge import (
     UnifiedCommittedInputRoute,
 )
 

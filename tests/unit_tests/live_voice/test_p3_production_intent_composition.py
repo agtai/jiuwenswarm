@@ -20,11 +20,11 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     TurnCommitLedger,
     canonical_json_bytes,
 )
-from jiuwenswarm.server.live_voice.executor_capabilities import (
+from jiuwenswarm.server.runtime.formal_tasks.executor_capabilities import (
     TASK_EXECUTION_REQUIREMENTS_SCHEMA_VERSION,
     TaskExecutionRequirements,
 )
-from jiuwenswarm.server.live_voice.formal_task_models import (
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
     AdmissionDisposition,
     AdmissionPolicy,
     ExecutorObservation,
@@ -37,34 +37,34 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     TaskResultAvailability,
     TaskResultArtifact,
 )
-from jiuwenswarm.server.live_voice.p3_production_intent_composition import (
+from jiuwenswarm.server.runtime.formal_tasks.p3_production_intent_composition import (
     CallLocalProductionOriginAuthority,
     CallLocalProductionConfirmationConsumer,
     StoreProductionTaskAuthorityReader,
     production_context_fingerprint,
     production_model_binding_fingerprint,
 )
-from jiuwenswarm.server.live_voice.p3_confirmation import (
+from jiuwenswarm.server.runtime.formal_tasks.p3_confirmation import (
     BoundedP3ConfirmationOwner,
     P3ConfirmationBinding,
     P3ConfirmationOwnerContext,
     TrustedP3ConfirmationIssue,
 )
-from jiuwenswarm.server.live_voice.p3_product_confirmation import (
+from jiuwenswarm.server.runtime.formal_tasks.p3_product_confirmation import (
     ProductP3ConfirmationForwarder,
 )
-from jiuwenswarm.server.live_voice.persistent_task_core import PersistentTaskCore
-from jiuwenswarm.server.live_voice.project_code_executor import (
+from jiuwenswarm.server.runtime.formal_tasks.persistent_task_core import PersistentTaskCore
+from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
     DirectProjectCodeExecutorAdapter,
     FORMAL_PROJECT_EXECUTOR_ID,
 )
-from jiuwenswarm.server.live_voice.production_task_classifier import (
+from jiuwenswarm.server.runtime.formal_tasks.production_task_classifier import (
     ProductionTaskIntentClassifier,
 )
-from jiuwenswarm.server.live_voice.task_semantics import TaskSemanticResolver, TaskSemanticContext
+from jiuwenswarm.server.runtime.formal_tasks.task_semantics import TaskSemanticResolver, TaskSemanticContext
 from tests.unit_tests.live_voice.test_task_semantics import _Model, _Catalog, _output
 from tests.unit_tests.live_voice.test_production_multi_task_resolver import _fact
-from jiuwenswarm.server.live_voice.production_task_intent import (
+from jiuwenswarm.server.runtime.formal_tasks.production_task_intent import (
     ProductionConfirmationBinding,
     ProductionIntentOrigin,
     ProductionTaskPolicyOutcome,
@@ -73,8 +73,8 @@ from jiuwenswarm.server.live_voice.production_task_intent import (
     TaskAuthorityRead,
     build_production_origin_binding,
 )
-from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
-from jiuwenswarm.server.live_voice.voice_task_policy import (
+from jiuwenswarm.server.runtime.formal_tasks.task_store import SqliteTaskStore
+from jiuwenswarm.server.runtime.formal_tasks.voice_task_policy import (
     FormalTaskPolicyAdapter,
     FormalTaskPolicyInput,
 )

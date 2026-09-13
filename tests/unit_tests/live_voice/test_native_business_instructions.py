@@ -5,8 +5,8 @@ import re
 
 import pytest
 
-from jiuwenswarm.server.live_voice import native_business_instructions as prompts
-from jiuwenswarm.server.live_voice.native_business_tools import native_business_tools
+import jiuwenswarm.channels.live_voice.native_business_instructions as prompts
+from jiuwenswarm.channels.live_voice.native_business_tools import native_business_tools
 from tests.unit_tests.live_voice import test_openai_realtime_native_engine as f
 from tests.unit_tests.live_voice.test_native_acceptance_fast_path import (
     canonical_native_receipt, ready_work_receipt_engine, work_receipt,

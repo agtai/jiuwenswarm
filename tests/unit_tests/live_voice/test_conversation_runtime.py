@@ -16,7 +16,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     TerminalOutcome,
     TurnCommit,
 )
-from jiuwenswarm.server.live_voice.conversation_runtime import (
+from jiuwenswarm.channels.live_voice.conversation_runtime import (
     CancelState,
     ConversationRuntime,
     ConversationRuntimeViolation,

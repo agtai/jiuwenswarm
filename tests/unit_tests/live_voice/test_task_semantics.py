@@ -19,10 +19,10 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     TurnCommit,
     canonical_json_bytes,
 )
-from jiuwenswarm.server.live_voice.formal_task_models import FormalTaskViolation
-from jiuwenswarm.server.live_voice.p3_model_resolution import ResolvedP3Model
-from jiuwenswarm.server.live_voice.production_task_intent import TaskAuthorityRead
-from jiuwenswarm.server.live_voice.task_semantics import (
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import FormalTaskViolation
+from jiuwenswarm.server.runtime.agent_adapter.p3_model_resolution import ResolvedP3Model
+from jiuwenswarm.server.runtime.formal_tasks.production_task_intent import TaskAuthorityRead
+from jiuwenswarm.server.runtime.formal_tasks.task_semantics import (
     TaskSemanticContext,
     TaskSemanticDecision,
     TaskSemanticResolver,
@@ -382,7 +382,7 @@ async def test_no_fallback_from_empty_malformed_or_tool_model_output(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("first_output", ["", "not JSON"])
 async def test_final_retry_shares_one_overall_deadline(monkeypatch, first_output):
-    from jiuwenswarm.server.live_voice import task_semantics
+    import jiuwenswarm.server.runtime.formal_tasks.task_semantics as task_semantics
 
     # Capture the real timeout context: both Provider calls must be children of
     # this single deadline, not independent full-length retry budgets.
@@ -821,7 +821,7 @@ async def test_semantic_confirmation_cannot_change_bound_arguments():
 
 @pytest.mark.asyncio
 async def test_semantic_provider_timeout_has_no_fallback(monkeypatch):
-    from jiuwenswarm.server.live_voice import task_semantics
+    import jiuwenswarm.server.runtime.formal_tasks.task_semantics as task_semantics
 
     # Expire the existing deadline once the Provider is entered. A 20 ms wall
     # deadline can expire during thread startup on Windows before any invoke.

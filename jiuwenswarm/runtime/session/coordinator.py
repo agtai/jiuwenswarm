@@ -66,6 +66,8 @@ class RuntimeSessionCoordinator:
         session_id: str,
         channel_id: str,
         persistence_policy: SessionPersistencePolicy = SessionPersistencePolicy.PERSISTENT,
+        *,
+        allow_reopen: bool = True,
     ) -> RuntimeSessionSnapshot:
         normalized = str(session_id).strip()
         if not normalized:
@@ -74,6 +76,9 @@ class RuntimeSessionCoordinator:
             if not self._accepting:
                 raise RuntimeError("session coordinator is closed")
             current = self._sessions.get(normalized)
+            if (not allow_reopen and current is not None
+                    and current.state is RuntimeSessionState.CLOSED):
+                raise RuntimeError("session registration cannot reopen a closed generation")
             if current is None or current.state is RuntimeSessionState.CLOSED:
                 generation = self._generations.get(normalized, 0) + 1
                 self._generations[normalized] = generation

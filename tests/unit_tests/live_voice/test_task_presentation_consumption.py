@@ -17,7 +17,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ResultEnvelope,
     ScopeRef,
 )
-from jiuwenswarm.server.live_voice.formal_task_models import (
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
     PersistentTaskEvent,
     TaskAuthorizationGrant,
     TaskResultArtifact,
@@ -25,10 +25,10 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     TaskUnreadPage,
     TerminalOutcome,
 )
-from jiuwenswarm.server.live_voice.agent_conversation_runtime import (
+from jiuwenswarm.channels.live_voice.agent_conversation_runtime import (
     PresentationAckResult,
 )
-from jiuwenswarm.server.live_voice.presentation_ledger import (
+from jiuwenswarm.server.runtime.presentation.presentation_ledger import (
     PresentationAck,
     PresentationSurface,
     TaskPresentationConsumptionOwner,
@@ -36,8 +36,8 @@ from jiuwenswarm.server.live_voice.presentation_ledger import (
     TaskPresentationViolation,
     TextPresentationAdoptionAck,
 )
-from jiuwenswarm.server.live_voice.persistent_task_core import PersistentTaskCore
-from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
+from jiuwenswarm.server.runtime.formal_tasks.persistent_task_core import PersistentTaskCore
+from jiuwenswarm.server.runtime.formal_tasks.task_store import SqliteTaskStore
 from tests.unit_tests.live_voice.test_persistent_task_core import (
     NOW,
     _Executor,
@@ -156,7 +156,7 @@ def _page(
 def test_cancelled_notification_is_text_only_and_does_not_block_voice_retry(
     presentation_class, expected_seq,
 ) -> None:
-    from jiuwenswarm.server.live_voice.presentation_ledger import next_task_presentation_event
+    from jiuwenswarm.server.runtime.presentation.presentation_ledger import next_task_presentation_event
 
     page = _page(
         _event(0, event_type="task.terminal", state="terminal", outcome="cancelled"),

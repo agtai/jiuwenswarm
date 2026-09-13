@@ -9,7 +9,7 @@ from collections.abc import Mapping
 
 import pytest
 
-from jiuwenswarm.server.live_voice.openai_realtime_session import (
+from jiuwenswarm.channels.live_voice.openai_realtime_session import (
     MAX_REALTIME_WIRE_MESSAGE_BYTES,
     OpenAIRealtimeSession,
     OpenAIRealtimeSessionConfig,
@@ -134,7 +134,7 @@ def realtime_config(**changes: object) -> OpenAIRealtimeSessionConfig:
 @pytest.mark.asyncio
 async def test_default_socket_enables_nodelay_when_resolver_reports_protocol_zero(monkeypatch):
     import websockets
-    from jiuwenswarm.server.live_voice.openai_realtime_session import default_realtime_socket_factory
+    from jiuwenswarm.channels.live_voice.openai_realtime_session import default_realtime_socket_factory
 
     # Windows getaddrinfo can return SOCK_STREAM/proto=0. CPython 3.11's
     # implicit TCP_NODELAY setup skips that socket despite it being TCP.
@@ -152,7 +152,7 @@ async def test_default_socket_enables_nodelay_when_resolver_reports_protocol_zer
 
 @pytest.mark.asyncio
 async def test_negotiated_diagnostic_uses_only_confirmed_public_settings(monkeypatch):
-    import jiuwenswarm.server.live_voice.openai_realtime_session as module
+    import jiuwenswarm.channels.live_voice.openai_realtime_session as module
     captured = []
     monkeypatch.setattr(module, "profile_snapshot_event", lambda event, origin, **fields: captured.append(fields))
     created, updated = negotiated_events()
@@ -183,7 +183,7 @@ async def test_negotiated_diagnostic_uses_only_confirmed_public_settings(monkeyp
 
 @pytest.mark.asyncio
 async def test_absent_negotiated_settings_are_not_invented(monkeypatch):
-    import jiuwenswarm.server.live_voice.openai_realtime_session as module
+    import jiuwenswarm.channels.live_voice.openai_realtime_session as module
     captured = []
     monkeypatch.setattr(module, "profile_snapshot_event", lambda event, origin, **fields: captured.append(fields))
     socket = ScriptedRealtimeSocket(negotiated_events())
@@ -204,7 +204,7 @@ def session_traceback_with_locals(exc: BaseException) -> str:
         provider_traceback is not None
         and not provider_traceback.tb_frame.f_code.co_filename.replace(
             "\\", "/"
-        ).endswith("/jiuwenswarm/server/live_voice/openai_realtime_session.py")
+        ).endswith("/jiuwenswarm/channels/live_voice/openai_realtime_session.py")
     ):
         provider_traceback = provider_traceback.tb_next
     return "".join(
@@ -684,7 +684,7 @@ def test_config_and_official_url_are_closed_and_secret_safe() -> None:
 
 @pytest.mark.asyncio
 async def test_server_vad_diagnostic_reports_returned_silence_not_requested_value(monkeypatch):
-    import jiuwenswarm.server.live_voice.openai_realtime_session as module
+    import jiuwenswarm.channels.live_voice.openai_realtime_session as module
     captured = []
     monkeypatch.setattr(module, "profile_snapshot_event", lambda event, origin, **fields: captured.append(fields))
     created, updated = negotiated_events()

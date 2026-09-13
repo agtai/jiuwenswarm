@@ -3,8 +3,8 @@ import json
 
 import pytest
 
-from jiuwenswarm.server.live_voice import native_continuation_preparation as preparation
-from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
+import jiuwenswarm.channels.live_voice.native_continuation_preparation as preparation
+from jiuwenswarm.channels.live_voice.openai_realtime_native_engine import (
     NativeEngineEvent, NativePresentationCursor, NativeProviderState, OpenAIRealtimeNativeInteractionError,
 )
 from tests.unit_tests.live_voice.test_openai_realtime_native_engine import (
@@ -464,7 +464,7 @@ async def test_normal_speech_interrupt_retires_prepared_audio_without_request_fa
 
 @pytest.mark.asyncio
 async def test_projected_sibling_receipts_keep_exact_replay_and_one_fresh_complete_context():
-    from jiuwenswarm.server.live_voice.native_business_observation import canonical_native_receipt
+    from jiuwenswarm.common.schema.native_business_observation import canonical_native_receipt
     from tests.unit_tests.live_voice.test_native_business_observation import receipt
     fresh = {"context": business_context(), "work_events": []}
     async def refresh():
@@ -510,7 +510,7 @@ async def test_projected_sibling_receipts_keep_exact_replay_and_one_fresh_comple
 @pytest.mark.asyncio
 @pytest.mark.parametrize("observation", ["equivalent", "newer", "refresh_newer", "interrupted"])
 async def test_receipt_refresh_observation_preserves_one_current_successor(observation):
-    from jiuwenswarm.server.live_voice.native_business_observation import canonical_native_receipt
+    from jiuwenswarm.common.schema.native_business_observation import canonical_native_receipt
     entered, release = asyncio.Event(), asyncio.Event()
     latest = {"context": business_context(), "work_events": []}
     refresh_calls = []
@@ -941,7 +941,7 @@ async def test_close_during_promotion_refresh_cannot_revive_and_owns_bounded_sch
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fault", ["exception", "timeout"])
 async def test_scheduler_fault_wakes_waiting_single_reader_and_never_publishes(monkeypatch, fault):
-    from jiuwenswarm.server.live_voice import openai_realtime_native_engine as module
+    import jiuwenswarm.channels.live_voice.openai_realtime_native_engine as module
     engine, socket, _ = await preparing_engine()
     entered = asyncio.Event()
     async def refresh():
@@ -989,7 +989,7 @@ async def test_scheduler_fault_wakes_waiting_single_reader_and_never_publishes(m
 ])
 async def test_prepared_named_and_legacy_tools_preserve_receive_time_and_delegate_only_after_admission(
         monkeypatch, name, arguments, operation):
-    from jiuwenswarm.server.live_voice import openai_realtime_native_engine as module
+    import jiuwenswarm.channels.live_voice.openai_realtime_native_engine as module
     observed = []
     monkeypatch.setattr(module, "profile_snapshot_event", lambda event, identities, **fields:
         observed.append((dict(identities), fields, asyncio.get_running_loop().time())))
@@ -1038,7 +1038,7 @@ async def test_prepared_named_and_legacy_tools_preserve_receive_time_and_delegat
 
 @pytest.mark.asyncio
 async def test_first_prepared_audio_profile_uses_receive_time_without_future_runtime_identity(monkeypatch):
-    from jiuwenswarm.server.live_voice import openai_realtime_native_engine as module
+    import jiuwenswarm.channels.live_voice.openai_realtime_native_engine as module
     observed = []
     monkeypatch.setattr(module, "profile_snapshot_event", lambda event, identities, **fields:
         observed.append((dict(identities), fields, asyncio.get_running_loop().time())))
@@ -1109,7 +1109,7 @@ async def test_refresh_before_work_creation_cannot_send_facts_from_retired_sourc
 
 
 def test_discarded_preparation_retains_only_bounded_cleanup_identities():
-    from jiuwenswarm.server.live_voice.openai_realtime_session import OpenAIRealtimeEvent
+    from jiuwenswarm.channels.live_voice.openai_realtime_session import OpenAIRealtimeEvent
     output = preparation.PreparedProviderOutput("p2")
     output.discard()
     for index in range(65):
@@ -1669,7 +1669,7 @@ async def test_public_cursor_control_send_cannot_continue_or_revive_after_close_
             await asyncio.gather(sender, return_exceptions=True)
         await engine.close()
 def test_rejected_output_diagnostic_shape_never_contains_payload_or_arbitrary_labels():
-    from jiuwenswarm.server.live_voice.native_continuation_preparation import prepared_failure_shape
+    from jiuwenswarm.channels.live_voice.native_continuation_preparation import prepared_failure_shape
     facts = prepared_failure_shape("response.content_part.added", {
         "item": {"type": "message", "phase": "commentary", "PRIVATE_KEY": "PRIVATE_TEXT"},
         "part": {"type": "audio", "transcript": "PRIVATE_TRANSCRIPT", "PRIVATE_KEY": "PRIVATE_AUDIO"}})

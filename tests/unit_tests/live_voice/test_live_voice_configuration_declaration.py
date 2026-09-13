@@ -6,7 +6,7 @@ from dataclasses import FrozenInstanceError, fields, replace
 
 import pytest
 
-from jiuwenswarm.server.live_voice.live_voice_configuration_declaration import (
+from jiuwenswarm.common.schema.live_voice_configuration_declaration import (
     LIVE_VOICE_CONFIGURATION_CONTRACT_VERSION,
     AuthenticationMode,
     CapabilityConfigurationConflict,

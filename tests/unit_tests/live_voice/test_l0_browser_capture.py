@@ -36,7 +36,7 @@ from scripts.live_voice.l0_browser_capture import (
     _validate_temperature_capture_policy,
     _warmup_case,
 )
-from jiuwenswarm.server.live_voice.latency_measurement import (
+from jiuwenswarm.channels.live_voice.latency_measurement import (
     L0_RUN_LABELS_VERSION,
     load_l0_corpus_manifest,
 )
@@ -703,7 +703,7 @@ def test_launcher_binds_l0_to_exact_environment_agent_config_and_project_revisio
     assert "$L0Enabled -and $projectStatus.Count -gt 0" in source
     assert "Join-Path $l0LogsRoot $L0MeasurementDirectory" in source
     assert "仓库内的 L0 证据目录必须位于已忽略的 logs 目录" in source
-    assert "browser_page_origin = \"http://localhost:$FrontendPort\"" in source
+    assert "browser_page_origin = \"http://127.0.0.1:$FrontendPort\"" in source
     assert "Get-ListeningOwners -Ports @($RemoteDebuggingPort)" in source
     assert "CommandLineToArgvW" in source
     assert "LocalAddress   = [string]$listener.LocalAddress" in source

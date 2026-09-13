@@ -10,7 +10,7 @@ import sys
 
 import pytest
 
-from jiuwenswarm.server.live_voice import batch_speech
+import jiuwenswarm.channels.live_voice.batch_speech as batch_speech
 from scripts.live_voice import formal_web_runtime_probe
 from scripts.live_voice.w2_rehearsal import w2_wav_speech_preflight
 

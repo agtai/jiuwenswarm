@@ -4,11 +4,11 @@ from dataclasses import replace
 
 import pytest
 
-from jiuwenswarm.server.live_voice.agent_conversation_runtime import (
+from jiuwenswarm.channels.live_voice.agent_conversation_runtime import (
     AgentConversationNotification, AgentConversationNotificationWake,
     _BoundedNotificationBuffer, _NotificationConsumerDetached,
 )
-from jiuwenswarm.server.live_voice.native_interaction_carrier import NATIVE_NOTIFICATION_WAKE_VERSION
+from jiuwenswarm.channels.live_voice.native_interaction_carrier import NATIVE_NOTIFICATION_WAKE_VERSION
 from tests.unit_tests.live_voice.test_notification_authorization_concurrency import setup_registry, effects
 from tests.unit_tests.live_voice import test_product_composition_registry as f
 

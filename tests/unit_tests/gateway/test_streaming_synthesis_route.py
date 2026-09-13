@@ -33,7 +33,7 @@ from jiuwenswarm.gateway.live_voice.streaming_synthesis_route import (
     StreamingSynthesisRouteOwner,
     StreamingSynthesisRouteViolation,
 )
-from jiuwenswarm.server.live_voice.openai_streaming_speech import (
+from jiuwenswarm.channels.live_voice.openai_streaming_speech import (
     OpenAIStreamingSpeechConfig,
     OpenAIStreamingSpeechProvider,
     SpeechDegradationFact,
@@ -41,12 +41,12 @@ from jiuwenswarm.server.live_voice.openai_streaming_speech import (
     SpeechRouteTier,
     StreamingSpeechSelection,
 )
-from jiuwenswarm.server.live_voice.speech_ports import (
+from jiuwenswarm.channels.live_voice.speech_ports import (
     ProviderRef,
     SpeechMode,
     SynthesisEventKind,
 )
-from jiuwenswarm.server.live_voice.streaming_speech import (
+from jiuwenswarm.channels.live_voice.streaming_speech import (
     CapabilityProvenance,
     NativeStreamingSpeechProvider,
     ProviderTransport,

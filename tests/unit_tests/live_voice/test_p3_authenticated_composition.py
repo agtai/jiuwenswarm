@@ -32,7 +32,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 )
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
-from jiuwenswarm.server.live_voice.formal_task_models import (
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
     AdmissionDisposition,
     AdmissionPolicy,
     ExecutorDeliveryResult,
@@ -54,15 +54,15 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     TaskAdjustmentState,
     utc_now,
 )
-from jiuwenswarm.server.live_voice.executor_capabilities import (
+from jiuwenswarm.server.runtime.formal_tasks.executor_capabilities import (
     ExecutorCapabilityProfile,
 )
-from jiuwenswarm.server.live_voice.live_voice_configuration_declaration import (
+from jiuwenswarm.common.schema.live_voice_configuration_declaration import (
     AuthenticationMode,
     DurabilityLevel,
     LiveVoiceCapability,
 )
-from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
+from jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition import (
     AgentManagerProjectBindingResolver,
     AuthenticatedPrincipal,
     NativeP3ActivationAuthority,
@@ -81,31 +81,31 @@ from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
     _resolve_database_path,
     create_p3_composition_from_environment,
 )
-from jiuwenswarm.server.live_voice.p3_production_intent_composition import (
+from jiuwenswarm.server.runtime.formal_tasks.p3_production_intent_composition import (
     CallLocalProductionConfirmationConsumer,
     CallLocalProductionOriginAuthority,
     StoreProductionTaskAuthorityReader,
     production_context_fingerprint,
     production_model_binding_fingerprint,
 )
-from jiuwenswarm.server.live_voice.presentation_ledger import (
+from jiuwenswarm.server.runtime.presentation.presentation_ledger import (
     TaskPresentationDelivery,
 )
-from jiuwenswarm.server.live_voice.product_composition_registry import (
+from jiuwenswarm.channels.live_voice.product_composition_registry import (
     AgentServerProductCompositionRegistry,
     ProductCompositionSettings,
     _project_production_status_authority,
 )
-from jiuwenswarm.server.live_voice.product_authority import (
+from jiuwenswarm.server.runtime.authority.product_authority import (
     AuthorityDecisionStatus,
     AuthorityRouteContext,
     ProductAuthorityRequest,
     ProductAuthorityService,
 )
-from jiuwenswarm.server.live_voice.product_observability_runtime import (
+from jiuwenswarm.channels.live_voice.product_observability_runtime import (
     BoundedInMemoryOtelBackend,
 )
-from jiuwenswarm.server.live_voice.p3_confirmation import (
+from jiuwenswarm.server.runtime.formal_tasks.p3_confirmation import (
     BoundedP3ConfirmationOwner,
     P3ConfirmationBinding,
     P3ConfirmationOwnerContext,
@@ -114,36 +114,36 @@ from jiuwenswarm.server.live_voice.p3_confirmation import (
     TrustedP3ConfirmationIssue,
     p3_confirmation_intent_fingerprint,
 )
-from jiuwenswarm.server.live_voice.p3_product_confirmation import (
+from jiuwenswarm.server.runtime.formal_tasks.p3_product_confirmation import (
     ProductP3ConfirmationForwarder,
 )
-from jiuwenswarm.server.live_voice.p3_model_resolution import (
+from jiuwenswarm.server.runtime.agent_adapter.p3_model_resolution import (
     ResolvedP3Model,
     ServerModelCatalogResolver,
 )
-from jiuwenswarm.server.live_voice.persistent_task_core import PersistentTaskCore
-from jiuwenswarm.server.live_voice.project_code_executor import (
+from jiuwenswarm.server.runtime.formal_tasks.persistent_task_core import PersistentTaskCore
+from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
     DirectProjectCodeExecutorAdapter,
     DirectProjectManagedBaselineReader,
     FORMAL_PROJECT_EXECUTOR_ID,
     ProjectExecutionBinding,
 )
-from jiuwenswarm.server.live_voice.production_task_classifier import (
+from jiuwenswarm.server.runtime.formal_tasks.production_task_classifier import (
     ProductionTaskIntentClassifier,
 )
-from jiuwenswarm.server.live_voice.production_task_intent import (
+from jiuwenswarm.server.runtime.formal_tasks.production_task_intent import (
     BoundedClarificationOwner,
     ProductionIntentOrigin,
     ProductionTaskIntentRequest,
     build_production_origin_binding,
 )
-from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
-from jiuwenswarm.server.live_voice.task_progress_return import (
+from jiuwenswarm.server.runtime.formal_tasks.task_store import SqliteTaskStore
+from jiuwenswarm.server.runtime.presentation.task_progress_return import (
     TaskProgressOriginBinding,
     TaskProgressOriginKind,
 )
-from jiuwenswarm.server.live_voice.voice_task_bridge import VoiceTaskBridge
-from jiuwenswarm.server.live_voice.voice_task_policy import FormalTaskPolicyAdapter
+from jiuwenswarm.server.runtime.formal_tasks.voice_task_bridge import VoiceTaskBridge
+from jiuwenswarm.server.runtime.formal_tasks.voice_task_policy import FormalTaskPolicyAdapter
 from tests.support.live_voice.semantic_model import AuthorityCorpusModel
 
 NOW = "2026-08-05T12:00:00Z"
@@ -4894,7 +4894,7 @@ async def test_product_registry_replays_terminal_p3_authority_after_clean_checkp
     tmp_path: Path,
     outcome: TerminalOutcome,
 ) -> None:
-    from jiuwenswarm.server.live_voice.product_composition_registry import (
+    from jiuwenswarm.channels.live_voice.product_composition_registry import (
         AgentServerProductCompositionRegistry,
         ProductCompositionSettings,
     )
@@ -5005,7 +5005,7 @@ async def test_product_registry_uses_real_authority_and_agent_runtime_for_p2(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from jiuwenswarm.server.live_voice.product_composition_registry import (
+    from jiuwenswarm.channels.live_voice.product_composition_registry import (
         AgentServerProductCompositionRegistry,
         ProductCompositionSettings,
     )
@@ -6075,7 +6075,7 @@ def test_factory_accepts_reconciliation_interval_boundaries(
     _configure_enabled_factory(monkeypatch, interval)
     database = tmp_path / f"factory-{interval}.sqlite3"
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.p3_authenticated_composition._resolve_database_path",
+        "jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition._resolve_database_path",
         lambda _configured: database,
     )
     composition = create_p3_composition_from_environment(
@@ -6094,7 +6094,7 @@ def test_factory_passes_only_the_explicit_direct_stream_observer(
     _configure_enabled_factory(monkeypatch, 3600)
     database = tmp_path / "factory-observer.sqlite3"
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.p3_authenticated_composition._resolve_database_path",
+        "jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition._resolve_database_path",
         lambda _configured: database,
     )
     observed: list[object] = []
@@ -6125,7 +6125,7 @@ def test_product_factory_selects_exact_same_store_backed_d2_candidate(
     _configure_enabled_factory(monkeypatch, 3600)
     database = tmp_path / "factory-d2.sqlite3"
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.p3_authenticated_composition._resolve_database_path",
+        "jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition._resolve_database_path",
         lambda _configured: database,
     )
 
@@ -6179,7 +6179,7 @@ def test_enabled_factory_fails_closed_without_one_available_exact_profile(
         raise AssertionError("invalid profile reached database resolution")
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.p3_authenticated_composition._resolve_database_path",
+        "jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition._resolve_database_path",
         forbidden_database_resolver,
     )
 
@@ -6205,7 +6205,7 @@ def test_factory_consumes_explicit_direct_d0_profile_without_d2_claim(
     )
     database = tmp_path / "factory-d0.sqlite3"
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.p3_authenticated_composition._resolve_database_path",
+        "jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition._resolve_database_path",
         lambda _configured: database,
     )
 
@@ -6233,7 +6233,7 @@ def test_factory_static_profile_mismatch_precedes_adapter_store_and_database(
     _configure_enabled_factory(monkeypatch, 3600)
     database = tmp_path / "factory-static-mismatch.sqlite3"
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.p3_authenticated_composition._resolve_database_path",
+        "jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition._resolve_database_path",
         lambda _configured: database,
     )
     direct = DirectProjectCodeExecutorAdapter.construction_capability_profiles(
@@ -6270,7 +6270,7 @@ def test_factory_static_profile_mismatch_precedes_adapter_store_and_database(
         forbidden_adapter_init,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.p3_authenticated_composition.SqliteTaskStore",
+        "jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition.SqliteTaskStore",
         ForbiddenStore,
     )
 
@@ -6297,7 +6297,7 @@ def test_factory_construction_failure_aborts_owners_in_reverse_order(
     _configure_enabled_factory(monkeypatch, 3600)
     database = tmp_path / f"factory-{failure_stage}-failure.sqlite3"
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.p3_authenticated_composition._resolve_database_path",
+        "jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition._resolve_database_path",
         lambda _configured: database,
     )
     cleanup_order: list[str] = []
@@ -6332,21 +6332,21 @@ def test_factory_construction_failure_aborts_owners_in_reverse_order(
             raise original_failure
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.p3_authenticated_composition.AgentManagerProjectBindingResolver",
+        "jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition.AgentManagerProjectBindingResolver",
         TrackingResolver,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.p3_authenticated_composition.DirectProjectCodeExecutorAdapter",
+        "jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition.DirectProjectCodeExecutorAdapter",
         TrackingAdapter,
     )
     if failure_stage == "store":
         monkeypatch.setattr(
-            "jiuwenswarm.server.live_voice.p3_authenticated_composition.SqliteTaskStore",
+            "jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition.SqliteTaskStore",
             FailingStore,
         )
     else:
         monkeypatch.setattr(
-            "jiuwenswarm.server.live_voice.p3_authenticated_composition.PersistentTaskCore",
+            "jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition.PersistentTaskCore",
             FailingCore,
         )
 
@@ -6390,7 +6390,7 @@ def test_factory_adapter_initialization_failure_aborts_only_resolver(
     _configure_enabled_factory(monkeypatch, 3600)
     database = tmp_path / "factory-adapter-failure.sqlite3"
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.p3_authenticated_composition._resolve_database_path",
+        "jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition._resolve_database_path",
         lambda _configured: database,
     )
     cleanup_order: list[str] = []
@@ -6410,11 +6410,11 @@ def test_factory_adapter_initialization_failure_aborts_only_resolver(
             raise AssertionError("an unconstructed Adapter cannot be closed")
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.p3_authenticated_composition.AgentManagerProjectBindingResolver",
+        "jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition.AgentManagerProjectBindingResolver",
         TrackingResolver,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.p3_authenticated_composition.DirectProjectCodeExecutorAdapter",
+        "jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition.DirectProjectCodeExecutorAdapter",
         FailingAdapter,
     )
 
@@ -6439,7 +6439,7 @@ def test_factory_cleanup_failure_preserves_primary_error_and_sanitizes_log(
     _configure_enabled_factory(monkeypatch, 3600)
     database = tmp_path / "factory-cleanup-failure.sqlite3"
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.p3_authenticated_composition._resolve_database_path",
+        "jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition._resolve_database_path",
         lambda _configured: database,
     )
     cleanup_order: list[str] = []
@@ -6464,19 +6464,19 @@ def test_factory_cleanup_failure_preserves_primary_error_and_sanitizes_log(
             raise original_failure
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.p3_authenticated_composition.AgentManagerProjectBindingResolver",
+        "jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition.AgentManagerProjectBindingResolver",
         TrackingResolver,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.p3_authenticated_composition.DirectProjectCodeExecutorAdapter",
+        "jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition.DirectProjectCodeExecutorAdapter",
         FailingCleanupAdapter,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.p3_authenticated_composition.PersistentTaskCore",
+        "jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition.PersistentTaskCore",
         FailingCore,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.p3_authenticated_composition.logger.warning",
+        "jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition.logger.warning",
         capture_warning,
     )
 
@@ -6641,7 +6641,7 @@ async def test_product_retry_reuses_persisted_selection_after_profile_drift(
     """Catches retry reselecting from a changed process capability profile."""
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.task_store.utc_now",
+        "jiuwenswarm.server.runtime.formal_tasks.task_store.utc_now",
         lambda: NOW,
     )
     profile = DirectProjectCodeExecutorAdapter.capability_profile()
@@ -6691,7 +6691,7 @@ def test_factory_never_enables_retired_itinerary_fixture(
     )
     database = tmp_path / f"demo-policy-{demo_policy}.sqlite3"
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.p3_authenticated_composition._resolve_database_path",
+        "jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition._resolve_database_path",
         lambda _configured: database,
     )
 
@@ -6734,7 +6734,7 @@ def test_factory_never_enables_retired_demo_adjustment_wait(
     )
     database = tmp_path / f"demo-checkpoint-{demo_policy}-{checkpoint_policy}.sqlite3"
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.p3_authenticated_composition._resolve_database_path",
+        "jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition._resolve_database_path",
         lambda _configured: database,
     )
 
@@ -6764,7 +6764,7 @@ async def test_factory_direct_executor_lifecycle_releases_agent_bindings(
     _configure_enabled_factory(monkeypatch, 3600)
     database = tmp_path / "direct-lifecycle.sqlite3"
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.p3_authenticated_composition._resolve_database_path",
+        "jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition._resolve_database_path",
         lambda _configured: database,
     )
 
@@ -7014,7 +7014,7 @@ async def test_stop_settles_direct_interruption_into_canonical_store(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.task_store.utc_now",
+        "jiuwenswarm.server.runtime.formal_tasks.task_store.utc_now",
         lambda: NOW,
     )
     project = tmp_path / "project"
@@ -7181,7 +7181,7 @@ def test_factory_widens_alpha_principal_to_p2_only_behind_both_product_flags(
         "1" if p2_enabled else "0",
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.p3_authenticated_composition._resolve_database_path",
+        "jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition._resolve_database_path",
         lambda _configured: tmp_path / "product-p2-authority.sqlite3",
     )
     composition = create_p3_composition_from_environment(
@@ -7287,7 +7287,7 @@ def test_database_resolver_rejects_existing_windows_store_junction(
     assert created.returncode == 0
     configured = data_root / "live_voice" / "p3alpha" / "must-not-exist.sqlite3"
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.p3_authenticated_composition."
+        "jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition."
         "get_user_workspace_dir",
         lambda: data_root,
     )

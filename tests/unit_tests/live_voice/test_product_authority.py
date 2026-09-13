@@ -16,27 +16,10 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ContextRef,
     ScopeRef,
 )
-from jiuwenswarm.server.live_voice.batch_speech import SpeechAuthorizationBinding
-from jiuwenswarm.server.live_voice.p3_confirmation import VerifiedP3Confirmation
-from jiuwenswarm.server.live_voice.product_authority import (
-    AuthorityConfirmationBinding,
-    AuthorityConfirmationRequest,
-    AuthorityDecision,
-    AuthorityDecisionReason,
-    AuthorityDecisionStatus,
-    AuthorityResourceBinding,
-    AuthorityRouteContext,
-    AuthorityRoutingClaim,
-    P2AuthorityAdapter,
-    P3AuthorityAdapter,
-    ProductAuthorityInputError,
-    ProductAuthorityRequest,
-    ProductAuthorityService,
-    ProductAuthorityUnavailable,
-    SpeechAuthorityResolverAdapter,
-    TrustedAuthorityCandidate,
-    TrustedAuthorityLookup,
-)
+from jiuwenswarm.channels.live_voice.batch_speech import SpeechAuthorizationBinding
+from jiuwenswarm.server.runtime.formal_tasks.p3_confirmation import VerifiedP3Confirmation
+from jiuwenswarm.channels.live_voice.speech_authority import SpeechAuthorityResolverAdapter
+from jiuwenswarm.server.runtime.authority.product_authority import (AuthorityConfirmationBinding, AuthorityConfirmationRequest, AuthorityDecision, AuthorityDecisionReason, AuthorityDecisionStatus, AuthorityResourceBinding, AuthorityRouteContext, AuthorityRoutingClaim, P2AuthorityAdapter, P3AuthorityAdapter, ProductAuthorityInputError, ProductAuthorityRequest, ProductAuthorityService, ProductAuthorityUnavailable, TrustedAuthorityCandidate, TrustedAuthorityLookup)
 
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)

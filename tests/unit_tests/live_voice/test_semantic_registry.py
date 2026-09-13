@@ -19,21 +19,21 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     TurnCommitLedger,
     ResponseRef,
 )
-from jiuwenswarm.server.live_voice.native_interaction_config import (
+from jiuwenswarm.channels.live_voice.native_interaction_config import (
     InteractionEngineKind,
 )
-from jiuwenswarm.server.live_voice.native_interaction_contract import (
+from jiuwenswarm.common.schema.native_interaction_contract import (
     NativeInteractionBinding,
 )
-from jiuwenswarm.server.live_voice.p3_confirmation import BoundedP3ConfirmationOwner
-from jiuwenswarm.server.live_voice.p3_product_confirmation import (
+from jiuwenswarm.server.runtime.formal_tasks.p3_confirmation import BoundedP3ConfirmationOwner
+from jiuwenswarm.server.runtime.formal_tasks.p3_product_confirmation import (
     ProductP3ConfirmationForwarder,
 )
-from jiuwenswarm.server.live_voice.product_composition_registry import (
+from jiuwenswarm.channels.live_voice.product_composition_registry import (
     AgentServerProductCompositionRegistry,
     ProductCompositionSettings,
 )
-from jiuwenswarm.server.live_voice.project_code_executor import (
+from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
     DirectProjectCodeExecutorAdapter,
 )
 from tests.unit_tests.live_voice.test_p3_authenticated_composition import (
@@ -45,7 +45,7 @@ from tests.unit_tests.live_voice.test_p3_authenticated_composition import (
     TOKEN,
 )
 from tests.unit_tests.live_voice.test_product_composition_registry import (
-    _AgentManager,
+    _AgentManager, _shared_test_runtime,
     _native_propose_params,
     _native_turn_proposal,
     _native_speak_proposal,
@@ -125,9 +125,12 @@ async def semantic_runtime(tmp_path, monkeypatch, request):
             interaction_engine=InteractionEngineKind(
                 getattr(request, "param", "cascade")
             ),
+            # This suite exercises the supported legacy semantic delegate contract.
+            native_business_enabled=False,
         ),
         p3_composition=harness.composition,
         agent_manager=manager,
+        runtime=_shared_test_runtime(manager),
         push_text_event=push,
         p3_confirmation_owner=owner,
         p3_confirmation_forwarder=forwarder,
@@ -164,6 +167,7 @@ async def semantic_runtime(tmp_path, monkeypatch, request):
         yield state
     finally:
         await registry.stop()
+        await registry._runtime.close()
         await harness.composition.stop()
 
 
@@ -235,7 +239,7 @@ async def test_explicit_local_successor_preserves_predecessor_and_creates_once(s
         "name": "Equipment report", "instruction": "Save the original equipment report.",
     }))["task_id"]
     s.harness.executor.dispatch_outcome = TerminalOutcome.COMPLETED
-    from jiuwenswarm.server.live_voice.formal_task_models import TaskResultArtifact
+    from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import TaskResultArtifact
     dispatch = s.harness.executor.dispatch
     async def completed_dispatch(item):
         delivery = await dispatch(item)
@@ -392,7 +396,7 @@ async def test_local_delegation_requires_current_supported_executor(semantic_run
     s = semantic_runtime
     s.program = lambda data: {**model_output(data, operation="task.create", arguments={
         "name": "Report", "instruction": "Save report.md."}), "requested_work": "local_artifacts"}
-    from jiuwenswarm.server.live_voice.formal_task_models import FormalTaskViolation
+    from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import FormalTaskViolation
     from jiuwenswarm.common.schema.live_voice_contract_v2 import ErrorCode
     def deny(_resolution):
         raise FormalTaskViolation("LOCAL_ARTIFACT_DELEGATION_CAPABILITY_REQUIRED", "not supported", ErrorCode.PERMISSION_DENIED)
@@ -762,8 +766,8 @@ async def test_confirmed_core_outcome_keeps_unknown_distinct_from_rejection(
     semantic_runtime, monkeypatch, cause
 ):
     from jiuwenswarm.common.schema.live_voice_contract_v2 import ErrorCode
-    from jiuwenswarm.server.live_voice.formal_task_models import FormalTaskViolation
-    from jiuwenswarm.server.live_voice.persistent_task_core import _failure
+    from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import FormalTaskViolation
+    from jiuwenswarm.server.runtime.formal_tasks.persistent_task_core import _failure
 
     s = semantic_runtime
     params = {
@@ -926,7 +930,7 @@ async def test_task_answers_use_current_facts_and_complete_results_without_tools
     }))["task_id"]
     text = "材料。" * 10_000 + "TAIL_FACT: replacement is unnecessary."
     if query == "complete-result" or query.endswith("-advanced"):
-        from jiuwenswarm.server.live_voice.formal_task_models import TerminalOutcome, TaskResultArtifact
+        from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import TerminalOutcome, TaskResultArtifact
         s.harness.executor.dispatch_outcome = TerminalOutcome.COMPLETED
         dispatch = s.harness.executor.dispatch
 
@@ -1048,7 +1052,7 @@ async def test_direct_adjustment_and_queries_give_one_toolless_agent_current_app
         return receipt['task_control_snapshot']
     if settled_before_receipt != "pending":
         if settled_before_receipt == "rejected":
-            from jiuwenswarm.server.live_voice.formal_task_models import TaskAdjustmentState
+            from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import TaskAdjustmentState
             adjust = s.harness.executor.adjust
             async def reject(item):
                 result = await adjust(item)
@@ -1099,8 +1103,8 @@ async def test_direct_adjustment_and_queries_give_one_toolless_agent_current_app
 @pytest.mark.parametrize("cause", ["CONFLICT", "TIMEOUT", "INTERNAL"])
 async def test_failed_adjustment_presentation_distinguishes_rejection_from_unknown(semantic_runtime, monkeypatch, cause):
     from jiuwenswarm.common.schema.live_voice_contract_v2 import ErrorCode
-    from jiuwenswarm.server.live_voice.formal_task_models import FormalTaskViolation
-    from jiuwenswarm.server.live_voice.persistent_task_core import _failure
+    from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import FormalTaskViolation
+    from jiuwenswarm.server.runtime.formal_tasks.persistent_task_core import _failure
     s = semantic_runtime
     task_id = (await control_with_confirmation(s, "failure-create", "task.create", {
         "name": "设备核查", "instruction": "核查设备，不采购。",
@@ -1218,7 +1222,7 @@ def typed_final(stem, text):
 async def test_unified_task_measurement_keeps_exact_receipt_and_admission_clock(
     semantic_runtime, monkeypatch, operation, measurement_available
 ):
-    from jiuwenswarm.server.live_voice import product_composition_registry as module
+    import jiuwenswarm.channels.live_voice.product_composition_registry as module
 
     s = semantic_runtime
     task_id = (
@@ -1781,7 +1785,7 @@ async def native_next_source(s, binding, capability, ordinal):
         action=replace(
             speak.action,
             action_id=f"native-action-speak-{ordinal}",
-            payload=(("provider_response_id", f"provider-response-{ordinal}"),),
+            payload=(("provider_response_id", f"provider-response-{ordinal}"), ("turn_id", f"native-turn-{ordinal}")),
         ),
     )
     for label, proposal in (
@@ -1959,7 +1963,7 @@ async def test_native_exact_task_reads_use_authoritative_receipt_without_busines
         )
     )["task_id"]
     if state == "terminal":
-        from jiuwenswarm.server.live_voice.formal_task_models import (
+        from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
             TerminalOutcome,
             TaskResultArtifact,
         )
@@ -2281,7 +2285,7 @@ async def test_native_gateway_to_registry_waits_for_semantics_and_replays_exactl
     from jiuwenswarm.gateway.live_voice.native_interaction_runtime_client import (
         GatewayNativeInteractionRuntimeClient,
     )
-    from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
+    from jiuwenswarm.channels.live_voice.openai_realtime_native_engine import (
         NativeEngineEvent,
     )
 

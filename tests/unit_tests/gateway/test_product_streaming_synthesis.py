@@ -38,20 +38,20 @@ from jiuwenswarm.gateway.live_voice.dedicated_media_route import (
 from jiuwenswarm.gateway.live_voice.streaming_synthesis_route import (
     StreamingSynthesisRouteOwner,
 )
-from jiuwenswarm.server.live_voice.batch_speech import SpeechRpcContext
-from jiuwenswarm.server.live_voice.openai_streaming_speech import (
+from jiuwenswarm.channels.live_voice.batch_speech import SpeechRpcContext
+from jiuwenswarm.channels.live_voice.openai_streaming_speech import (
     SpeechRouteTier,
     StreamingSpeechSelection,
 )
-from jiuwenswarm.server.live_voice.observability import (
+from jiuwenswarm.common.telemetry.observability import (
     LiveVoiceObservabilityCollector,
 )
-from jiuwenswarm.server.live_voice.speech_ports import (
+from jiuwenswarm.channels.live_voice.speech_ports import (
     ProviderRef,
     SpeechMode,
     SynthesisEventKind,
 )
-from jiuwenswarm.server.live_voice.streaming_speech import (
+from jiuwenswarm.channels.live_voice.streaming_speech import (
     CapabilityProvenance,
     ProviderTransport,
     RecognitionProviderSupport,

@@ -8,22 +8,22 @@ from pathlib import Path
 
 import pytest
 
-from jiuwenswarm.server.live_voice.formal_task_models import FormalTaskViolation
-from jiuwenswarm.server.live_voice.native_agent_model import (
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import FormalTaskViolation
+from jiuwenswarm.server.runtime.agent_adapter.native_agent_model import (
     AGENT_MODEL_SELECTION_VERSION,
     NativeAgentModelSelection,
     parse_native_agent_model_confirmation,
     parse_native_agent_model_selection,
     resolve_native_agent_model,
 )
-from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
+from jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition import (
     P3_PRODUCT_AUTHORITY_OPERATIONS,
 )
-from jiuwenswarm.server.live_voice.p3_model_resolution import ServerModelCatalogResolver
-from jiuwenswarm.server.live_voice.p3_production_intent_composition import (
+from jiuwenswarm.server.runtime.agent_adapter.p3_model_resolution import ServerModelCatalogResolver
+from jiuwenswarm.server.runtime.formal_tasks.p3_production_intent_composition import (
     production_model_binding_fingerprint,
 )
-from jiuwenswarm.server.live_voice.project_code_executor import (
+from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
     DirectProjectCodeExecutorAdapter,
 )
 from tests.unit_tests.live_voice.test_p3_authenticated_composition import (

@@ -19,7 +19,7 @@ from tests.unit_tests.live_voice.speech_authority_support import (
 )
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import ResponseRef
-from jiuwenswarm.server.live_voice.batch_speech import (
+from jiuwenswarm.channels.live_voice.batch_speech import (
     FORMAL_BATCH_SPEECH_FLAG,
     SPEECH_API_BASE_ENV,
     SPEECH_API_KEY_ENV,
@@ -29,7 +29,7 @@ from jiuwenswarm.server.live_voice.batch_speech import (
     SPEECH_TTS_VOICE_ENV,
     create_environment_batch_speech_provider,
 )
-from jiuwenswarm.server.live_voice.openai_streaming_speech import (
+from jiuwenswarm.channels.live_voice.openai_streaming_speech import (
     CapabilityProvenance,
     DEFAULT_STT_MODEL,
     DEFAULT_TTS_MODEL,
@@ -54,12 +54,12 @@ from jiuwenswarm.server.live_voice.openai_streaming_speech import (
     _reason_for_exception,
     select_environment_streaming_speech,
 )
-from jiuwenswarm.server.live_voice.openai_realtime_session import RealtimeTransport
-from jiuwenswarm.server.live_voice.speech_ports import (
+from jiuwenswarm.channels.live_voice.openai_realtime_session import RealtimeTransport
+from jiuwenswarm.channels.live_voice.speech_ports import (
     RecognitionEventKind,
     SynthesisEventKind,
 )
-from jiuwenswarm.server.live_voice.streaming_speech import (
+from jiuwenswarm.channels.live_voice.streaming_speech import (
     CaptureRef,
     RecognitionCommitDisposition,
     RecognitionAudioFrame,
@@ -338,7 +338,7 @@ def adapter_traceback_with_locals(exc: BaseException) -> str:
         provider_traceback is not None
         and not provider_traceback.tb_frame.f_code.co_filename.replace(
             "\\", "/"
-        ).endswith("/jiuwenswarm/server/live_voice/openai_streaming_speech.py")
+        ).endswith("/jiuwenswarm/channels/live_voice/openai_streaming_speech.py")
     ):
         provider_traceback = provider_traceback.tb_next
     return "".join(
@@ -1661,7 +1661,7 @@ async def test_transport_cleanup_owner_shares_timeout_and_failure_truth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.openai_streaming_speech."
+        "jiuwenswarm.channels.live_voice.openai_streaming_speech."
         "TRANSPORT_CLEANUP_ATTEMPT_BUDGET_SECONDS",
         0.01,
     )
@@ -1891,7 +1891,7 @@ async def test_recognition_process_control_cleans_up_and_rethrows() -> None:
 
 
 def _cancelled_recognition_event(ref: RecognitionStreamRef):
-    from jiuwenswarm.server.live_voice.streaming_speech import (
+    from jiuwenswarm.channels.live_voice.streaming_speech import (
         StreamingRecognitionEvent,
     )
 

@@ -7,16 +7,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from jiuwenswarm.server.live_voice.native_business_contract import NativeBusinessAction, NativeBusinessProposal, NATIVE_BUSINESS_CONTRACT_VERSION
-from jiuwenswarm.server.live_voice.native_interaction_contract import NativeInteractionBinding
-from jiuwenswarm.server.live_voice.native_interaction_config import InteractionEngineKind
-from jiuwenswarm.server.live_voice.product_composition_registry import AgentServerProductCompositionRegistry, ProductCompositionSettings
-from jiuwenswarm.server.live_voice.p3_confirmation import BoundedP3ConfirmationOwner
-from jiuwenswarm.server.live_voice.p3_product_confirmation import ProductP3ConfirmationForwarder
+from jiuwenswarm.channels.live_voice.native_business_contract import NativeBusinessAction, NativeBusinessProposal, NATIVE_BUSINESS_CONTRACT_VERSION
+from jiuwenswarm.common.schema.native_interaction_contract import NativeInteractionBinding
+from jiuwenswarm.channels.live_voice.native_interaction_config import InteractionEngineKind
+from jiuwenswarm.channels.live_voice.product_composition_registry import AgentServerProductCompositionRegistry, ProductCompositionSettings
+from jiuwenswarm.server.runtime.formal_tasks.p3_confirmation import BoundedP3ConfirmationOwner
+from jiuwenswarm.server.runtime.formal_tasks.p3_product_confirmation import ProductP3ConfirmationForwarder
 from tests.unit_tests.live_voice.test_native_agent_model import _model_harness, TOKEN
 from tests.unit_tests.live_voice.test_product_composition_registry import (
     _AgentManager, _native_turn_proposal, _native_speak_proposal, _native_propose_params, _native_delegate_proposal,
-    _native_input_transcript_proposal,
+    _native_input_transcript_proposal, _shared_test_runtime,
 )
 from jiuwenswarm.common.schema.live_voice_contract_v2 import ResponseRef
 from jiuwenswarm.common.schema.agent import AgentResponseChunk
@@ -24,7 +24,7 @@ from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.common.e2a.wire_codec import parse_agent_server_wire_unary
 from jiuwenswarm.gateway.live_voice.native_interaction_runtime_client import GatewayNativeInteractionRuntimeClient, NativeRuntimeClientError
-from jiuwenswarm.server.live_voice.openai_realtime_native_engine import NativeEngineEvent
+from jiuwenswarm.channels.live_voice.openai_realtime_native_engine import NativeEngineEvent
 
 
 async def make_registry(tmp_path, monkeypatch, *, input_text="Perform the requested project work."):
@@ -40,9 +40,9 @@ async def make_registry(tmp_path, monkeypatch, *, input_text="Perform the reques
     registry = AgentServerProductCompositionRegistry(
         settings=ProductCompositionSettings(p2_enabled=True, p3_text_enabled=True, p3_mutation_enabled=True,
             interaction_engine=InteractionEngineKind.OPENAI_REALTIME_NATIVE),
-        p3_composition=h.composition, agent_manager=manager, push_text_event=push,
+        p3_composition=h.composition, agent_manager=manager, runtime=_shared_test_runtime(manager), push_text_event=push,
         p3_confirmation_owner=owner, p3_confirmation_forwarder=ProductP3ConfirmationForwarder(owner))
-    monkeypatch.setattr('jiuwenswarm.server.live_voice.native_business_router.load_history_records', lambda sid: [])
+    monkeypatch.setattr('jiuwenswarm.channels.live_voice.native_business_router.load_history_records', lambda sid: [])
     params = {"auth_token": TOKEN, "session_id":"session-1", "correlation_id":"native-model",
         "interaction_id":"interaction-1", "activation_id":"activation-1", "activation_generation":1,
         "interaction_engine":"openai-realtime-native",
@@ -130,6 +130,7 @@ async def test_two_real_tasks_adjust_and_cancel_only_exact_observed_target(tmp_p
         assert env.manager.agent.executions == []
     finally:
         await env.registry.stop()
+        await env.registry._runtime.close()
         await env.harness.composition.stop()
 
 
@@ -154,12 +155,13 @@ async def test_long_work_detail_keeps_complete_tail_and_refreshes_context_separa
         assert json.loads(replay.payload["result"]["canonical_text"]) == detail
     finally:
         await env.registry.stop()
+        await env.registry._runtime.close()
         await env.harness.composition.stop()
 
 
 @pytest.mark.asyncio
 async def test_creation_projection_write_failure_recovers_from_durable_receipt_without_reexecution(tmp_path,monkeypatch):
-    from jiuwenswarm.server.live_voice.native_work_journal import SqliteNativeWorkJournal
+    from jiuwenswarm.server.runtime.work.native_work_journal import SqliteNativeWorkJournal
     env = await make_registry(tmp_path,monkeypatch)
     router = env.registry._native_business
     router.works()
@@ -184,6 +186,7 @@ async def test_creation_projection_write_failure_recovers_from_durable_receipt_w
         assert env.manager.agent.executions == []
     finally:
         await env.registry.stop()
+        await env.registry._runtime.close()
         await env.harness.composition.stop()
 
 
@@ -218,6 +221,7 @@ async def test_work_update_then_cancel_preserves_task_store_and_retires_old_resu
     finally:
         release.set()
         await env.registry.stop()
+        await env.registry._runtime.close()
         await env.harness.composition.stop()
 
 
@@ -240,6 +244,7 @@ async def test_structured_task_create_and_read_use_real_receipts_without_semanti
         assert env.registry._native_business.task_origins(env.binding.scope) == (task_id,)
     finally:
         await env.registry.stop()
+        await env.registry._runtime.close()
         await env.harness.composition.stop()
 
 
@@ -256,6 +261,7 @@ async def test_model_replay_omission_retains_choice_and_changed_choice_has_zero_
         assert len(env.manager.get_calls) == 1
     finally:
         await env.registry.stop()
+        await env.registry._runtime.close()
         await env.harness.composition.stop()
 
 
@@ -303,6 +309,7 @@ async def test_readonly_refund_work_returns_before_completion_and_survives_p2_di
     finally:
         release.set()
         await env.registry.stop()
+        await env.registry._runtime.close()
         await env.harness.composition.stop()
 
 
@@ -331,20 +338,23 @@ async def test_project_rebound_while_agent_resource_waits_has_zero_work_or_agent
         release.set()
         if pending: await asyncio.gather(pending,return_exceptions=True)
         await env.registry.stop()
+        await env.registry._runtime.close()
         await env.harness.composition.stop()
 
 
 @pytest.mark.asyncio
 async def test_native_completed_adjust_preserves_speech_and_exposes_final_saved_truth(tmp_path, monkeypatch):
     from jiuwenswarm.common.schema.live_voice_contract_v2 import TerminalOutcome
-    from jiuwenswarm.server.live_voice.formal_task_models import TaskResultArtifact
+    from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import TaskResultArtifact
     import hashlib
     spoken = "第一晚牛肉火锅，第二晚烧烤；不得修改原件.md。"
     env = await make_registry(tmp_path, monkeypatch, input_text=spoken)
     executor = env.harness.executor
     executor.dispatch_outcome = TerminalOutcome.COMPLETED
     dispatch = executor.dispatch
+    dispatch_items = []
     async def saved_dispatch(item):
+        dispatch_items.append(item)
         delivered = await dispatch(item)
         text = "原始行程" if item.spec.native_source is not None else "原始行程；牛肉火锅；烧烤"
         return replace(delivered, observations=tuple(replace(obs, result_text=text,
@@ -369,7 +379,10 @@ async def test_native_completed_adjust_preserves_speech_and_exposes_final_saved_
         assert fact["result_text"] == "原始行程"
         assert fact["adjustment_state"] == "applied"
         child = store.get_task(fact["followup_adjustment"]["continuation_task_id"], env.binding.scope)
-        assert spoken in child.spec.instruction and "retained_speech" in child.spec.instruction
+        assert child.spec.instruction == spoken  # The bounded command stays compact.
+        from jiuwenswarm.server.runtime.formal_tasks.task_adjustment_queue import TaskAdjustmentQueue
+        expanded = TaskAdjustmentQueue(store).execution_instruction(dispatch_items[-1])
+        assert spoken in expanded and "retained_speech" in expanded
         assert child.spec.context == task.spec.context
         queried, _ = await call(env, "task.result", stem="result", target_id=task.task_id)
         assert queried["task_control"]["adjustment_state"] == "applied"
@@ -381,6 +394,7 @@ async def test_native_completed_adjust_preserves_speech_and_exposes_final_saved_
         assert len(executor.dispatches) == 2 and env.manager.agent.executions == []
     finally:
         await env.registry.stop()
+        await env.registry._runtime.close()
         await env.harness.composition.stop()
 
 
@@ -447,4 +461,5 @@ async def test_queried_results_retire_notifications_only_at_canonical_played_his
         assert not env.manager.agent.executions
     finally:
         await env.registry.stop()
+        await env.registry._runtime.close()
         await env.harness.composition.stop()

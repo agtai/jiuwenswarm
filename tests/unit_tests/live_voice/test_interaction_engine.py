@@ -6,7 +6,8 @@ from dataclasses import replace
 import pytest
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import Assurance, ScopeRef
-from jiuwenswarm.server.live_voice.interaction_engine import (
+from tests.support.live_voice.scripted_cascade import ScriptedCascadeInteractionEngine
+from jiuwenswarm.channels.live_voice.interaction_engine import (
     CASCADE_ACTION_OPERATIONS,
     CASCADE_GOLDEN_SCRIPT,
     CascadeActionOperation,
@@ -16,7 +17,6 @@ from jiuwenswarm.server.live_voice.interaction_engine import (
     InteractionEnginePort,
     InteractionEngineViolation,
     INTERACTION_ACTION_OPERATIONS,
-    ScriptedCascadeInteractionEngine,
 )
 
 

@@ -1,8 +1,8 @@
 from dataclasses import replace
 import pytest
 from jiuwenswarm.common.schema.live_voice_contract_v2 import ScopeRef, Assurance
-from jiuwenswarm.server.live_voice.native_business_context import NativeBusinessContextStore, select_conversation_history
-from jiuwenswarm.server.live_voice.native_business_contract import NativeBusinessAction, NativeBusinessViolation
+from jiuwenswarm.server.runtime.work.native_business_context import NativeBusinessContextStore, select_conversation_history
+from jiuwenswarm.channels.live_voice.native_business_contract import NativeBusinessAction, NativeBusinessViolation
 
 SCOPE = ScopeRef("user", "project", "session", Assurance.AUTHENTICATED)
 

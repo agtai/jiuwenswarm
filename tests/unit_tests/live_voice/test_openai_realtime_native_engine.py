@@ -13,11 +13,11 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ResponseRef,
     ScopeRef,
 )
-from jiuwenswarm.server.live_voice.native_interaction_contract import (
+from jiuwenswarm.common.schema.native_interaction_contract import (
     NativeInteractionBinding,
     NativePresentationCursor,
 )
-from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
+from jiuwenswarm.channels.live_voice.openai_realtime_native_engine import (
     MAX_NATIVE_AUDIO_DELTA_BYTES,
     NativeEngineEvent,
     NativeInputAudioFrame,
@@ -25,7 +25,7 @@ from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
     OpenAIRealtimeNativeInteractionEngine,
     OpenAIRealtimeNativeInteractionError,
 )
-from jiuwenswarm.server.live_voice.openai_realtime_session import (
+from jiuwenswarm.channels.live_voice.openai_realtime_session import (
     OpenAIRealtimeSessionConfig,
 )
 
@@ -388,7 +388,7 @@ async def test_reasoning_effort_reaches_provider_without_inventing_default(effor
 
 @pytest.mark.parametrize("effort", ["", "provider-default", "high", "LOW", " low", True, 1, [], {}])
 def test_invalid_reasoning_effort_rejects_before_any_provider_connection(effort):
-    from jiuwenswarm.server.live_voice.native_interaction_config import NativeInteractionConfigurationError
+    from jiuwenswarm.channels.live_voice.native_interaction_config import NativeInteractionConfigurationError
     factory = CapturingFactory(ScriptedSocket())
     with pytest.raises(NativeInteractionConfigurationError) as exc:
         OpenAIRealtimeNativeInteractionEngine(config(), binding=binding(), socket_factory=factory, reasoning_effort=effort)
@@ -410,7 +410,7 @@ async def test_native_audio_speed_reaches_provider_session(speed):
 
 @pytest.mark.parametrize("speed", [True, None, "1.5", 0.24, 1.51, float("nan"), float("inf")])
 def test_invalid_native_audio_speed_rejected_before_connecting(speed):
-    from jiuwenswarm.server.live_voice.native_interaction_config import NativeInteractionConfigurationError
+    from jiuwenswarm.channels.live_voice.native_interaction_config import NativeInteractionConfigurationError
 
     factory = CapturingFactory(ScriptedSocket())
     with pytest.raises(NativeInteractionConfigurationError) as raised:
@@ -616,7 +616,7 @@ async def test_business_invalid_mixed_group_waits_all_outputs_and_anchors_first_
 async def test_invalid_adjustment_can_be_corrected_once_without_replaying_mutation(caplog, monkeypatch):
     import logging
     from tests.unit_tests.live_voice.test_native_business_contract import action
-    test_logger = logging.getLogger("jiuwenswarm.server.live_voice.openai_realtime_native_engine")
+    test_logger = logging.getLogger("jiuwenswarm.channels.live_voice.openai_realtime_native_engine")
     monkeypatch.setattr(test_logger, "handlers", [*test_logger.handlers, caplog.handler])
     payload = {"request_text": "Leave no earlier than five and adjust the travel task",
         "action": action("task.adjust", adjustment="Leave no earlier than five", expected_revision="4")}
@@ -2090,7 +2090,7 @@ async def test_response_terminal_diagnostic_is_safe_and_never_implies_delivery(
     monkeypatch, status, details, expected_reason,
 ):
     logged = []
-    monkeypatch.setattr("jiuwenswarm.server.live_voice.openai_realtime_native_engine.logger.info",
+    monkeypatch.setattr("jiuwenswarm.channels.live_voice.openai_realtime_native_engine.logger.info",
         lambda message, *args: logged.append(message % args))
     terminal = response_done("done", "provider-1", status=status)
     terminal["response"]["status_details"] = details
@@ -2803,7 +2803,7 @@ async def test_provider_error_is_sanitized_and_has_zero_native_effect(
         logged.append(message % args)
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.openai_realtime_native_engine.logger.error",
+        "jiuwenswarm.channels.live_voice.openai_realtime_native_engine.logger.error",
         capture_error,
     )
     engine, _, _ = active_engine(

@@ -5,23 +5,23 @@ import json
 import pytest
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import Assurance, ScopeRef
-from jiuwenswarm.server.live_voice.native_business_contract import (
+from jiuwenswarm.channels.live_voice.native_business_contract import (
     NATIVE_BUSINESS_OPERATIONS,
     NativeBusinessProposal,
     NativeBusinessViolation,
 )
-from jiuwenswarm.server.live_voice.native_business_tools import (
+from jiuwenswarm.channels.live_voice.native_business_tools import (
     NATIVE_BUSINESS_FUNCTION_NAMES,
     NATIVE_BOUND_BUSINESS_FUNCTION_NAMES,
     native_business_proposal_from_function_call,
     native_business_tools,
 )
-from jiuwenswarm.server.live_voice.native_interaction_carrier import NativeInteractionProposal
-from jiuwenswarm.server.live_voice.native_interaction_contract import (
+from jiuwenswarm.channels.live_voice.native_interaction_carrier import NativeInteractionProposal
+from jiuwenswarm.common.schema.native_interaction_contract import (
     NativeInteractionBinding,
     NativeInteractionContractViolation,
 )
-from jiuwenswarm.server.live_voice.production_task_intent import _validate_arguments
+from jiuwenswarm.server.runtime.formal_tasks.production_task_intent import _validate_arguments
 
 
 # Expected business inputs are written independently of the adapter's table.
@@ -242,7 +242,7 @@ def test_binding_remains_exact_and_source_identity_changes_with_scope(field, val
 
 
 def test_real_session_serializer_carries_all_named_tool_schemas():
-    from jiuwenswarm.server.live_voice.openai_realtime_session import _encode_client_event
+    from jiuwenswarm.channels.live_voice.openai_realtime_session import _encode_client_event
 
     wire = _encode_client_event({
         "event_id": "event", "type": "session.update", "session": {"tools": native_business_tools()},

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from jiuwenswarm.server.live_voice.latency_measurement import (
+from jiuwenswarm.channels.live_voice.latency_measurement import (
     L0EvidenceSource,
     L0Milestone,
     L0RoundBinding,

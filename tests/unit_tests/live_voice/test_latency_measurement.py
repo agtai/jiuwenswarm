@@ -6,9 +6,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-import jiuwenswarm.server.live_voice.latency_measurement as latency_measurement
+import jiuwenswarm.channels.live_voice.latency_measurement as latency_measurement
 
-from jiuwenswarm.server.live_voice.latency_measurement import (
+from jiuwenswarm.channels.live_voice.latency_measurement import (
     L0EvidenceSource,
     L0MeasurementCollector,
     L0MeasurementViolation,
@@ -27,7 +27,7 @@ from jiuwenswarm.server.live_voice.latency_measurement import (
     process_l0_sink,
     validate_l0_corpus_manifest,
 )
-from jiuwenswarm.server.live_voice.observability import (
+from jiuwenswarm.common.telemetry.observability import (
     LiveVoiceObservabilityCollector,
 )
 
@@ -1312,7 +1312,7 @@ def test_dynamic_run_labels_file_is_closed_content_free_and_fail_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from jiuwenswarm.server.live_voice.latency_measurement import (
+    from jiuwenswarm.channels.live_voice.latency_measurement import (
         L0_MEASUREMENT_RUN_LABELS_FILE_ENV,
         L0_RUN_LABELS_VERSION,
         runtime_l0_run_labels,

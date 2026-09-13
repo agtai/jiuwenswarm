@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-import jiuwenswarm.server.live_voice.realtime_media as realtime_media_module
+import tests.support.live_voice.realtime_media as realtime_media_module
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     MAX_SAFE_INTEGER,
     ConnectionEpochRef,
@@ -23,7 +23,7 @@ from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MediaGenerationKind,
     MediaPlayoutBinding,
 )
-from jiuwenswarm.server.live_voice.realtime_media import (
+from tests.support.live_voice.realtime_media import (
     ActiveRealtimeMediaActivation,
     InactiveRealtimeMediaActivation,
     MediaAck,

@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import Any, Awaitable, Callable
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import Assurance
-from jiuwenswarm.server.live_voice.batch_speech import (
+from jiuwenswarm.channels.live_voice.batch_speech import (
     FormalBatchSpeechService,
     RECOGNIZE_OPERATION,
     SpeechRpcContext,

@@ -9,7 +9,7 @@ import threading
 
 import pytest
 
-from jiuwenswarm.server.live_voice.streaming_speech import (
+from jiuwenswarm.channels.live_voice.streaming_speech import (
     CaptureRef,
     RecognitionStreamRef,
     RecognitionStreamRequest,

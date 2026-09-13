@@ -9,10 +9,10 @@ from types import SimpleNamespace
 import pytest
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import TerminalOutcome
-from jiuwenswarm.server.live_voice.formal_task_models import FormalTaskViolation, TaskMutationPrecondition, TaskResultArtifact
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import FormalTaskViolation, TaskMutationPrecondition, TaskResultArtifact
 import hashlib
-from jiuwenswarm.server.live_voice.persistent_task_core import PersistentTaskCore
-from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
+from jiuwenswarm.server.runtime.formal_tasks.persistent_task_core import PersistentTaskCore
+from jiuwenswarm.server.runtime.formal_tasks.task_store import SqliteTaskStore
 from tests.unit_tests.live_voice.test_persistent_task_core import (
     NOW, _adjust, _create, _Executor, _observations, _scope, _successor_fixture,
 )
@@ -143,7 +143,7 @@ def test_queue_full_rejects_new_change_but_preserves_replay_and_original(tmp_pat
     _finish_child(store)
     assert store.adjustment_queue.advance(policy=core._admission_policy)
     assert core.execute(extra, extra_grant, now=NOW).ok
-    from jiuwenswarm.server.live_voice.task_control_presentation import native_task_presentation
+    from jiuwenswarm.server.runtime.formal_tasks.task_control_presentation import native_task_presentation
     _, events = native_task_presentation(store, _scope(), [original.task_id])
     assert len(events) == 1 and events[0]["adjustment_id"] == "change-0"
     _, already_heard = native_task_presentation(store, _scope(), [original.task_id], presented=lambda *_: True)
@@ -354,7 +354,7 @@ async def test_invalid_derived_command_settles_once_and_unrelated_dispatch_runs(
 
 
 def test_native_projection_contains_saved_truth_and_independent_final_failure(tmp_path):
-    from jiuwenswarm.server.live_voice.task_control_presentation import native_task_presentation
+    from jiuwenswarm.server.runtime.formal_tasks.task_control_presentation import native_task_presentation
     _, store, _, core, original, _, _ = _completed(tmp_path)
     command, grant = _adjust(original.task_id, "牛肉火锅和烧烤")
     core.execute(command, grant, now=NOW)
@@ -400,7 +400,7 @@ async def test_real_direct_files_and_core_continue_late_change_without_duplicate
                 assert original_text in request.params["query"]
                 assert (root / "行程.md").read_text(encoding="utf-8") == original_text
                 from jiuwenswarm.server.runtime.agent_adapter.background_task_checkpoint import current_background_task_checkpoint
-                from jiuwenswarm.server.live_voice.file_effect_plan import FileEffectPlanError
+                from jiuwenswarm.server.runtime.formal_tasks.file_effect_plan import FileEffectPlanError
                 plan = current_background_task_checkpoint(request.session_id).file_plan
                 assert plan is not None, "continuation keeps the existing file-effect boundary"
                 await plan.seal({"requirement_head": plan.requirement_head, "preserve_existing": False,

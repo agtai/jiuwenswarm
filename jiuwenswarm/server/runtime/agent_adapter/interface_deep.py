@@ -6383,7 +6383,7 @@ class JiuWenSwarmDeepAdapter:
 
     @staticmethod
     def _formal_model_resolver():
-        from jiuwenswarm.server.live_voice.p3_model_resolution import ServerModelCatalogResolver
+        from jiuwenswarm.server.runtime.agent_adapter.p3_model_resolution import ServerModelCatalogResolver
         return ServerModelCatalogResolver(
             catalog_reader=lambda: get_default_models(get_config()),
             model_builder=build_model_from_entry,

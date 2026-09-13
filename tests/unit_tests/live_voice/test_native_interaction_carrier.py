@@ -12,18 +12,18 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ResponseRef,
     ScopeRef,
 )
-from jiuwenswarm.server.live_voice.interaction_engine import InteractionAction
-from jiuwenswarm.server.live_voice.native_interaction_carrier import (
+from jiuwenswarm.channels.live_voice.interaction_engine import InteractionAction
+from jiuwenswarm.channels.live_voice.native_interaction_carrier import (
     NativeCarrierViolation,
     NativeInteractionProposal,
 )
-from jiuwenswarm.server.live_voice.native_interaction_contract import (
+from jiuwenswarm.common.schema.native_interaction_contract import (
     NATIVE_INTERACTION_CONTRACT_VERSION,
     NativeInputTranscript,
     NativeInteractionBinding,
     NativeTurnCommit,
 )
-from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
+from jiuwenswarm.channels.live_voice.openai_realtime_native_engine import (
     NativeAudioOutput,
     NativeEngineEvent,
 )

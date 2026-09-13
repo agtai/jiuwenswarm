@@ -101,7 +101,7 @@ class ObservationCollector:
 
     def __call__(self, observation: object) -> None:
         try:
-            from jiuwenswarm.server.live_voice.project_code_executor import (
+            from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
                 DirectStreamObservation,
             )
 
@@ -798,7 +798,7 @@ def _direct_authority_snapshot(
     project_root: Path,
     attempt_ref: str,
 ) -> _DirectAuthoritySnapshot:
-    from jiuwenswarm.server.live_voice.project_code_executor import (
+    from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
         _attempt_worktree_paths,
         _worktree_registered,
     )
@@ -955,7 +955,7 @@ async def _confirmed_mutation(
     run_id: str,
     deadline: float,
 ) -> dict[str, object]:
-    from jiuwenswarm.server.live_voice.p3_confirmation import (
+    from jiuwenswarm.server.runtime.formal_tasks.p3_confirmation import (
         P3ConfirmationOwnerContext,
         TrustedP3ConfirmationIssue,
     )
@@ -1083,7 +1083,7 @@ async def _run_fixed_scenario(
     deadline: float,
 ) -> _RealScenarioFacts:
     from jiuwenswarm.common.schema.live_voice_contract_v2 import Assurance, ScopeRef
-    from jiuwenswarm.server.live_voice.formal_task_models import (
+    from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
         FormalAttemptState,
         FormalTaskState,
     )
@@ -1441,19 +1441,19 @@ async def _run_production_cli(
     _load_private_configuration(private_root)
 
     from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
-    from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
+    from jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition import (
         create_p3_composition_from_environment,
     )
-    from jiuwenswarm.server.live_voice.p3_confirmation import (
+    from jiuwenswarm.server.runtime.formal_tasks.p3_confirmation import (
         BoundedP3ConfirmationOwner,
     )
-    from jiuwenswarm.server.live_voice.p3_model_resolution import (
+    from jiuwenswarm.server.runtime.agent_adapter.p3_model_resolution import (
         ServerModelCatalogResolver,
     )
-    from jiuwenswarm.server.live_voice.p3_product_confirmation import (
+    from jiuwenswarm.server.runtime.formal_tasks.p3_product_confirmation import (
         ProductP3ConfirmationForwarder,
     )
-    from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
+    from jiuwenswarm.server.runtime.formal_tasks.task_store import SqliteTaskStore
     from jiuwenswarm.server.runtime.agent_manager import AgentManager
 
     scenario = _register_private_scenario(private_root)

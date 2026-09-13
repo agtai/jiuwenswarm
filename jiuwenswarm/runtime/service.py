@@ -295,6 +295,8 @@ class AgentRuntime:
         self._enable_kvc_tracking = bool(enable_kvc_tracking)
         self._session_coordinator = session_coordinator or RuntimeSessionCoordinator()
         self._stateless_agents: dict[str, Any] = {}
+        self._work_services: dict[str, Any] = {}
+        self._work_services_closing = False
         self._lifecycle_lock = asyncio.Lock()
         self._session_provision_prepares = 0
         self._pending_session_provisions: set[
@@ -311,6 +313,23 @@ class AgentRuntime:
     @property
     def plan_controller(self) -> PlanModeController:
         return self._plan_controller
+
+    def get_work_service(self, database_path: Any) -> Any:
+        """Return this Host's single Work owner for an existing journal DB."""
+        if self._closed or self._work_services_closing:
+            raise RuntimeStateError("runtime work services are closed")
+        from os.path import normcase
+        from pathlib import Path
+        from jiuwenswarm.server.runtime.work.service import HostWorkService
+
+        canonical = normcase(str(Path(database_path).expanduser().resolve()))
+        service = self._work_services.get(canonical)
+        if service is None:
+            service = HostWorkService(canonical, agent_manager=self._agent_manager)
+            self._work_services[canonical] = service
+        if service.closed or service.closing:
+            raise RuntimeStateError("runtime work service is closed")
+        return service
 
     @property
     def session_coordinator(self) -> RuntimeSessionCoordinator:
@@ -586,7 +605,9 @@ class AgentRuntime:
         }:
             self._pending_session_provisions.discard(prepared)
 
-    async def register_session(self, *, session_id: str, channel_id: str) -> None:
+    async def register_session(
+        self, *, session_id: str, channel_id: str, allow_reopen: bool = True,
+    ) -> None:
         """Adopt an existing product Session into this Runtime.
 
         Product create/switch and direct process callers converge here after
@@ -599,6 +620,7 @@ class AgentRuntime:
             session_id,
             channel_id,
             SessionPersistencePolicy.PERSISTENT,
+            allow_reopen=allow_reopen,
         )
 
     def owns_session(self, session_id: str | None) -> bool:
@@ -995,16 +1017,73 @@ class AgentRuntime:
         on_agent_ready: Callable[[Any], Any] | None = None,
     ) -> AsyncIterator[RuntimeEvent]:
         """Execute one request and yield the shared Runtime event stream."""
+        stream = self._stream(
+            request, trigger_hook=trigger_hook, on_control_event=on_control_event,
+            background=background, on_agent_ready=on_agent_ready,
+        )
+        try:
+            async for event in stream:
+                yield event
+        finally:
+            await stream.aclose()
+
+    async def stream_owned(
+        self,
+        request: AgentRequest,
+        *,
+        producer: Callable[[], AsyncIterator[Any]],
+        validate: Callable[[], None],
+    ) -> AsyncIterator[RuntimeEvent]:
+        """Run an authenticated host producer under the existing Session owner.
+
+        The host has already resolved its exact facade and execution policy.
+        These callable arguments are never derived from request metadata. This
+        entry retains public-session admission and cancellation, without changing
+        its configured mode, Plan state, or generated Chat history. The producer
+        owns its isolated SDK inputs and validates them again after admission.
+        """
+        if not callable(producer) or not callable(validate):
+            raise RuntimeStateError("trusted stream requires host capabilities")
+        if not request.session_id or not request.request_id or not request.is_stream:
+            raise RuntimeStateError("trusted stream requires an exact session request")
+        validate()
+        stream = self._stream(
+            request, trigger_hook=False, on_control_event=None,
+            background=False, on_agent_ready=None, owned=(producer, validate),
+        )
+        try:
+            async for event in stream:
+                yield event
+        finally:
+            await stream.aclose()
+
+    async def _stream(
+        self,
+        request: AgentRequest,
+        *,
+        trigger_hook: bool,
+        on_control_event: Callable[[RuntimeEvent], Awaitable[None]] | None,
+        background: bool,
+        on_agent_ready: Callable[[Any], Any] | None,
+        owned: tuple[Callable[[], AsyncIterator[Any]], Callable[[], None]] | None = None,
+    ) -> AsyncIterator[RuntimeEvent]:
         await self.start()
+        if owned is not None:
+            owned[1]()
         from jiuwenswarm.runtime.context import (
             reset_runtime_context,
             set_runtime_context,
         )
 
-        work_kind = self.session_work_kind(request, background=background)
+        work_kind = (
+            SessionWorkKind.CHAT_STREAM if owned is not None
+            else self.session_work_kind(request, background=background)
+        )
         if work_kind is not None:
             await self._ensure_session_registered(request)
-            if self._has_control_target(request):
+            if owned is not None:
+                owned[1]()
+            if owned is None and self._has_control_target(request):
                 events = await self._session_coordinator.deliver_control(
                     request.session_id or "default",
                     self._control_request_id(request),
@@ -1024,6 +1103,7 @@ class AgentRuntime:
                     on_control_event=on_control_event,
                     background=background,
                     on_agent_ready=on_agent_ready,
+                    owned=owned,
                 ),
                 suspension_key=self._waiting_control_id,
             )
@@ -1034,6 +1114,7 @@ class AgentRuntime:
                 on_control_event=on_control_event,
                 background=background,
                 on_agent_ready=on_agent_ready,
+                owned=owned,
             )
         try:
             while True:
@@ -1065,6 +1146,7 @@ class AgentRuntime:
         on_control_event: Callable[[RuntimeEvent], Awaitable[None]] | None,
         background: bool,
         on_agent_ready: Callable[[Any], Any] | None,
+        owned: tuple[Callable[[], AsyncIterator[Any]], Callable[[], None]] | None = None,
     ) -> AsyncIterator[RuntimeEvent]:
         from jiuwenswarm.runtime.events import RuntimeEvent
 
@@ -1075,13 +1157,14 @@ class AgentRuntime:
         foreground = is_chat_turn and not background
         tracks_kvc_task = (
             is_chat_turn and not background and self._enable_kvc_tracking
+            and owned is None
         )
         kvc_task_started = False
         kvc_task_succeeded = False
         admitted = (
             is_chat_turn
             and not background
-            and not self._request_targets_team(request)
+            and (owned is not None or not self._request_targets_team(request))
         )
         interrupt_resume = self._is_interrupt_resume_request(request)
         interaction_answer = (
@@ -1119,7 +1202,9 @@ class AgentRuntime:
                         or ""
                     ),
                 )
-            if stateless:
+            if owned is not None:
+                owned[1]()
+            elif stateless:
                 agent = await self._get_stateless_agent(channel_id)
             else:
                 mode, sub_mode, agent = await self.prepare_chat_turn(
@@ -1147,7 +1232,10 @@ class AgentRuntime:
                 ready_result = on_agent_ready(agent)
                 if inspect.isawaitable(ready_result):
                     await ready_result
-            response_stream = agent.process_message_stream(request)
+            response_stream = (
+                owned[0]() if owned is not None
+                else agent.process_message_stream(request)
+            )
             try:
                 async for chunk in response_stream:
                     event = RuntimeEvent.from_agent_message(
@@ -1385,6 +1473,16 @@ class AgentRuntime:
                     "commit or abort them before close"
                 )
             cleanup_errors: list[BaseException] = []
+            self._work_services_closing = True
+            for service in tuple(self._work_services.values()):
+                try:
+                    await service.close()
+                except BaseException as exc:
+                    cleanup_errors.append(exc)
+            if cleanup_errors:
+                # Retain the Host and dependencies while exact Work producer
+                # cleanup is retryable. New work is already fenced above.
+                raise cleanup_errors[0]
             try:
                 await self._session_coordinator.close()
             except BaseException as exc:

@@ -23,7 +23,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ResponseRef,
     ScopeRef,
 )
-from jiuwenswarm.server.live_voice.batch_speech import (
+from jiuwenswarm.channels.live_voice.batch_speech import (
     CANCEL_OPERATION,
     FORMAL_BATCH_SPEECH_FLAG,
     MAX_SYNTHESIS_AUDIO_BYTES,

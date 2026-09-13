@@ -791,13 +791,11 @@ async def test_real_send_file_tool_cannot_write_implicit_formal_history(
         "download_url": "/formal-result.txt",
         "download_token": "opaque-test-token",
     }
+    from jiuwenswarm.runtime.host_services import install_runtime_push_handler, restore_runtime_push_handler
+    previous = install_runtime_push_handler(server.send_push)
     session_history.register_formal_no_history_session(session_id)
     try:
         with (
-            patch(
-                "jiuwenswarm.server.agent_ws_server.AgentWebSocketServer.get_instance",
-                return_value=server,
-            ),
             patch(
                 "jiuwenswarm.agents.harness.common.tools.web_file_download."
                 "build_file_download_info",
@@ -806,6 +804,7 @@ async def test_real_send_file_tool_cannot_write_implicit_formal_history(
         ):
             await toolkit.send_file(str(deliverable))
     finally:
+        restore_runtime_push_handler(server.send_push, previous)
         session_history.unregister_formal_no_history_session(session_id)
         clear_sent_files_for_session(session_id)
 

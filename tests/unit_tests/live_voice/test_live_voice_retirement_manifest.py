@@ -14,8 +14,8 @@ MANIFEST = (
     ROOT / "tests" / "fixtures" / "live_voice_retirement_manifest_v1" / "manifest.json"
 )
 EXPECTED_B1_FILES = {
-    "jiuwenswarm/server/live_voice/observability_correlation_contract.py",
-    "jiuwenswarm/server/live_voice/live_voice_configuration_declaration.py",
+    "jiuwenswarm/channels/live_voice/observability_correlation_contract.py",
+    "jiuwenswarm/common/schema/live_voice_configuration_declaration.py",
     "tests/unit_tests/live_voice/test_observability_correlation_contract.py",
     "tests/unit_tests/live_voice/test_live_voice_configuration_declaration.py",
     "tests/fixtures/live_voice_retirement_manifest_v1/manifest.json",
@@ -126,11 +126,29 @@ def _load() -> dict:
     return json.loads(MANIFEST.read_text(encoding="utf-8"))
 
 
+def _current_source_path(value: str) -> Path:
+    manifest = _load()
+    relocations = {**manifest.get("support_relocations_20260911", {}),
+                   **manifest.get("host_relocations_20260911", {})}
+    return ROOT / relocations.get(value, value)
+
+
 def _assert_existing_relative_path(value: str) -> None:
     path = Path(value)
     assert not path.is_absolute()
     assert ".." not in path.parts
     assert "\\" not in value
+    if value in _load().get("retired_source_paths", []):
+        assert not (ROOT / path).exists(), value
+        assert _git_object_exists(INVENTORY_BASELINE, value), value
+        return
+    relocations = {**_load().get("support_relocations_20260911", {}),
+                   **_load().get("host_relocations_20260911", {})}
+    relocated = relocations.get(value)
+    if relocated is not None:
+        assert not (ROOT / path).exists(), value
+        path = Path(relocated)
+        assert not path.is_absolute() and ".." not in path.parts
     assert (ROOT / path).exists(), value
 
 
@@ -285,7 +303,7 @@ def test_every_audit_object_has_a_live_source_locator_and_current_disposition() 
         _assert_existing_relative_path(source)
         source_text = source_cache.setdefault(
             source,
-            (ROOT / source).read_text(encoding="utf-8"),
+            _current_source_path(source).read_text(encoding="utf-8"),
         )
         assert mapping["locator_token"] in source_text, mapping["id"]
         assert set(mapping["manifest_entry_ids"]).issubset(entries)
@@ -299,14 +317,14 @@ def test_shared_files_are_symbol_scoped_and_retain_current_authority() -> None:
     boundaries = manifest["shared_file_boundaries"]
     required_paths = {
         "jiuwenswarm/server/live_voice/project_code_executor.py",
-        "jiuwenswarm/server/live_voice/product_p3_text_adapter.py",
+        "jiuwenswarm/server/runtime/formal_tasks/product_p3_text_adapter.py",
         "jiuwenswarm/gateway/live_voice/dedicated_media_registration.py",
         "jiuwenswarm/gateway/channel_manager/web/web_connect.py",
         "jiuwenswarm/dotenv_early.py",
-        "jiuwenswarm/server/live_voice/voice_task_bridge.py",
-        "jiuwenswarm/server/live_voice/batch_speech.py",
-        "jiuwenswarm/server/live_voice/p3_authenticated_composition.py",
-        "jiuwenswarm/server/live_voice/product_composition_registry.py",
+        "jiuwenswarm/server/runtime/formal_tasks/voice_task_bridge.py",
+        "jiuwenswarm/channels/live_voice/batch_speech.py",
+        "jiuwenswarm/server/runtime/formal_tasks/p3_authenticated_composition.py",
+        "jiuwenswarm/channels/live_voice/product_composition_registry.py",
         "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/productP2ActivationJournal.ts",
         "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/productP3ProgressGenerationJournal.ts",
         "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/productP1VoiceRoute.ts",
@@ -325,10 +343,14 @@ def test_shared_files_are_symbol_scoped_and_retain_current_authority() -> None:
                 "jiuwenswarm/dotenv_early.py",
             }
             assert "Completed in" in boundary["delete_precondition"]
-        path = ROOT / boundary["path"]
+        path = _current_source_path(boundary["path"])
         source = path.read_text(encoding="utf-8")
+        retired = manifest.get("retired_source_symbols", {}).get(boundary["path"], [])
         for symbol in boundary["candidate_symbols"] + boundary["retained_symbols"]:
-            assert symbol in source, (boundary["path"], symbol)
+            if symbol in retired:
+                assert re.search(r"(?<![A-Za-z0-9_])" + re.escape(symbol) + r"(?![A-Za-z0-9_])", source) is None, (boundary["path"], symbol)
+            else:
+                assert symbol in source, (boundary["path"], symbol)
     by_path = {boundary["path"]: boundary for boundary in boundaries}
     assert (
         "handle_registered_media_socket"
@@ -348,9 +370,7 @@ def test_shared_files_are_symbol_scoped_and_retain_current_authority() -> None:
         if entry["id"] == "legacy_project_scheduler_adapter"
     )
     assert "DirectProjectCodeExecutorAdapter" in executor_entry["replacement_owner"]
-    assert "DirectProjectCodeExecutorAdapter" in (
-        ROOT / "jiuwenswarm/server/live_voice/project_code_executor.py"
-    ).read_text(encoding="utf-8")
+    assert "DirectProjectCodeExecutorAdapter" in _current_source_path("jiuwenswarm/server/live_voice/project_code_executor.py").read_text(encoding="utf-8")
 
 
 def test_legacy_ticket_media_targets_only_prefix_compatibility_symbols() -> None:
@@ -443,7 +463,7 @@ def test_executed_retirements_and_retained_current_owners_are_exact() -> None:
     )
     assert retained_config_paths == {
         "jiuwenswarm/channels/web/frontend/.env.production",
-        "jiuwenswarm/server/live_voice/production_task_intent.py",
+        "jiuwenswarm/server/runtime/formal_tasks/production_task_intent.py",
     }
     assert not retained_config_paths.intersection(
         entries["exact_demo_profile_and_fixtures"]["paths"]
@@ -465,7 +485,7 @@ def test_product_p3_text_adapter_is_symbol_scoped_shared_authority() -> None:
     boundary = next(
         item
         for item in manifest["shared_file_boundaries"]
-        if item["path"] == "jiuwenswarm/server/live_voice/product_p3_text_adapter.py"
+        if item["path"] == "jiuwenswarm/server/runtime/formal_tasks/product_p3_text_adapter.py"
     )
     assert boundary["whole_file_deletion_target"] is False
     assert set(boundary["candidate_symbols"]) == {
@@ -508,7 +528,7 @@ def _audit_batch_paths(source: str, start: str, end: str) -> set[str]:
 def test_document_batches_and_later_rebaseline_are_complete_and_linked() -> None:
     manifest = _load()["document_rebaseline"]
     source_path = manifest["source_audit"]
-    source = (ROOT / source_path).read_text(encoding="utf-8")
+    source = _current_source_path(source_path).read_text(encoding="utf-8")
     batch_a = manifest["batch_a_completed"]
     batch_b = manifest["batch_b"]
     batch_c = manifest["batch_c"]

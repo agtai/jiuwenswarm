@@ -13,7 +13,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ResponseRef,
     ScopeRef,
 )
-from jiuwenswarm.server.live_voice.native_interaction_contract import (
+from jiuwenswarm.common.schema.native_interaction_contract import (
     NATIVE_INTERACTION_CONTRACT_VERSION,
     NativeAudioObservation,
     NativeContractLedger,

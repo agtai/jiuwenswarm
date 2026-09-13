@@ -195,7 +195,7 @@ LATEST_S6_SOURCE_INVENTORY = (
     "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/productP1VoiceRoute.ts",
     "jiuwenswarm/gateway/live_voice/dedicated_media_registration.py",
     "jiuwenswarm/gateway/live_voice/streaming_speech_route.py",
-    "jiuwenswarm/server/live_voice/streaming_speech.py",
+    "jiuwenswarm/channels/live_voice/streaming_speech.py",
 )
 LATEST_S6_REGRESSION_INVENTORY = (
     "jiuwenswarm/channels/web/frontend/tests/liveVoiceBrowserAudioIOAdapter.test.mjs",

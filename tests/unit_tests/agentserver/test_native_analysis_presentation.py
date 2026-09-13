@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import ContextRef, TurnCommit
-from jiuwenswarm.server.live_voice.p3_model_resolution import ServerModelCatalogResolver
+from jiuwenswarm.server.runtime.agent_adapter.p3_model_resolution import ServerModelCatalogResolver
 from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
     FormalAgentExecution, FormalContextEntry, FormalContextSnapshot,
     NATIVE_ANALYSIS_PRESENTATION_INSTRUCTIONS,

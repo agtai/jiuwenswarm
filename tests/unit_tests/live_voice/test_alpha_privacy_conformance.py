@@ -8,8 +8,8 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-import jiuwenswarm.server.live_voice.alpha_privacy_conformance as privacy_module
-from jiuwenswarm.server.live_voice.alpha_privacy_conformance import (
+import tests.support.live_voice.alpha_privacy_conformance as privacy_module
+from tests.support.live_voice.alpha_privacy_conformance import (
     ALPHA_PRIVACY_SURFACES,
     MAX_BYTES_PER_OBSERVATION,
     MAX_CANARY_PATTERN_UNITS,

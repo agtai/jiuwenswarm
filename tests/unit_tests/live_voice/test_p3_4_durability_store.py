@@ -19,12 +19,12 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     TerminalOutcome,
     canonical_json_bytes,
 )
-from jiuwenswarm.server.live_voice.durability_checkpoint import D1Checkpoint
-from jiuwenswarm.server.live_voice.durability_authority import (
+from jiuwenswarm.server.runtime.durability.durability_checkpoint import D1Checkpoint
+from jiuwenswarm.server.runtime.durability.durability_authority import (
     _durability_authorization_payload_digest,
     _mint_durability_mutation_authorization,
 )
-from jiuwenswarm.server.live_voice.durability_effects import (
+from jiuwenswarm.server.runtime.durability.durability_effects import (
     EffectObservationKind,
     ExternalEffectBinding,
     ExternalEffectDispatch,
@@ -32,26 +32,26 @@ from jiuwenswarm.server.live_voice.durability_effects import (
     ExternalEffectObservation,
     effect_fact_bytes,
 )
-from jiuwenswarm.server.live_voice.durability_identity import (
+from jiuwenswarm.server.runtime.durability.durability_identity import (
     DurabilityProfileBinding,
 )
-from jiuwenswarm.server.live_voice.durability_readers import DurabilityReadBinding
-from jiuwenswarm.server.live_voice.durability_recovery_facts import (
+from jiuwenswarm.server.runtime.durability.durability_readers import DurabilityReadBinding
+from jiuwenswarm.server.runtime.durability.durability_recovery_facts import (
     ExecutorRecoveryFacts,
 )
-from jiuwenswarm.server.live_voice.executor_capabilities import (
+from jiuwenswarm.server.runtime.formal_tasks.executor_capabilities import (
     EXECUTOR_CAPABILITY_PROFILE_SCHEMA_VERSION,
     ExecutorCapabilityProfile,
 )
-from jiuwenswarm.server.live_voice.formal_task_models import (
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
     FormalTaskViolation,
     PersistedExecutorSelection,
 )
-from jiuwenswarm.server.live_voice.persistent_task_core import PersistentTaskCore
-from jiuwenswarm.server.live_voice.project_code_executor import (
+from jiuwenswarm.server.runtime.formal_tasks.persistent_task_core import PersistentTaskCore
+from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
     FORMAL_PROJECT_EXECUTOR_ID,
 )
-from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
+from jiuwenswarm.server.runtime.formal_tasks.task_store import SqliteTaskStore
 from tests.unit_tests.live_voice.test_persistent_task_core import (
     NOW,
     _Executor,

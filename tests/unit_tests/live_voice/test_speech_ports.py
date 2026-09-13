@@ -6,7 +6,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ContractViolation,
     ResponseRef,
 )
-from jiuwenswarm.server.live_voice.speech_ports import (
+from jiuwenswarm.channels.live_voice.speech_ports import (
     ProviderRef,
     RecognitionAlternative,
     RecognitionEventKind,

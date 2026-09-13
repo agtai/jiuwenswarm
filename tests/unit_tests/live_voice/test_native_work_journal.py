@@ -10,14 +10,14 @@ import sqlite3
 import pytest
 from jiuwenswarm.common.schema.live_voice_contract_v2 import canonical_json_bytes
 
-from jiuwenswarm.server.live_voice.native_work_journal import SqliteNativeWorkJournal
-from jiuwenswarm.server.live_voice.native_work_runtime import (
+from jiuwenswarm.server.runtime.work.native_work_journal import SqliteNativeWorkJournal
+from jiuwenswarm.server.runtime.work.native_work_runtime import (
     NativeWorkRuntime,
     NativeWorkSnapshot,
     NativeWorkState,
     NativeWorkViolation,
 )
-from jiuwenswarm.server.live_voice.unified_committed_input import (
+from jiuwenswarm.server.runtime.formal_tasks.unified_committed_input import (
     SqliteUnifiedCommittedInputJournal,
 )
 from tests.unit_tests.live_voice.test_native_work_runtime import (

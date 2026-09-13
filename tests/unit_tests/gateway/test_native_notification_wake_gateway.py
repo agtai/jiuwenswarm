@@ -5,7 +5,7 @@ from dataclasses import replace
 import pytest
 
 from jiuwenswarm.gateway.live_voice.native_interaction_runtime_client import NativeRuntimeClientError
-from jiuwenswarm.server.live_voice.native_interaction_carrier import NATIVE_NOTIFICATION_WAKE_VERSION
+from jiuwenswarm.channels.live_voice.native_interaction_carrier import NATIVE_NOTIFICATION_WAKE_VERSION
 from tests.unit_tests.gateway import test_dedicated_media_registration as f
 from tests.unit_tests.gateway import test_native_interaction_runtime_client as c
 

@@ -4,7 +4,7 @@ import test from 'node:test';
 import {
   FORMAL_P3_TASK_METHODS,
   FormalP3TaskExperienceOwner,
-} from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/formalP3TaskExperience.js';
+} from '../node_modules/.cache/live-voice-integrated-web/features/tasks/formalP3TaskExperience.js';
 
 const sessionId = 'session-p3-7';
 const scope = Object.freeze({

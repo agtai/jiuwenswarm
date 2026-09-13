@@ -15,20 +15,20 @@ from jiuwenswarm.gateway.live_voice.dedicated_media_registration import (
 from jiuwenswarm.gateway.live_voice.streaming_speech_route import (
     StreamingRecognitionRouteOwner,
 )
-from jiuwenswarm.server.live_voice.openai_streaming_speech import (
+from jiuwenswarm.channels.live_voice.openai_streaming_speech import (
     OpenAIStreamingSpeechProvider,
     SpeechDegradationReason,
     SpeechRouteTier,
     StreamingSpeechSelection,
 )
-from jiuwenswarm.server.live_voice.streaming_speech import (
+from jiuwenswarm.channels.live_voice.streaming_speech import (
     RecognitionStreamRequest,
     RecognitionTurnDetection,
     StreamingSpeechViolation,
     SpeechResponseAuthority,
     authorize_stream_request,
 )
-from jiuwenswarm.server.live_voice.speech_ports import SynthesisEventKind
+from jiuwenswarm.channels.live_voice.speech_ports import SynthesisEventKind
 from tests.unit_tests.live_voice.test_openai_streaming_speech import (
     FakeSocket,
     FakeSseStream,

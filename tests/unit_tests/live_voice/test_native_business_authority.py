@@ -5,13 +5,13 @@ from dataclasses import replace
 
 import pytest
 
-from jiuwenswarm.server.live_voice.native_business_contract import NativeBusinessAction, NativeBusinessProposal, NATIVE_BUSINESS_CONTRACT_VERSION
-from jiuwenswarm.server.live_voice.native_business_context import select_conversation_history
-from jiuwenswarm.server.live_voice.voice_task_bridge import UnifiedCommittedInputRoute
+from jiuwenswarm.channels.live_voice.native_business_contract import NativeBusinessAction, NativeBusinessProposal, NATIVE_BUSINESS_CONTRACT_VERSION
+from jiuwenswarm.server.runtime.work.native_business_context import select_conversation_history
+from jiuwenswarm.server.runtime.formal_tasks.voice_task_bridge import UnifiedCommittedInputRoute
 from tests.unit_tests.live_voice.test_native_business_registry import make_registry, call, context
 from tests.unit_tests.live_voice.test_product_composition_registry import _native_delegate_proposal, _native_propose_params
 from jiuwenswarm.common.schema.agent import AgentResponseChunk
-from jiuwenswarm.server.live_voice.native_interaction_runtime import NativeInteractionRuntimeError
+from jiuwenswarm.channels.live_voice.native_interaction_runtime import NativeInteractionRuntimeError
 from tests.unit_tests.live_voice.test_native_interaction_runtime import active_owner, delegate_proposal, done
 
 
@@ -23,7 +23,7 @@ async def test_context_revalidates_project_after_history_await_before_disclosure
         entered.set()
         assert release.wait(5)
         return [{"role": "user", "content": "old-project-private-context"}]
-    monkeypatch.setattr('jiuwenswarm.server.live_voice.native_business_router.load_history_records', delayed_history)
+    monkeypatch.setattr('jiuwenswarm.channels.live_voice.native_business_router.load_history_records', delayed_history)
     pending = None
     try:
         pending = asyncio.create_task(env.registry.handle_native_propose(params={

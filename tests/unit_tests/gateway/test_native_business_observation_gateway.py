@@ -13,8 +13,8 @@ from jiuwenswarm.gateway.live_voice.dedicated_media_registration import Dedicate
 from jiuwenswarm.gateway.live_voice.native_interaction_runtime_client import (
     GatewayNativeInteractionRuntimeClient, NativeRuntimeClientError, NATIVE_GATEWAY_DESCRIPTOR_KEY,
 )
-from jiuwenswarm.server.live_voice.native_business_contract import NATIVE_BUSINESS_CONTRACT_VERSION
-from jiuwenswarm.server.live_voice.native_business_observation import NATIVE_BUSINESS_OBSERVATION_VERSION
+from jiuwenswarm.channels.live_voice.native_business_contract import NATIVE_BUSINESS_CONTRACT_VERSION
+from jiuwenswarm.common.schema.native_business_observation import NATIVE_BUSINESS_OBSERVATION_VERSION
 from tests.unit_tests.gateway.test_native_interaction_runtime_client import (
     FakeAgentClient, activation_payload, business_context_result, BINDING, SCOPE,
 )

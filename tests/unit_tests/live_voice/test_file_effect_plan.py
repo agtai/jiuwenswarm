@@ -8,10 +8,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from jiuwenswarm.server.live_voice.file_effect_plan import (
+from jiuwenswarm.server.runtime.formal_tasks.file_effect_plan import (
     FileEffectPlan, FileEffectPlanError, FileEffectPlanSession, canonical_effect_path,
 )
-from jiuwenswarm.server.live_voice.formal_task_models import TaskAdjustmentRequest
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import TaskAdjustmentRequest
 from tests.unit_tests.live_voice.test_native_task_source import source
 from tests.unit_tests.live_voice.test_project_code_executor import _spec
 
@@ -228,8 +228,8 @@ async def test_isolated_restore_yields_event_loop_and_finishes_before_release(tm
 @pytest.mark.parametrize("declared,actual", [("replace", "delete"), ("delete", "replace"),
                                            ("replace", "replace"), ("delete", "delete"), ("create", "create")])
 def test_formal_apply_checks_operation_before_any_project_write(tmp_path, monkeypatch, declared, actual):
-    from jiuwenswarm.server.live_voice import project_code_executor as module
-    from jiuwenswarm.server.live_voice.file_effect_plan import PlannedFileEffect
+    from jiuwenswarm.server.runtime.formal_tasks import project_code_executor as module
+    from jiuwenswarm.server.runtime.formal_tasks.file_effect_plan import PlannedFileEffect
     from tests.unit_tests.live_voice.test_project_code_executor import _git_project, _git
     root = tmp_path / "formal"
     _git_project(root)

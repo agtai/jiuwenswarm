@@ -32,7 +32,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from jiuwenswarm.server.live_voice.latency_measurement import (  # noqa: E402
+from jiuwenswarm.channels.live_voice.latency_measurement import (  # noqa: E402
     L0_RUN_LABELS_VERSION,
     canonical_json_bytes,
     create_l0_measurement_envelope,
@@ -839,7 +839,7 @@ class OrdinaryChromeBatchState:
 async def _synthesize_fixtures(
     manifest: Mapping[str, object],
 ) -> dict[str, bytes]:
-    from jiuwenswarm.server.live_voice.batch_speech import (
+    from jiuwenswarm.channels.live_voice.batch_speech import (
         ProviderSynthesisRequest,
         create_environment_batch_speech_provider,
     )

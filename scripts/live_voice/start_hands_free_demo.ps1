@@ -701,14 +701,19 @@ try {
         Write-Pass "L0 内容无关证据目录已隔离：$L0MeasurementDirectory"
     }
 
-    # Keep the machine selection at one stable path so a non-default data
-    # directory can still be discovered by the next no-argument launch.
+    # Explicit configuration owns its saved selection; default launches retain
+    # the stable machine path for no-argument discovery.
     $demoConfigName = if ($RuntimeProfile -eq 'formal-web-validation') {
         'live-voice-formal-web-validation.json'
     } else {
         'live-voice-demo.json'
     }
-    $DemoConfigPath = Join-Path $env:USERPROFILE ".jiuwenswarm\config\$demoConfigName"
+    $selectionConfigDirectory = if ([string]::IsNullOrWhiteSpace($ConfigurationDirectory)) {
+        Join-Path $env:USERPROFILE '.jiuwenswarm\config'
+    } else {
+        [System.IO.Path]::GetFullPath($ConfigurationDirectory)
+    }
+    $DemoConfigPath = Join-Path $selectionConfigDirectory $demoConfigName
     $savedConfig = $null
     if (Test-Path -LiteralPath $DemoConfigPath -PathType Leaf) {
         $savedConfig = Get-Content -Raw -LiteralPath $DemoConfigPath -Encoding UTF8 | ConvertFrom-Json
@@ -909,7 +914,7 @@ try {
     [Environment]::SetEnvironmentVariable('LIVE_VOICE_SPEECH_TTS_VOICE', 'marin', 'Process')
     [Environment]::SetEnvironmentVariable('LIVE_VOICE_FORMAL_BATCH_SPEECH_ENABLED', '1', 'Process')
     [Environment]::SetEnvironmentVariable('LIVE_VOICE_FORMAL_STREAMING_SPEECH_ENABLED', '1', 'Process')
-    $speechProbeJson = & $Python -c "import asyncio,json; from jiuwenswarm.server.live_voice.batch_speech import create_environment_batch_speech_provider; from jiuwenswarm.server.live_voice.openai_streaming_speech import select_environment_streaming_speech; b=create_environment_batch_speech_provider().capability(); s=asyncio.run(select_environment_streaming_speech(batch_available=b.available)); print(json.dumps({'batch':b.available,'streaming':s.tier.value == 'streaming' and s.provider is not None}))"
+    $speechProbeJson = & $Python -c "import asyncio,json; from jiuwenswarm.channels.live_voice.batch_speech import create_environment_batch_speech_provider; from jiuwenswarm.channels.live_voice.openai_streaming_speech import select_environment_streaming_speech; b=create_environment_batch_speech_provider().capability(); s=asyncio.run(select_environment_streaming_speech(batch_available=b.available)); print(json.dumps({'batch':b.available,'streaming':s.tier.value == 'streaming' and s.provider is not None}))"
     if ($LASTEXITCODE -ne 0) { Fail '无法执行正式 Speech Provider 可用性探针。' }
     $speechProbe = $speechProbeJson | ConvertFrom-Json
     if ($speechProbe.batch -ne $true -or $speechProbe.streaming -ne $true) {

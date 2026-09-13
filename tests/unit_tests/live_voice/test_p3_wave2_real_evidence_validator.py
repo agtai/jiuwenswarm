@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from jiuwenswarm.server.live_voice.project_code_executor import (
+from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
     DirectStreamObservation,
 )
 from scripts.live_voice.p3_wave2_real_evidence_producer import (

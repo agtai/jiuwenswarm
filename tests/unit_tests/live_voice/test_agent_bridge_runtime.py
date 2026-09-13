@@ -17,9 +17,9 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     TurnCommit,
     WorkProgressEventV2,
 )
-from jiuwenswarm.server.live_voice.agent_bridge import AgentEvent
-from jiuwenswarm.server.live_voice import agent_bridge_runtime
-from jiuwenswarm.server.live_voice.agent_bridge_runtime import (
+from jiuwenswarm.channels.live_voice.agent_bridge import AgentEvent
+import jiuwenswarm.channels.live_voice.agent_bridge_runtime as agent_bridge_runtime
+from jiuwenswarm.channels.live_voice.agent_bridge_runtime import (
     AgentBridgeCompletionStatus,
     AgentBridgeDelivery,
     AgentBridgeRuntime,
@@ -30,12 +30,12 @@ from jiuwenswarm.server.live_voice.agent_bridge_runtime import (
     WorkProgressDelivery,
     project_round_work_progress,
 )
-from jiuwenswarm.server.live_voice.latency_measurement import (
+from jiuwenswarm.channels.live_voice.latency_measurement import (
     L0Milestone,
     L0RoundBinding,
     L0RoundClassification,
 )
-from jiuwenswarm.server.live_voice.jiuwenswarm_agent_adapter import (
+from jiuwenswarm.channels.live_voice.jiuwenswarm_agent_adapter import (
     _tool_result_succeeded,
 )
 

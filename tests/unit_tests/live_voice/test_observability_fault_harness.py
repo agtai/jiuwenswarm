@@ -6,14 +6,14 @@ import asyncio
 
 import pytest
 
-from jiuwenswarm.server.live_voice.observability import (
+from jiuwenswarm.common.telemetry.observability import (
     OBSERVABILITY_SCHEMA_VERSION,
     LiveVoiceMetric,
     LiveVoiceObservation,
     create_metric,
     create_observation,
 )
-from jiuwenswarm.server.live_voice.observability_fault_harness import (
+from tests.support.live_voice.observability_fault_harness import (
     MAX_OBSERVABILITY_FAULT_STEPS,
     DisabledObservabilityFaultHarness,
     InjectedObservabilityExportError,
@@ -24,17 +24,17 @@ from jiuwenswarm.server.live_voice.observability_fault_harness import (
     ObservabilityFaultScriptExhaustedError,
     create_observability_fault_harness,
 )
-from jiuwenswarm.server.live_voice.product_composition_contract import (
+from jiuwenswarm.channels.live_voice.product_composition_contract import (
     ProductEvidenceId,
     ProductRouteFact,
     ProductRouteReason,
     ProductRouteTruth,
     ProductSegment,
 )
-from jiuwenswarm.server.live_voice.product_composition_root import (
+from jiuwenswarm.channels.live_voice.product_composition_root import (
     ProductCompositionContext,
 )
-from jiuwenswarm.server.live_voice.product_observability_adapter import (
+from jiuwenswarm.channels.live_voice.product_observability_adapter import (
     ActiveProductObservabilityActivation,
     ProductObservabilityActivationEvidence,
     ProductObservabilityLeaseState,

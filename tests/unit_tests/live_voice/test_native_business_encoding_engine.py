@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from jiuwenswarm.server.live_voice import openai_realtime_native_engine as native
+import jiuwenswarm.channels.live_voice.openai_realtime_native_engine as native
 from tests.unit_tests.live_voice.test_openai_realtime_native_engine import (
     accept_basic_turn, active_engine, admitted_business_engine, business_function,
     function_done, function_outputs, input_committed, response_created, response_done,

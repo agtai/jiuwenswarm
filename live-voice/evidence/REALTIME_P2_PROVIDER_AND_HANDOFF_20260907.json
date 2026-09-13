@@ -7,9 +7,9 @@
     {
       "label": "helper-frozen",
       "source_hashes": {
-        "jiuwenswarm/server/live_voice/native_continuation_preparation.py": "f098eb87a1f86f1c9099979a96cafbf755a8e791bffe1ed93f8b8b766ff0de84",
-        "jiuwenswarm/server/live_voice/openai_realtime_native_engine.py": "0d7e7479f2dbaa50aa805a8735513f6527ec377922a23230862680df0149a387",
-        "jiuwenswarm/server/live_voice/native_business_tools.py": "50bbbae71bbdaa3fff27ba553448a3a3705fa1f32e370ee467ebeffe85e7f4fb"
+        "jiuwenswarm/channels/live_voice/native_continuation_preparation.py": "f098eb87a1f86f1c9099979a96cafbf755a8e791bffe1ed93f8b8b766ff0de84",
+        "jiuwenswarm/channels/live_voice/openai_realtime_native_engine.py": "0d7e7479f2dbaa50aa805a8735513f6527ec377922a23230862680df0149a387",
+        "jiuwenswarm/channels/live_voice/native_business_tools.py": "50bbbae71bbdaa3fff27ba553448a3a3705fa1f32e370ee467ebeffe85e7f4fb"
       },
       "cases": [
         {
@@ -46,9 +46,9 @@
     {
       "label": "shape-capture",
       "source_hashes": {
-        "jiuwenswarm/server/live_voice/native_continuation_preparation.py": "f098eb87a1f86f1c9099979a96cafbf755a8e791bffe1ed93f8b8b766ff0de84",
-        "jiuwenswarm/server/live_voice/openai_realtime_native_engine.py": "0d7e7479f2dbaa50aa805a8735513f6527ec377922a23230862680df0149a387",
-        "jiuwenswarm/server/live_voice/native_business_tools.py": "50bbbae71bbdaa3fff27ba553448a3a3705fa1f32e370ee467ebeffe85e7f4fb"
+        "jiuwenswarm/channels/live_voice/native_continuation_preparation.py": "f098eb87a1f86f1c9099979a96cafbf755a8e791bffe1ed93f8b8b766ff0de84",
+        "jiuwenswarm/channels/live_voice/openai_realtime_native_engine.py": "0d7e7479f2dbaa50aa805a8735513f6527ec377922a23230862680df0149a387",
+        "jiuwenswarm/channels/live_voice/native_business_tools.py": "50bbbae71bbdaa3fff27ba553448a3a3705fa1f32e370ee467ebeffe85e7f4fb"
       },
       "cases": [
         {
@@ -85,9 +85,9 @@
     {
       "label": "named-shape",
       "source_hashes": {
-        "jiuwenswarm/server/live_voice/native_continuation_preparation.py": "f098eb87a1f86f1c9099979a96cafbf755a8e791bffe1ed93f8b8b766ff0de84",
-        "jiuwenswarm/server/live_voice/openai_realtime_native_engine.py": "0d7e7479f2dbaa50aa805a8735513f6527ec377922a23230862680df0149a387",
-        "jiuwenswarm/server/live_voice/native_business_tools.py": "50bbbae71bbdaa3fff27ba553448a3a3705fa1f32e370ee467ebeffe85e7f4fb"
+        "jiuwenswarm/channels/live_voice/native_continuation_preparation.py": "f098eb87a1f86f1c9099979a96cafbf755a8e791bffe1ed93f8b8b766ff0de84",
+        "jiuwenswarm/channels/live_voice/openai_realtime_native_engine.py": "0d7e7479f2dbaa50aa805a8735513f6527ec377922a23230862680df0149a387",
+        "jiuwenswarm/channels/live_voice/native_business_tools.py": "50bbbae71bbdaa3fff27ba553448a3a3705fa1f32e370ee467ebeffe85e7f4fb"
       },
       "cases": [
         {
@@ -117,9 +117,9 @@
     {
       "label": "audio-compatible",
       "source_hashes": {
-        "jiuwenswarm/server/live_voice/native_continuation_preparation.py": "522b3aa96e5bd4c6fe78ae3a65fe17e84fb236467ec2a1409d6ae0e34404e535",
-        "jiuwenswarm/server/live_voice/openai_realtime_native_engine.py": "0d7e7479f2dbaa50aa805a8735513f6527ec377922a23230862680df0149a387",
-        "jiuwenswarm/server/live_voice/native_business_tools.py": "50bbbae71bbdaa3fff27ba553448a3a3705fa1f32e370ee467ebeffe85e7f4fb"
+        "jiuwenswarm/channels/live_voice/native_continuation_preparation.py": "522b3aa96e5bd4c6fe78ae3a65fe17e84fb236467ec2a1409d6ae0e34404e535",
+        "jiuwenswarm/channels/live_voice/openai_realtime_native_engine.py": "0d7e7479f2dbaa50aa805a8735513f6527ec377922a23230862680df0149a387",
+        "jiuwenswarm/channels/live_voice/native_business_tools.py": "50bbbae71bbdaa3fff27ba553448a3a3705fa1f32e370ee467ebeffe85e7f4fb"
       },
       "cases": [
         {
@@ -161,9 +161,9 @@
     {
       "label": "integrated-reviewed",
       "source_hashes": {
-        "jiuwenswarm/server/live_voice/native_continuation_preparation.py": "6a1baa97d1b4411bf531e6824e05f44950175c2f239fafbc406c0414e320da24",
-        "jiuwenswarm/server/live_voice/openai_realtime_native_engine.py": "b100d95cd6994fc8223b5918210d2f3cd48e40f3aaae10e1519ba127cdb2ff2e",
-        "jiuwenswarm/server/live_voice/native_business_tools.py": "fee49962ad09fdd60419977bcc8c70dc7d2b772078d96aa312c7def21125c819"
+        "jiuwenswarm/channels/live_voice/native_continuation_preparation.py": "6a1baa97d1b4411bf531e6824e05f44950175c2f239fafbc406c0414e320da24",
+        "jiuwenswarm/channels/live_voice/openai_realtime_native_engine.py": "b100d95cd6994fc8223b5918210d2f3cd48e40f3aaae10e1519ba127cdb2ff2e",
+        "jiuwenswarm/channels/live_voice/native_business_tools.py": "fee49962ad09fdd60419977bcc8c70dc7d2b772078d96aa312c7def21125c819"
       },
       "cases": [
         {

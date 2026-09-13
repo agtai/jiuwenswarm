@@ -9,7 +9,7 @@ from dataclasses import replace
 import pytest
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import Assurance, ScopeRef
-from jiuwenswarm.server.live_voice.observability import (
+from jiuwenswarm.common.telemetry.observability import (
     LIVE_VOICE_CONTRACT_VERSION,
     OBSERVABILITY_SCHEMA_VERSION,
     LiveVoiceMetric,
@@ -17,7 +17,7 @@ from jiuwenswarm.server.live_voice.observability import (
     create_metric,
     create_observation,
 )
-from jiuwenswarm.server.live_voice.live_voice_configuration_declaration import (
+from jiuwenswarm.common.schema.live_voice_configuration_declaration import (
     LIVE_VOICE_CONFIGURATION_CONTRACT_VERSION,
     AuthenticationMode,
     DurabilityLevel,
@@ -28,17 +28,17 @@ from jiuwenswarm.server.live_voice.live_voice_configuration_declaration import (
     ValidatedExecutorConfiguration,
     ValidatedLiveVoiceConfiguration,
 )
-from jiuwenswarm.server.live_voice.observability_correlation_contract import (
+from jiuwenswarm.channels.live_voice.observability_correlation_contract import (
     CorrelationEvaluationReason,
     evaluate_observability_correlation_map,
 )
-from jiuwenswarm.server.live_voice.observability_otel_codec import (
+from jiuwenswarm.channels.live_voice.observability_otel_codec import (
     OtelBackendSignalKind,
 )
-from jiuwenswarm.server.live_voice.product_authority import (
+from jiuwenswarm.server.runtime.authority.product_authority import (
     ResolvedProductAuthority,
 )
-from jiuwenswarm.server.live_voice.product_observability_runtime import (
+from jiuwenswarm.channels.live_voice.product_observability_runtime import (
     BoundedInMemoryOtelBackend,
     PRODUCT_OBSERVABILITY_BACKEND_ENV,
     PRODUCT_OBSERVABILITY_BACKEND_ID,
@@ -452,7 +452,7 @@ def test_receipt_requires_the_injected_owner_not_an_attacker_key() -> None:
     attacker = TrustedCorrelationProjectionOwner(b"other-key" * 4)
     dimensions = _metric("metric-dimensions")
     labels = tuple()
-    from jiuwenswarm.server.live_voice.observability_correlation_contract import (
+    from jiuwenswarm.channels.live_voice.observability_correlation_contract import (
         BoundedMetricDimensions,
     )
 

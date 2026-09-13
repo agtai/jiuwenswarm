@@ -4,11 +4,11 @@ import { useId, useState } from 'react';
 import { AlertCircle, LoaderCircle, Mic, Square, Volume2, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { LiveVoiceTaskActivity } from '../../features/live-voice/taskPresentationView';
-import type { FormalP3TaskExperienceSnapshot } from '../../features/live-voice/formal/formalP3TaskExperience';
+import type { FormalP3TaskExperienceSnapshot } from '../../features/tasks/formalP3TaskExperience';
 import {
   productTextProgressPresentationBinding,
   type ProductTextProgressEvent,
-} from '../../features/live-voice/formal/productTextProgress';
+} from '../../features/tasks/productTextProgress';
 import { productTaskProgressTranslationKey } from './productTaskProgressPresentation';
 import type { ProductLiveVoiceSurfaceState } from './LiveVoiceIntegratedRoutePanel';
 import './LiveVoiceDemoBar.css';

@@ -30,7 +30,7 @@ from jiuwenswarm.gateway.live_voice.streaming_synthesis_route import (
     StreamingSynthesisReason,
     StreamingSynthesisRouteOwner,
 )
-from jiuwenswarm.server.live_voice.streaming_speech import SynthesisStreamRequest
+from jiuwenswarm.channels.live_voice.streaming_speech import SynthesisStreamRequest
 
 
 OutcomeObserver = Callable[[StreamingSynthesisOutcome], None]

@@ -56,7 +56,7 @@ from jiuwenswarm.gateway.channel_manager.web.web_connect import (
     WebChannelConfig,
 )
 from jiuwenswarm.gateway.channel_manager.web import web_connect
-from jiuwenswarm.server.live_voice.batch_speech import (
+from jiuwenswarm.channels.live_voice.batch_speech import (
     BatchSpeechProvider,
     FormalBatchSpeechService,
     ProviderCapability,
@@ -70,8 +70,8 @@ from jiuwenswarm.server.live_voice.batch_speech import (
     SpeechRecognitionSegmentBinding,
     SpeechRpcContext,
 )
-from jiuwenswarm.server.live_voice.latency_measurement import L0Milestone
-from jiuwenswarm.server.live_voice.native_interaction_contract import (
+from jiuwenswarm.channels.live_voice.latency_measurement import L0Milestone
+from jiuwenswarm.common.schema.native_interaction_contract import (
     NATIVE_INTERACTION_CONTRACT_VERSION,
     NativeDelegateProposal,
     NativeInteractionBinding,
@@ -79,8 +79,8 @@ from jiuwenswarm.server.live_voice.native_interaction_contract import (
     NativePresentationCursor,
     NativeTurnCommit,
 )
-from jiuwenswarm.server.live_voice.interaction_engine import InteractionAction
-from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
+from jiuwenswarm.channels.live_voice.interaction_engine import InteractionAction
+from jiuwenswarm.channels.live_voice.openai_realtime_native_engine import (
     NativeAudioOutput,
     NativeEngineEvent,
     NativeInputAudioFrame,
@@ -1076,7 +1076,7 @@ def _native_activation() -> GatewayNativeActivation:
 @pytest.mark.parametrize("context_failure", [False, True])
 async def test_native_business_context_before_start_poll_and_close(monkeypatch, context_failure):
     from dataclasses import replace
-    from jiuwenswarm.server.live_voice.native_business_contract import NATIVE_BUSINESS_CONTRACT_VERSION
+    from jiuwenswarm.channels.live_voice.native_business_contract import NATIVE_BUSINESS_CONTRACT_VERSION
     from jiuwenswarm.gateway.live_voice import dedicated_media_registration as module
     activation = replace(_native_activation(), business_contract_version=NATIVE_BUSINESS_CONTRACT_VERSION)
     order = []
@@ -1175,7 +1175,7 @@ async def test_native_business_context_before_start_poll_and_close(monkeypatch, 
 
 @pytest.mark.asyncio
 async def test_native_business_late_prepared_output_keeps_real_receipt_and_accepts_no_successor():
-    from jiuwenswarm.server.live_voice.native_business_contract import (
+    from jiuwenswarm.channels.live_voice.native_business_contract import (
         NATIVE_BUSINESS_CONTRACT_VERSION, NativeBusinessProposal, NativeBusinessAction)
     activation = replace(_native_activation(), business_contract_version=NATIVE_BUSINESS_CONTRACT_VERSION)
     engine = _FakeNativeEngine()
@@ -1204,7 +1204,7 @@ async def test_native_business_late_prepared_output_keeps_real_receipt_and_accep
 
 @pytest.mark.asyncio
 async def test_native_work_busy_runtime_defers_exact_provider_without_admission():
-    from jiuwenswarm.server.live_voice.native_business_contract import NATIVE_BUSINESS_CONTRACT_VERSION
+    from jiuwenswarm.channels.live_voice.native_business_contract import NATIVE_BUSINESS_CONTRACT_VERSION
     activation = replace(_native_activation(), business_contract_version=NATIVE_BUSINESS_CONTRACT_VERSION)
     class Client(_FakeNativeRuntimeClient):
         async def propose(self, **kwargs):
@@ -1326,7 +1326,7 @@ class _NativeStartupGate:
 
 
 def _pending_native_fixture(stage, *, capacity=8, monotonic=None, consume=True):
-    from jiuwenswarm.server.live_voice.native_business_contract import NATIVE_BUSINESS_CONTRACT_VERSION
+    from jiuwenswarm.channels.live_voice.native_business_contract import NATIVE_BUSINESS_CONTRACT_VERSION
 
     gate = _NativeStartupGate()
     activation = replace(_native_activation(), business_contract_version=NATIVE_BUSINESS_CONTRACT_VERSION)
@@ -3464,7 +3464,7 @@ async def test_native_playback_stop_admits_later_item_before_provider_cancel(
 
 @pytest.mark.asyncio
 async def test_native_generated_text_is_live_scoped_and_has_zero_presentation_effects() -> None:
-    from jiuwenswarm.server.live_voice.openai_realtime_native_engine import NativeGeneratedTranscript
+    from jiuwenswarm.channels.live_voice.openai_realtime_native_engine import NativeGeneratedTranscript
     activation = _native_activation()
     client, engine = _FakeNativeRuntimeClient(activation), _FakeNativeEngine()
     registry = DedicatedMediaProductRegistry(enabled=True, native_runtime_client=client, native_engine_factory=lambda _: engine)
@@ -5152,7 +5152,7 @@ def test_full_legal_48khz_capture_retains_exact_batch_bytes_and_rejects_excess()
     from jiuwenswarm.common.live_voice_capture_limits import (
         MAX_CAPTURE_DURATION_SECONDS, MAX_CAPTURE_WAV_BYTES,
     )
-    from jiuwenswarm.server.live_voice.batch_speech import _parse_recognition_segment
+    from jiuwenswarm.channels.live_voice.batch_speech import _parse_recognition_segment
 
     registry = _active_registry()
     activation = _activate(

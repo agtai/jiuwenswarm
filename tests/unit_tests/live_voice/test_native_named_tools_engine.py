@@ -5,7 +5,7 @@ import json
 import pytest
 
 from jiuwenswarm.common import live_voice_audio_diagnostics as sink
-from jiuwenswarm.server.live_voice.openai_realtime_native_engine import OpenAIRealtimeNativeInteractionError
+from jiuwenswarm.channels.live_voice.openai_realtime_native_engine import OpenAIRealtimeNativeInteractionError
 from test_native_business_tools import SCENARIOS, inputs
 from test_openai_realtime_native_engine import (
     admitted_business_engine, business_function, function_done, function_outputs,

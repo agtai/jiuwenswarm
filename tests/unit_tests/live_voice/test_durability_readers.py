@@ -10,8 +10,8 @@ from dataclasses import replace
 import pytest
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import Assurance, ScopeRef
-from jiuwenswarm.server.live_voice.durability_checkpoint import D1Checkpoint
-from jiuwenswarm.server.live_voice.durability_effects import (
+from jiuwenswarm.server.runtime.durability.durability_checkpoint import D1Checkpoint
+from jiuwenswarm.server.runtime.durability.durability_effects import (
     EffectDispatchReceipt,
     EffectFact,
     EffectObservationKind,
@@ -21,10 +21,10 @@ from jiuwenswarm.server.live_voice.durability_effects import (
     ExternalEffectObservation,
     effect_fact_bytes,
 )
-from jiuwenswarm.server.live_voice.durability_identity import (
+from jiuwenswarm.server.runtime.durability.durability_identity import (
     DurabilityProfileBinding,
 )
-from jiuwenswarm.server.live_voice.durability_readers import (
+from jiuwenswarm.server.runtime.durability.durability_readers import (
     MAX_DURABILITY_PREFIX_ITEM_BYTES,
     MAX_DURABILITY_PREFIX_ROWS,
     CheckpointPrefixRow,

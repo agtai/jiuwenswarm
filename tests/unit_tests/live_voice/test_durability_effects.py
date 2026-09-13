@@ -5,7 +5,7 @@ from dataclasses import replace
 import pytest
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import Assurance, ScopeRef
-from jiuwenswarm.server.live_voice.durability_effects import (
+from jiuwenswarm.server.runtime.durability.durability_effects import (
     EffectDispatchReceipt,
     EffectObservationKind,
     EffectReconciliationKind,
@@ -20,7 +20,7 @@ from jiuwenswarm.server.live_voice.durability_effects import (
     effect_fact_bytes,
     effect_fact_from_bytes,
 )
-from jiuwenswarm.server.live_voice.durability_identity import (
+from jiuwenswarm.server.runtime.durability.durability_identity import (
     DurabilityProfileBinding,
 )
 

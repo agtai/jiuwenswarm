@@ -170,7 +170,7 @@ def test_session_join_keeps_explicit_foreign_session_out():
 
 def test_synthesis_response_identity_survives_session_filter_without_unit_guessing():
     from jiuwenswarm.common.schema.live_voice_contract_v2 import ResponseRef
-    from jiuwenswarm.server.live_voice.streaming_speech import SynthesisStreamRef
+    from jiuwenswarm.channels.live_voice.streaming_speech import SynthesisStreamRef
 
     ref_a = SynthesisStreamRef("stream-a", 1, ResponseRef("interaction-a", "response-a", 1), "unit", 0)
     ref_b = SynthesisStreamRef("stream-b", 1, ResponseRef("interaction-b", "response-b", 1), "unit", 0)
@@ -274,7 +274,7 @@ def test_http_model_tool_boundaries_and_backward_wall_clock_are_not_mispaired():
 
 
 def test_stable_error_reason_and_tool_ids_without_private_data(records):
-    from jiuwenswarm.server.live_voice.formal_task_models import ErrorCode, FormalTaskViolation
+    from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import ErrorCode, FormalTaskViolation
     error = FormalTaskViolation("SEMANTIC_PROVIDER_TIMEOUT", "PRIVATE_ERROR", ErrorCode.TIMEOUT)
     fields = profile.error_fields(error)
     assert fields["error_reason"] == "SEMANTIC_PROVIDER_TIMEOUT"
@@ -378,7 +378,7 @@ async def test_shared_agent_rpc_is_silent_without_live_voice_context(records):
 
 
 def test_nested_registry_rejection_preserves_only_structured_breadcrumbs(records):
-    from jiuwenswarm.server.live_voice.product_composition_registry import P3RouteResult
+    from jiuwenswarm.channels.live_voice.product_composition_registry import P3RouteResult
     result = P3RouteResult(False, {"error": {"code": "STALE", "reason": "STALE_ACTIVATION", "message": "PRIVATE", "details": {"secret": "PRIVATE"}}})
     with profile.ProfileSpan("rpc.activation") as span:
         assert span.result(result) is result

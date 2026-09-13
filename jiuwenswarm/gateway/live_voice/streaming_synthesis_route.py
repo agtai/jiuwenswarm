@@ -31,17 +31,17 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MediaAudioFrame,
 )
-from jiuwenswarm.server.live_voice.openai_streaming_speech import (
+from jiuwenswarm.channels.live_voice.openai_streaming_speech import (
     SpeechDegradationFact,
     SpeechRouteTier,
     StreamingSpeechSelection,
 )
-from jiuwenswarm.server.live_voice.speech_ports import (
+from jiuwenswarm.channels.live_voice.speech_ports import (
     ProviderRef,
     SpeechMode,
     SynthesisEventKind,
 )
-from jiuwenswarm.server.live_voice.streaming_speech import (
+from jiuwenswarm.channels.live_voice.streaming_speech import (
     CapabilityProvenance,
     MAX_STREAM_TIMEOUT_SECONDS,
     MAX_SYNTHESIS_TEXT_CHARS,

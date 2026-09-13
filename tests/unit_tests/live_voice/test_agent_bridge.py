@@ -9,7 +9,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ScopeRef,
     TurnCommit,
 )
-from jiuwenswarm.server.live_voice.agent_bridge import (
+from jiuwenswarm.channels.live_voice.agent_bridge import (
     AgentBridgePort,
     AgentBridgeViolation,
     AgentEvent,

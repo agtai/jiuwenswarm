@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import Assurance, ScopeRef
-from jiuwenswarm.server.live_voice.formal_task_models import (
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
     FormalTaskState,
     OutboxKind,
     OutboxState,
@@ -18,37 +18,8 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     PersistentTaskEvent,
     PersistentTaskRecord,
 )
-from jiuwenswarm.server.live_voice.observability import (
-    CANCEL_SCOPES,
-    CANCEL_TARGET_SEGMENT_MATRIX,
-    ERROR_CODES,
-    EVENT_SEMANTIC_MATRIX,
-    EVENT_NAMES,
-    FAILURE_ERROR_MATRIX,
-    FAILURE_SEGMENT_MATRIX,
-    IDENTITY_POLICY,
-    LIVE_VOICE_CONTRACT_VERSION,
-    METRIC_DEFINITIONS,
-    METRIC_SEMANTIC_MATRIX,
-    OBSERVABILITY_SCHEMA_VERSION,
-    OBSERVED_STATES,
-    REASON_CODES,
-    ROUTE_IMPLEMENTATION_CLASSES,
-    SEGMENT_NAMES,
-    SEGMENT_BINDING_MATRIX,
-    TERMINAL_OUTCOMES,
-    LiveVoiceObservabilityCollector,
-    ObservabilityViolation,
-    RouteDescriptor,
-    create_metric,
-    create_observation,
-    create_queue_metric,
-    create_route_descriptor,
-    create_trace_binding,
-    observation_from_task_event,
-    observation_from_task_outbox,
-    route_descriptor_from_route_record,
-)
+from jiuwenswarm.server.runtime.formal_tasks.task_observability import (observation_from_task_event, observation_from_task_outbox)
+from jiuwenswarm.common.telemetry.observability import (CANCEL_SCOPES, CANCEL_TARGET_SEGMENT_MATRIX, ERROR_CODES, EVENT_SEMANTIC_MATRIX, EVENT_NAMES, FAILURE_ERROR_MATRIX, FAILURE_SEGMENT_MATRIX, IDENTITY_POLICY, LIVE_VOICE_CONTRACT_VERSION, METRIC_DEFINITIONS, METRIC_SEMANTIC_MATRIX, OBSERVABILITY_SCHEMA_VERSION, OBSERVED_STATES, REASON_CODES, ROUTE_IMPLEMENTATION_CLASSES, SEGMENT_NAMES, SEGMENT_BINDING_MATRIX, TERMINAL_OUTCOMES, LiveVoiceObservabilityCollector, ObservabilityViolation, RouteDescriptor, create_metric, create_observation, create_queue_metric, create_route_descriptor, create_trace_binding, route_descriptor_from_route_record)
 
 
 FIXTURE = (

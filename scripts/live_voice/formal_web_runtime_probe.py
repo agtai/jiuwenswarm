@@ -6,14 +6,14 @@ import time
 
 from jiuwenswarm.common.schema.message import Message, ReqMethod
 from jiuwenswarm.gateway.app_gateway import _inject_live_voice_gateway_voice_claim
-from jiuwenswarm.server.live_voice.batch_speech import (
+from jiuwenswarm.channels.live_voice.batch_speech import (
     BatchSpeechProvider,
     FormalBatchSpeechService,
     ProviderRecognitionRequest,
     ProviderSynthesisRequest,
     create_environment_batch_speech_provider,
 )
-from jiuwenswarm.server.live_voice.critical_token_safety import CriticalTokenPolicy
+from jiuwenswarm.channels.live_voice.critical_token_safety import CriticalTokenPolicy
 
 
 PROBE_TEXT = "请介绍巴黎五个地方，每一项都简要回答。"

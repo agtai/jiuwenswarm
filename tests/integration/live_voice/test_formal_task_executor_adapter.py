@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.support.live_voice.legacy_project_executor import ProjectCodeExecutorAdapter
+
 import asyncio
 from pathlib import Path
 
@@ -17,12 +19,12 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     OriginRef,
     ScopeRef,
 )
-from jiuwenswarm.server.live_voice.executor_capabilities import (
+from jiuwenswarm.server.runtime.formal_tasks.executor_capabilities import (
     TASK_EXECUTION_REQUIREMENTS_SCHEMA_VERSION,
     TaskExecutionRequirements,
     select_executor,
 )
-from jiuwenswarm.server.live_voice.formal_task_models import (
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
     FormalTaskSpec,
     FormalTaskViolation,
     OutboxKind,
@@ -30,11 +32,10 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     PersistentOutboxItem,
     ResolvedTaskContext,
 )
-from jiuwenswarm.server.live_voice.project_code_executor import (
+from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
     DirectProjectCodeExecutorAdapter,
     FORMAL_PROJECT_EXECUTOR_ID,
     PROJECT_CODE_PIPELINE,
-    ProjectCodeExecutorAdapter,
     ProjectExecutionBinding,
 )
 

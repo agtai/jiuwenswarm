@@ -8,11 +8,11 @@ import hashlib
 import pytest
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import ResponseRef
-from jiuwenswarm.server.live_voice.formal_task_models import (
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
     ExecutorObservation, ExecutorResolution, FormalAttemptState,
     TaskResultArtifact, TerminalOutcome,
 )
-from jiuwenswarm.server.live_voice.product_composition_registry import (
+from jiuwenswarm.channels.live_voice.product_composition_registry import (
     AgentServerProductCompositionRegistry, ProductCompositionSettings, _VoiceTaskOrigin,
 )
 from tests.unit_tests.live_voice.test_product_composition_registry import (
@@ -32,7 +32,7 @@ async def test_running_silent_then_terminal_presented_and_acknowledged(
     tmp_path, monkeypatch, origin_kind, offline, outcome,
 ):
     monkeypatch.setattr(
-        'jiuwenswarm.server.live_voice.product_composition_registry.utc_now',
+        'jiuwenswarm.channels.live_voice.product_composition_registry.utc_now',
         lambda: ACK_NOW,
     )
     project, store, task_id, _ = _running_presentation_store(tmp_path)

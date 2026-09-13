@@ -15,7 +15,7 @@ from scripts.live_voice.l0_measurement_baseline import (
     build_provider_component_baseline,
     clean_source_head,
 )
-from jiuwenswarm.server.live_voice.latency_measurement import (
+from jiuwenswarm.channels.live_voice.latency_measurement import (
     L0EvidenceSource,
     L0Milestone,
     L0RoundBinding,
@@ -343,7 +343,7 @@ def test_clean_source_identity_rejects_dirty_or_requested_head_mismatch(
 async def test_provider_component_labels_uncontrolled_lifecycle_unknown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from jiuwenswarm.server.live_voice import batch_speech
+    import jiuwenswarm.channels.live_voice.batch_speech as batch_speech
 
     created = 0
 

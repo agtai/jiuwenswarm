@@ -10,7 +10,7 @@ from collections.abc import AsyncIterator
 import pytest
 
 from jiuwenswarm.common.schema.agent import AgentResponseChunk
-from jiuwenswarm.server.live_voice.speculative_dialogue import (
+from jiuwenswarm.channels.live_voice.speculative_dialogue import (
     AttachedFormalFacade,
     SpeculativeDialogue,
     SpeculativeDialogueViolation,

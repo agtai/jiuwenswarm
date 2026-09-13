@@ -31,7 +31,7 @@ if str(REPO_ROOT) not in sys.path:
 import psutil  # noqa: E402
 from websockets import connect as WebSocketConnect  # noqa: E402
 
-from jiuwenswarm.server.live_voice.latency_measurement import (  # noqa: E402
+from jiuwenswarm.channels.live_voice.latency_measurement import (  # noqa: E402
     L0_RUN_LABELS_VERSION,
     load_l0_corpus_manifest,
 )

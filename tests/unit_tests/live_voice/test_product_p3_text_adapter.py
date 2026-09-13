@@ -20,10 +20,10 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ResultEnvelope,
     ScopeRef,
 )
-from jiuwenswarm.server.live_voice.formal_task_models import (
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
     PersistentTaskEvent,
 )
-from jiuwenswarm.server.live_voice.product_authority import (
+from jiuwenswarm.server.runtime.authority.product_authority import (
     AuthorityResourceBinding,
     AuthorityRouteContext,
     P3AuthorityAdapter,
@@ -31,7 +31,7 @@ from jiuwenswarm.server.live_voice.product_authority import (
     TrustedAuthorityCandidate,
     TrustedAuthorityLookup,
 )
-from jiuwenswarm.server.live_voice.product_p3_text_adapter import (
+from jiuwenswarm.server.runtime.formal_tasks.product_p3_text_adapter import (
     ProductP3AuthorizedQuery,
     ProductP3CleanupReason,
     ProductP3CleanupState,
@@ -42,16 +42,16 @@ from jiuwenswarm.server.live_voice.product_p3_text_adapter import (
     ProductP3TextAdapter,
     ProductP3TextReason,
 )
-from jiuwenswarm.server.live_voice.progress_notification_arbiter import (
+from jiuwenswarm.server.runtime.presentation.progress_notification_arbiter import (
     ForegroundFact,
     ForegroundSnapshot,
     ProgressNotificationArbiter,
     SpeechPolicy,
 )
-from jiuwenswarm.server.live_voice.task_event_subscription import (
+from jiuwenswarm.server.runtime.formal_tasks.task_event_subscription import (
     TaskEventSubscription,
 )
-from jiuwenswarm.server.live_voice.task_progress_return import (
+from jiuwenswarm.server.runtime.presentation.task_progress_return import (
     TaskProgressOriginBinding,
     TaskProgressOriginKind,
     TaskProgressReturnActivation,

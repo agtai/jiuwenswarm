@@ -36,14 +36,14 @@ async def probe(
         ScopeRef,
         TurnCommit,
     )
-    from jiuwenswarm.server.live_voice.p3_model_resolution import (
+    from jiuwenswarm.server.runtime.agent_adapter.p3_model_resolution import (
         ServerModelCatalogResolver,
     )
-    from jiuwenswarm.server.live_voice.production_task_intent import (
+    from jiuwenswarm.server.runtime.formal_tasks.production_task_intent import (
         AuthenticatedTaskFact, AttemptState, TaskAuthorityRead, TaskState,
         TerminalOutcome,
     )
-    from jiuwenswarm.server.live_voice.task_semantics import (
+    from jiuwenswarm.server.runtime.formal_tasks.task_semantics import (
         TaskSemanticContext,
         TaskSemanticResolver,
     )
@@ -343,8 +343,8 @@ async def probe(
         name: hashlib.sha256((root / name).read_bytes()).hexdigest()
         for name in (
             "scripts/live_voice/semantic_model_probe.py",
-            "jiuwenswarm/server/live_voice/task_semantics.py",
-            "jiuwenswarm/server/live_voice/p3_model_resolution.py",
+            "jiuwenswarm/server/runtime/formal_tasks/task_semantics.py",
+            "jiuwenswarm/server/runtime/agent_adapter/p3_model_resolution.py",
             "jiuwenswarm/common/reasoning_injector.py",
             "jiuwenswarm/common/live_voice_operation_budgets.py",
             "tests/support/live_voice/semantic_constraint_oracles.py",

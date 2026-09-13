@@ -1,8 +1,8 @@
 """Endpoint experiments retain Runtime turn and interruption ownership."""
 import pytest
 
-from jiuwenswarm.server.live_voice import openai_realtime_native_engine as native
-from jiuwenswarm.server.live_voice.native_interaction_config import NativeInteractionConfigurationError
+import jiuwenswarm.channels.live_voice.openai_realtime_native_engine as native
+from jiuwenswarm.channels.live_voice.native_interaction_config import NativeInteractionConfigurationError
 from test_openai_realtime_native_engine import CapturingFactory, ScriptedSocket, binding, config, negotiation, business_context
 
 

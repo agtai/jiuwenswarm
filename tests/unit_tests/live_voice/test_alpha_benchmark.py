@@ -7,7 +7,7 @@ from typing import cast
 
 import pytest
 
-from jiuwenswarm.server.live_voice.alpha_benchmark import (
+from tests.support.live_voice.alpha_benchmark import (
     AlphaBenchmarkCase,
     AlphaBenchmarkPlan,
     AlphaBenchmarkTarget,
@@ -16,7 +16,7 @@ from jiuwenswarm.server.live_voice.alpha_benchmark import (
     build_alpha_benchmark_report,
     run_alpha_benchmark,
 )
-from jiuwenswarm.server.live_voice.observability import (
+from jiuwenswarm.common.telemetry.observability import (
     LiveVoiceMetric,
     RouteDescriptor,
     TraceBinding,

@@ -25,39 +25,39 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     TurnCommitLedger,
     WorkProgressEventV2,
 )
-from jiuwenswarm.server.live_voice.formal_task_models import (
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
     FormalTaskViolation,
     ResolvedTaskContext,
     TaskAuthorizationGrant,
 )
-from jiuwenswarm.server.live_voice.persistent_task_core import (
+from jiuwenswarm.server.runtime.formal_tasks.persistent_task_core import (
     PersistentTaskCore,
     project_task_event,
 )
-from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
+from jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition import (
     AuthenticatedPrincipal,
     P3AuthenticatedComposition,
     P3_PRODUCT_AUTHORITY_OPERATIONS,
     ResolvedAuthority,
     StaticBearerAuthenticator,
 )
-from jiuwenswarm.server.live_voice.p3_confirmation import (
+from jiuwenswarm.server.runtime.formal_tasks.p3_confirmation import (
     BoundedP3ConfirmationOwner,
 )
-from jiuwenswarm.server.live_voice.p3_model_resolution import ResolvedP3Model
-from jiuwenswarm.server.live_voice.p3_product_confirmation import (
+from jiuwenswarm.server.runtime.agent_adapter.p3_model_resolution import ResolvedP3Model
+from jiuwenswarm.server.runtime.formal_tasks.p3_product_confirmation import (
     ProductP3ConfirmationForwarder,
 )
-from jiuwenswarm.server.live_voice.product_composition_registry import (
+from jiuwenswarm.channels.live_voice.product_composition_registry import (
     AgentServerProductCompositionRegistry,
     ProductCompositionSettings,
 )
-from jiuwenswarm.server.live_voice.project_code_executor import (
+from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
     DirectProjectCodeExecutorAdapter,
     ProjectExecutionBinding,
 )
-from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
-from jiuwenswarm.server.live_voice.voice_task_policy import (
+from jiuwenswarm.server.runtime.formal_tasks.task_store import SqliteTaskStore
+from jiuwenswarm.server.runtime.formal_tasks.voice_task_policy import (
     FormalTaskInvocation,
     FormalTaskPolicyAdapter,
     FormalTaskPolicyInput,
@@ -640,7 +640,7 @@ async def test_s6_joint_slow_conversation_detached_task_and_exact_cancel_domains
     # Selected admission compares its durable deadline with the Store claim
     # clock.  Keep this deterministic joint scenario on one frozen instant.
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.task_store.utc_now",
+        "jiuwenswarm.server.runtime.formal_tasks.task_store.utc_now",
         lambda: NOW,
     )
     product_clock = {"now": NOW}

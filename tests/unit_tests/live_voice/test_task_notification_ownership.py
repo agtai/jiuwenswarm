@@ -4,8 +4,8 @@ import asyncio
 
 import pytest
 
-from jiuwenswarm.server.live_voice.progress_notification_arbiter import ProgressNotificationArbiter
-from jiuwenswarm.server.live_voice.task_progress_return import (
+from jiuwenswarm.server.runtime.presentation.progress_notification_arbiter import ProgressNotificationArbiter
+from jiuwenswarm.server.runtime.presentation.task_progress_return import (
     TaskEventAuthorityProgressSource, TaskProgressReturnBridge,
     TaskProgressOriginKind, TaskProgressReturnState,
     DeferredVoiceOwnership,

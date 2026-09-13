@@ -21,14 +21,14 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     TurnCommit,
     TurnCommitLedger,
 )
-from jiuwenswarm.server.live_voice.formal_task_models import (
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
     FormalTaskViolation,
     ResolvedTaskContext,
     TaskAuthorizationGrant,
     TaskRetryPrecondition,
     TaskRetryProductRequestFingerprint,
 )
-from jiuwenswarm.server.live_voice.voice_task_policy import (
+from jiuwenswarm.server.runtime.formal_tasks.voice_task_policy import (
     FormalTaskPolicyAdapter,
     FormalTaskPolicyInput,
 )
@@ -459,7 +459,7 @@ def test_voice_adjust_maps_exact_current_task_and_committed_span() -> None:
         destructive=True,
         confirmed=True,
         confirmation_id="confirm-1",
-        current_task_binding=True,
+
     )
 
     invocation = FormalTaskPolicyAdapter(commits).map(intent)

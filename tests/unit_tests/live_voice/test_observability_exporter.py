@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable
 
 import pytest
 
-from jiuwenswarm.server.live_voice.observability import (
+from jiuwenswarm.common.telemetry.observability import (
     LIVE_VOICE_CONTRACT_VERSION,
     OBSERVABILITY_SCHEMA_VERSION,
     LiveVoiceMetric,
@@ -16,7 +16,7 @@ from jiuwenswarm.server.live_voice.observability import (
     create_metric,
     create_observation,
 )
-from jiuwenswarm.server.live_voice.observability_exporter import (
+from jiuwenswarm.channels.live_voice.observability_exporter import (
     ExportRecord,
     ExporterBackpressureError,
     ExporterCloseTimeoutError,

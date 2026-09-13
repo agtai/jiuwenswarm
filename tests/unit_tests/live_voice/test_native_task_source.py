@@ -7,11 +7,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from jiuwenswarm.server.live_voice.native_task_source import NativeTaskSource, NativeTaskSourceError
-from jiuwenswarm.server.live_voice.native_business_contract import NativeBusinessAction, NativeBusinessProposal
-from jiuwenswarm.server.live_voice.formal_task_models import FormalTaskSpec, TaskAdjustmentRequest
-from jiuwenswarm.server.live_voice.project_code_executor import DirectProjectCodeExecutorAdapter
-from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
+from jiuwenswarm.common.schema.native_task_source import NativeTaskSource, NativeTaskSourceError
+from jiuwenswarm.channels.live_voice.native_business_contract import NativeBusinessAction, NativeBusinessProposal
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import FormalTaskSpec, TaskAdjustmentRequest
+from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import DirectProjectCodeExecutorAdapter
+from jiuwenswarm.server.runtime.formal_tasks.task_store import SqliteTaskStore
 from tests.unit_tests.live_voice.test_native_interaction_runtime import (
     active_owner, turn_commit, input_transcript, delegate_proposal,
 )
@@ -187,7 +187,7 @@ async def test_missing_source_rejects_before_task_agent_or_file_effects(tmp_path
 @pytest.mark.parametrize("rebind", [False, True])
 async def test_gateway_rpc_late_transcript_releases_only_current_authorized_task(tmp_path, monkeypatch, rebind):
     from tests.unit_tests.live_voice.test_product_composition_registry import _native_input_transcript_proposal
-    from jiuwenswarm.server.live_voice.openai_realtime_native_engine import NativeEngineEvent
+    from jiuwenswarm.channels.live_voice.openai_realtime_native_engine import NativeEngineEvent
     env = await make_registry(tmp_path, monkeypatch, input_text=None)
     route = env.registry._p2_routes[("session-1", "interaction-1")]
     owner = route.native_runtime_owner
@@ -245,7 +245,7 @@ def test_legacy_spec_adjustment_bytes_and_source_null_are_distinct(tmp_path):
 @pytest.mark.asyncio
 async def test_durable_update_preserves_original_source_and_proves_new_requirement(tmp_path):
     from tests.unit_tests.live_voice.test_persistent_task_core import _create, _Executor, _wave2_command, NOW
-    from jiuwenswarm.server.live_voice.persistent_task_core import PersistentTaskCore
+    from jiuwenswarm.server.runtime.formal_tasks.persistent_task_core import PersistentTaskCore
     from jiuwenswarm.common.schema.live_voice_contract_v2 import CommandEnvelope
     invocation = _create(tmp_path)
     scope = invocation.envelope.scope
@@ -287,8 +287,8 @@ def with_source(command, retained):
 
 def test_successor_retry_reopen_preserve_source_and_reject_source_replacement(tmp_path):
     from jiuwenswarm.common.schema.live_voice_contract_v2 import TerminalOutcome
-    from jiuwenswarm.server.live_voice.formal_task_models import FormalTaskViolation
-    from jiuwenswarm.server.live_voice.persistent_task_core import PersistentTaskCore
+    from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import FormalTaskViolation
+    from jiuwenswarm.server.runtime.formal_tasks.persistent_task_core import PersistentTaskCore
     from tests.unit_tests.live_voice.test_persistent_task_core import (
         _successor_fixture, _successor_command, _observations, _retry, _context, _database_dump, NOW,
     )
@@ -330,7 +330,7 @@ async def test_direct_worker_injects_create_and_applied_adjustment_sources(tmp_p
     from pathlib import Path
     from jiuwenswarm.common.schema.agent import AgentResponseChunk
     from jiuwenswarm.common.schema.live_voice_contract_v2 import TerminalOutcome
-    from jiuwenswarm.server.live_voice.persistent_task_core import PersistentTaskCore
+    from jiuwenswarm.server.runtime.formal_tasks.persistent_task_core import PersistentTaskCore
     from jiuwenswarm.server.runtime.agent_adapter.background_task_checkpoint import current_background_task_checkpoint
     from tests.unit_tests.live_voice.test_persistent_task_core import _create, _adjust, NOW
     from tests.unit_tests.live_voice.test_project_code_executor import (
@@ -501,7 +501,7 @@ async def test_public_intent_cannot_self_issue_source_and_confirmation_cannot_re
 
 def test_command_replay_cannot_replace_original_source(tmp_path):
     from tests.unit_tests.live_voice.test_persistent_task_core import _create, _Executor, _database_dump, NOW
-    from jiuwenswarm.server.live_voice.persistent_task_core import PersistentTaskCore
+    from jiuwenswarm.server.runtime.formal_tasks.persistent_task_core import PersistentTaskCore
     invocation = _create(tmp_path)
     retained = source(scope=invocation.envelope.scope)
     command = with_source(invocation.envelope, retained)

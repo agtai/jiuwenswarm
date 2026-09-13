@@ -11,7 +11,7 @@ from dataclasses import fields
 
 import pytest
 
-from jiuwenswarm.server.live_voice.product_p2_readiness import (
+from tests.support.live_voice.product_p2_readiness import (
     PRODUCT_P2_READINESS_CONTRACT_VERSION,
     ProductP2ReadinessEvidenceScope,
     ProductP2ReadinessFact,

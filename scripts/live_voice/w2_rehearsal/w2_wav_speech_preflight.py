@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 async def _run(wav_path: Path) -> int:
-    from jiuwenswarm.server.live_voice.batch_speech import (
+    from jiuwenswarm.channels.live_voice.batch_speech import (
         BatchSpeechError,
         OpenAICompatibleBatchSpeechProvider,
         OpenAICompatibleSpeechConfig,

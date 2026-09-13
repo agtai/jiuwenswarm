@@ -123,7 +123,7 @@ test('Panel P2 owner factory defaults production to sixteen and injects one for 
 import {
   FormalTaskControlLeaf,
   isFormalTaskRetryEligible,
-} from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/formalTaskControlLeaf.js';
+} from '../node_modules/.cache/live-voice-integrated-web/features/tasks/formalTaskControlLeaf.js';
 import {
   PRODUCT_P2_NOTIFICATION_NEXT_METHOD,
   PRODUCT_P2_SUBMIT_METHOD,
@@ -132,7 +132,7 @@ import {
   IntegratedWebRouteShell,
   createCurrentIntegratedWebRouteSelection,
 } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/integratedWebRouteShell.js';
-import { parseProductTextProgressEvent } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/productTextProgress.js';
+import { parseProductTextProgressEvent } from '../node_modules/.cache/live-voice-integrated-web/features/tasks/productTextProgress.js';
 
 const retryBinding = Object.freeze({
   subject_id: 'principal-1',
@@ -1977,10 +1977,6 @@ test('actual Live Voice product entry selects the formal P1 owner while compatib
   assert.match(source, /FEATURE_LIVE_VOICE_INTEGRATED_WEB\s*&&\s*FEATURE_LIVE_VOICE_INTEGRATED_P1/);
   assert.match(source, /formalProductVoiceEnabled\s*\?\s*\(\s*<FormalProductLiveVoiceDemoBar/);
   assert.match(source, /surfaceState=\{productVoiceState\}/);
-  assert.match(source, /onTaskRefresh=/);
-  assert.match(source, /onTaskSelect=/);
-  assert.match(source, /onTaskMutation=/);
-  assert.match(source, /onTaskConfirm=/);
   assert.match(source, /startProductVoiceWithBrowserOwnership/);
   assert.match(source, /productVoiceControlRef=\{formalProductVoiceEnabled \? productVoiceControlRef : undefined\}/);
   assert.match(source, /addMessageIfAbsent\(event\.session_id/);
@@ -1995,7 +1991,7 @@ test('actual Live Voice product entry selects the formal P1 owner while compatib
   assert.match(barSource, /data-testid="live-voice-command-task-confirmation"/);
   assert.match(barSource, /!handsFree/);
   assert.match(barSource, /handsFree\s*&&\s*status === 'speaking'\s*&&\s*onInterruptAndSpeak/);
-  assert.match(barSource, /handsFree\s*&&\s*status === 'speaking'\s*&&\s*onStopPlayback/);
+  assert.match(barSource, /handsFree\s*&&\s*\(status === 'speaking' \|\| faultTailPlaying\)\s*&&\s*onStopPlayback/);
 });
 
 test('integrated route diagnostics remain vertically reachable in a bounded panel', async () => {
@@ -2034,7 +2030,8 @@ test('recognized P1 text can enter P2 while every retained voice operation block
 
 test('foreground presentation fence keeps exact activation and response identity without superseded generation residue', async () => {
   const source = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
-  const fence = source.match(
+  const operationsSource = await readFile(new URL('../src/components/ChatPanel/liveVoiceProductOperations.ts', import.meta.url), 'utf8');
+  const fence = operationsSource.match(
     /type PendingForegroundPresentationFence = Readonly<\{(?<fields>[\s\S]*?)\}>;/,
   )?.groups?.fields;
 
@@ -2064,6 +2061,7 @@ test('ChatPanel mounts the production browser-ownership lifecycle used by the ti
     'utf8',
   );
   const panelSource = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
+  const operationsSource = await readFile(new URL('../src/components/ChatPanel/liveVoiceProductOperations.ts', import.meta.url), 'utf8');
   const lifecycleCall = source.slice(
     source.indexOf('useProductVoiceBrowserOwnership({'),
     source.indexOf('let formalVoiceVisualState'),
@@ -2097,7 +2095,7 @@ test('ChatPanel mounts the production browser-ownership lifecycle used by the ti
   assert.match(lifecycleSource, /createBrowserLiveVoiceOwnershipBarrier/);
   assert.match(lifecycleSource, /cleanupControlRef/);
   assert.match(lifecycleSource, /unmountedRef/);
-  assert.match(panelSource, /closeSession\(sessionId: string\): Promise<void>/);
+  assert.match(operationsSource, /closeSession\(sessionId: string\): Promise<void>/);
   assert.match(start, /await browserOwnership\.acquire/);
   assert.match(start, /await ownershipBarrier\.wait\(\)/);
   assert.match(start, /await ownershipBarrier\.run\(async \(\) => \{/);

@@ -11,7 +11,7 @@ import { Info } from 'lucide-react';
 import { useSessionArtifacts, useSessionArtifactsCount } from '../ArtifactsPanel';
 import { useTaskPlanningMetrics } from '../teamArea';
 import { ExpandedPanel } from '../teamArea/ExpandedPanel';
-import { useLiveVoiceTaskStore } from '../../stores/liveVoiceTaskStore';
+import { useFormalTaskStore } from '../../stores/formalTaskStore';
 import { RecentTasksPanel } from './RecentTasksPanel';
 import { loadTeamHistoryPanelState } from '../../features/teamHistoryPanelRestore';
 import { TaskPlanningPanel } from '../teamArea/TaskPlanningPanel';
@@ -263,7 +263,7 @@ export function ToolPanel({
   );
   // 规划/性能模式下复用 TaskPlanningPanel 紧凑态：把 TodoItem 降级为 TeamTask
   const todos = useTodoStore((s) => s.runtimes[activeSessionId ?? '']?.todos ?? []);
-  const backgroundEntry = useLiveVoiceTaskStore(s => s.entries[activeSessionId ?? '']);
+  const backgroundEntry = useFormalTaskStore(s => s.entries[activeSessionId ?? '']);
   const recentTasks = backgroundEntry && activeSessionId
     ? <RecentTasksPanel entry={backgroundEntry} todos={[]} sessionId={activeSessionId} projectId={project?.project_id} />
     : undefined;

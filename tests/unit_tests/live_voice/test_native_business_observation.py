@@ -9,11 +9,11 @@ from dataclasses import replace
 import pytest
 
 from jiuwenswarm.gateway.live_voice.native_interaction_runtime_client import NativeRuntimeClientError
-from jiuwenswarm.server.live_voice.native_business_observation import (
+from jiuwenswarm.common.schema.native_business_observation import (
     NATIVE_PROVIDER_RECEIPT_VERSION,
     canonical_native_receipt, observation_cursor, project_native_receipt,
 )
-from jiuwenswarm.server.live_voice.native_work_runtime import NativeWorkRuntime, NativeWorkViolation
+from jiuwenswarm.server.runtime.work.native_work_runtime import NativeWorkRuntime, NativeWorkViolation
 from tests.unit_tests.live_voice.test_native_business_registry import make_registry, call
 from tests.unit_tests.live_voice.test_native_work_runtime import admission, terminal, scope
 

@@ -36,7 +36,7 @@ import {
   parseWorkProgressEventV2,
   successResult,
   validateTransition,
-} from '../node_modules/.cache/live-voice-contract-v2/liveVoiceContractV2.js';
+} from '../node_modules/.cache/live-voice-contract-v2/interactionContractV2.js';
 
 const fixtureRoot = resolve(process.cwd(), '../../../../tests/fixtures/live_voice_contract_v2');
 

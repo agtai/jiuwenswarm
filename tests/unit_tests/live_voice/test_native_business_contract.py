@@ -3,13 +3,13 @@
 import pytest
 import json
 
-from jiuwenswarm.server.live_voice.native_business_contract import (
+from jiuwenswarm.channels.live_voice.native_business_contract import (
     NativeBusinessAction,
     NativeBusinessViolation,
     NativeBusinessProposal,
 )
-from jiuwenswarm.server.live_voice.native_interaction_contract import NativeInteractionBinding, NativeDelegateProposal
-from jiuwenswarm.server.live_voice.native_interaction_carrier import NativeInteractionProposal
+from jiuwenswarm.common.schema.native_interaction_contract import NativeInteractionBinding, NativeDelegateProposal
+from jiuwenswarm.channels.live_voice.native_interaction_carrier import NativeInteractionProposal
 from jiuwenswarm.common.schema.live_voice_contract_v2 import ScopeRef, Assurance
 
 
@@ -125,7 +125,7 @@ def test_business_function_rejects_duplicate_arguments_and_unknown_version():
 
 
 def test_proposed_task_arguments_pass_actual_production_policy_validator():
-    from jiuwenswarm.server.live_voice.production_task_intent import _validate_arguments
+    from jiuwenswarm.server.runtime.formal_tasks.production_task_intent import _validate_arguments
     for value in (
         action("task.list", target_id=None), action(), action("task.result"),
         action("task.create", target_id=None, name="x" * 256, instruction="Read the project"),

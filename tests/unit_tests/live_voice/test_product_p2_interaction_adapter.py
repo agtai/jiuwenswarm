@@ -18,28 +18,28 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ScopeRef,
     TurnCommit,
 )
-from jiuwenswarm.server.live_voice.agent_conversation_runtime import (
+from jiuwenswarm.channels.live_voice.agent_conversation_runtime import (
     AgentConversationNotification,
     AgentConversationShutdownResult,
     AgentConversationShutdownStatus,
     AuthoritativePresentationHandle,
 )
-from jiuwenswarm.server.live_voice.interaction_engine import (
+from jiuwenswarm.channels.live_voice.interaction_engine import (
     InteractionAction,
     InteractionEnginePort,
 )
-from jiuwenswarm.server.live_voice.conversation_runtime_loop import (
+from jiuwenswarm.channels.live_voice.conversation_runtime_loop import (
     ConversationRuntimeLoop,
 )
-from jiuwenswarm.server.live_voice.native_interaction_contract import (
+from jiuwenswarm.common.schema.native_interaction_contract import (
     NativeInteractionBinding,
 )
-from jiuwenswarm.server.live_voice.native_interaction_runtime import (
+from jiuwenswarm.channels.live_voice.native_interaction_runtime import (
     NativeHistoryAdmission,
     NativeInteractionRuntimeOwner,
 )
 from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import FormalContextSnapshot
-from jiuwenswarm.server.live_voice.product_authority import (
+from jiuwenswarm.server.runtime.authority.product_authority import (
     AuthorityRouteContext,
     AuthorityRoutingClaim,
     P2AuthorityAdapter,
@@ -47,7 +47,7 @@ from jiuwenswarm.server.live_voice.product_authority import (
     TrustedAuthorityCandidate,
     TrustedAuthorityLookup,
 )
-from jiuwenswarm.server.live_voice.product_p2_interaction_adapter import (
+from jiuwenswarm.channels.live_voice.product_p2_interaction_adapter import (
     P2ActivationReason,
     P2ActivationResult,
     P2ActivationStatus,
@@ -60,12 +60,12 @@ from jiuwenswarm.server.live_voice.product_p2_interaction_adapter import (
     ProductP2AdapterViolation,
     ProductP2InteractionAdapter,
 )
-from jiuwenswarm.server.live_voice.presentation_ledger import (
+from jiuwenswarm.server.runtime.presentation.presentation_ledger import (
     PresentationSurface,
     PresentationUnit,
     TaskPresentationRuntimeReceipt,
 )
-from jiuwenswarm.server.live_voice.task_progress_return import (
+from jiuwenswarm.server.runtime.presentation.task_progress_return import (
     TaskProgressNotificationIntent,
     TaskProgressOriginKind,
 )

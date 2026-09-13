@@ -7,11 +7,11 @@ import json
 from dataclasses import replace
 import pytest
 
-from jiuwenswarm.server.live_voice.native_foreground import (
+from jiuwenswarm.server.runtime.work.native_foreground import (
     NativeForegroundControl,
     NATIVE_FOREGROUND,
 )
-from jiuwenswarm.server.live_voice.native_work_runtime import (
+from jiuwenswarm.server.runtime.work.native_work_runtime import (
     NativeWorkRuntime,
     NativeWorkState,
     NativeWorkViolation,

@@ -18,13 +18,13 @@ from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
     _FORWARD_REQ_METHODS,
 )
 from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
-from jiuwenswarm.server.live_voice import p3_authenticated_composition as p3_module
-from jiuwenswarm.server.live_voice import product_composition_registry as product_module
-from jiuwenswarm.server.live_voice.p3_authenticated_composition import P3RouteResult
-from jiuwenswarm.server.live_voice.observability import (
+import jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition as p3_module
+import jiuwenswarm.channels.live_voice.product_composition_registry as product_module
+from jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition import P3RouteResult
+from jiuwenswarm.common.telemetry.observability import (
     LiveVoiceObservabilityCollector,
 )
-from jiuwenswarm.server.live_voice.live_voice_configuration_declaration import (
+from jiuwenswarm.common.schema.live_voice_configuration_declaration import (
     LIVE_VOICE_CONFIGURATION_CONTRACT_VERSION,
     AuthenticationMode,
     DurabilityLevel,
@@ -35,7 +35,7 @@ from jiuwenswarm.server.live_voice.live_voice_configuration_declaration import (
     ValidatedExecutorConfiguration,
     ValidatedLiveVoiceConfiguration,
 )
-from jiuwenswarm.server.live_voice.product_observability_runtime import (
+from jiuwenswarm.channels.live_voice.product_observability_runtime import (
     PRODUCT_OBSERVABILITY_BACKEND_ENV,
     PRODUCT_OBSERVABILITY_BACKEND_ID,
     PRODUCT_OBSERVABILITY_ENABLE_ENV,
@@ -807,7 +807,7 @@ async def test_observability_flag_off_does_not_import_or_touch_runtime_dependenc
     original_import = builtins.__import__
 
     def poison_runtime_import(name: str, *args: object, **kwargs: object):
-        if name == "jiuwenswarm.server.live_voice.product_observability_runtime":
+        if name == "jiuwenswarm.channels.live_voice.product_observability_runtime":
             raise AssertionError("flag-off imported the product observability runtime")
         return original_import(name, *args, **kwargs)
 

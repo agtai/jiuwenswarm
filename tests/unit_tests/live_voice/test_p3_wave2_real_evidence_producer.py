@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from scripts.live_voice import p3_wave2_real_evidence_producer as producer
-from jiuwenswarm.server.live_voice.project_code_executor import (
+from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
     DirectStreamObservation,
 )
 from scripts.live_voice.p3_wave2_real_evidence_producer import (
@@ -439,7 +439,7 @@ def test_registered_scenario_database_is_accepted_by_product_store_resolver(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from jiuwenswarm.common import utils as common_utils
-    from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
+    from jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition import (
         _resolve_database_path,
     )
     from jiuwenswarm.server.runtime.session import project_store, session_metadata
@@ -1357,12 +1357,12 @@ def test_direct_authority_snapshot_fails_closed_for_every_a2_prelease_owner(
     parent = tmp_path / "attempt-parent"
     worktree = parent / "checkout"
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.project_code_executor."
+        "jiuwenswarm.server.runtime.formal_tasks.project_code_executor."
         "_attempt_worktree_paths",
         lambda _root, _attempt: (parent, worktree),
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.project_code_executor."
+        "jiuwenswarm.server.runtime.formal_tasks.project_code_executor."
         "_worktree_registered",
         lambda _root, _worktree: False,
     )

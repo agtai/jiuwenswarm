@@ -1,4 +1,4 @@
-import type { FormalTaskControlBinding } from './formalTaskControlLeaf';
+import type { FormalTaskControlBinding } from '../../tasks/formalTaskControlLeaf';
 
 const PRODUCT_P3_TASK_TARGET_CONTRACT = 'live-voice.product-p3-task-target.v1' as const;
 const PRODUCT_P3_TASK_TARGET_STORAGE_PREFIX = 'jiuwenswarm.live_voice.product_p3_task_target.v1:';

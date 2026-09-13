@@ -1,11 +1,11 @@
 import { useId } from 'react';
 import { useTranslation } from 'react-i18next';
-import { selectScopedLiveVoiceTasks, type LiveVoiceTaskEntry } from '../../stores/liveVoiceTaskStore';
+import { selectScopedFormalTasks, type FormalTaskEntry } from '../../stores/formalTaskStore';
 import type { TodoItem } from '../../types';
 import { MarkdownRenderer } from '../MarkdownRenderer';
 
 export function RecentTasksPanel({ entry, todos, sessionId, projectId }: {
-  entry: LiveVoiceTaskEntry;
+  entry: FormalTaskEntry;
   todos: TodoItem[];
   sessionId: string;
   projectId?: string;
@@ -13,7 +13,7 @@ export function RecentTasksPanel({ entry, todos, sessionId, projectId }: {
   const { t } = useTranslation();
   const detailId = useId();
   const { snapshot, owner } = entry;
-  const tasks = selectScopedLiveVoiceTasks(snapshot, sessionId, projectId);
+  const tasks = selectScopedFormalTasks(snapshot, sessionId, projectId);
   const selected = tasks.find(task => task.task_id === snapshot.selected_task_id);
   const busy = snapshot.status !== 'ready';
   const statusLabel = (state: string) => t(`liveVoice.formal.recentTasks.states.${state}`);

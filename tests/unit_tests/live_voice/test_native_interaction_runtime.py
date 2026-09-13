@@ -15,18 +15,16 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     TerminalOutcome,
     TurnCommit,
 )
-from jiuwenswarm.server.live_voice import (
-    native_interaction_runtime as native_runtime_module,
-)
-from jiuwenswarm.server.live_voice.conversation_runtime import (
+import jiuwenswarm.channels.live_voice.native_interaction_runtime as native_runtime_module
+from jiuwenswarm.channels.live_voice.conversation_runtime import (
     CancelState,
     ResponseState,
 )
-from jiuwenswarm.server.live_voice.conversation_runtime_loop import (
+from jiuwenswarm.channels.live_voice.conversation_runtime_loop import (
     ConversationRuntimeLoop,
     EffectState,
 )
-from jiuwenswarm.server.live_voice.native_interaction_contract import (
+from jiuwenswarm.common.schema.native_interaction_contract import (
     NATIVE_INTERACTION_CONTRACT_VERSION,
     NativeAudioObservation,
     NativeDelegateProposal,
@@ -35,23 +33,23 @@ from jiuwenswarm.server.live_voice.native_interaction_contract import (
     NativePresentationCursor,
     NativeTurnCommit,
 )
-from jiuwenswarm.server.live_voice.native_interaction_runtime import (
+from jiuwenswarm.channels.live_voice.native_interaction_runtime import (
     NativeHistoryAdmission,
     NativeInteractionRuntimeError,
     NativeInteractionRuntimeOwner,
     NativeUserHistoryAdmission,
 )
-from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
+from jiuwenswarm.channels.live_voice.openai_realtime_native_engine import (
     MAX_NATIVE_AUDIO_DELTA_BYTES,
     NativeAudioOutput,
     NativeProviderDone,
 )
-from jiuwenswarm.server.live_voice.presentation_ledger import (
+from jiuwenswarm.server.runtime.presentation.presentation_ledger import (
     HistorySurfacePolicy,
     PresentationAck,
     PresentationSurface,
 )
-from jiuwenswarm.server.live_voice.voice_task_bridge import (
+from jiuwenswarm.server.runtime.formal_tasks.voice_task_bridge import (
     UnifiedCommittedInputRoute,
 )
 

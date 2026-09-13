@@ -21,13 +21,13 @@ from jiuwenswarm.gateway.live_voice.dedicated_media_registration import (
     DedicatedMediaProductRegistry, MEDIA_ROUTE_PATH, handle_registered_media_socket,
 )
 from jiuwenswarm.gateway.live_voice.streaming_synthesis_route import StreamingSynthesisRouteOwner
-from jiuwenswarm.server.live_voice.openai_streaming_speech import SpeechRouteTier, StreamingSpeechSelection
+from jiuwenswarm.channels.live_voice.openai_streaming_speech import SpeechRouteTier, StreamingSpeechSelection
 from tests.unit_tests.gateway.test_product_streaming_synthesis import _Provider, _Batch
 from tests.unit_tests.gateway.test_dedicated_media_registration import (
     ORIGIN, _activate, _params, _media_ticket, _FakeNativeRuntimeClient,
     _native_activation, _FakeNativeEngine, _task_synthesis_request, _AutoAckDownlinkSocket,
 )
-from jiuwenswarm.server.live_voice.batch_speech import SpeechRpcContext
+from jiuwenswarm.channels.live_voice.batch_speech import SpeechRpcContext
 from jiuwenswarm.common.schema.live_voice_contract_v2 import Assurance, ResponseRef
 
 

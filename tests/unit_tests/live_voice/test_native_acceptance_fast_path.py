@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from jiuwenswarm.server.live_voice.native_business_observation import (
+from jiuwenswarm.common.schema.native_business_observation import (
     is_task_acceptance_receipt, is_nonterminal_work_start_receipt, canonical_native_receipt,
 )
 from tests.unit_tests.live_voice import test_openai_realtime_native_engine as f
@@ -107,7 +107,7 @@ async def test_real_task_and_journal_receipt_return_before_blocked_optional_cont
 @pytest.mark.asyncio
 async def test_real_work_keeps_router_context_and_journal_without_task_mutation(tmp_path, monkeypatch):
     from jiuwenswarm.common.schema.agent import AgentResponseChunk
-    from jiuwenswarm.server.live_voice.native_work_journal import SqliteNativeWorkJournal
+    from jiuwenswarm.server.runtime.work.native_work_journal import SqliteNativeWorkJournal
     from tests.unit_tests.live_voice.test_native_work_runtime import terminal
     env = await make_registry(tmp_path, monkeypatch)
     router = env.registry._native_business

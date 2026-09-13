@@ -37,7 +37,7 @@ from jiuwenswarm.gateway.live_voice.streaming_synthesis_route import (
 from jiuwenswarm.gateway.live_voice.streaming_speech_route import (
     StreamingRecognitionRouteOwner,
 )
-from jiuwenswarm.server.live_voice.openai_streaming_speech import (
+from jiuwenswarm.channels.live_voice.openai_streaming_speech import (
     STREAMING_SPEECH_FLAG,
 )
 
@@ -356,7 +356,7 @@ def test_web_handlers_select_native_runtime_client_once(
     )
     assert callable(channel.live_voice_media_registry._native_engine_factory)
     from jiuwenswarm.common.schema.live_voice_contract_v2 import Assurance, ScopeRef
-    from jiuwenswarm.server.live_voice.native_interaction_contract import NativeInteractionBinding
+    from jiuwenswarm.common.schema.native_interaction_contract import NativeInteractionBinding
     binding = NativeInteractionBinding(ScopeRef("user", "project", "session", Assurance.AUTHENTICATED),
                                        "interaction", "activation", 1, "correlation")
     engine = channel.live_voice_media_registry._native_engine_factory(binding)

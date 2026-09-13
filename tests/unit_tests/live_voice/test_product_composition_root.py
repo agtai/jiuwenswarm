@@ -8,14 +8,14 @@ from typing import Any
 
 import pytest
 
-from jiuwenswarm.server.live_voice.product_composition_contract import (
+from jiuwenswarm.channels.live_voice.product_composition_contract import (
     ProductEvidenceId,
     ProductRouteFact,
     ProductRouteReason,
     ProductRouteTruth,
     ProductSegment,
 )
-from jiuwenswarm.server.live_voice.product_composition_root import (
+from jiuwenswarm.channels.live_voice.product_composition_root import (
     ProductCompositionActivationError,
     ProductCompositionContext,
     ProductCompositionLeaseCloseError,

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from jiuwenswarm.server.live_voice import speech_socket_diagnostics as diag
+import jiuwenswarm.channels.live_voice.speech_socket_diagnostics as diag
 
 
 class Transport:

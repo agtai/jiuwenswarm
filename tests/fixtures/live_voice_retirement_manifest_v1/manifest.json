@@ -31,8 +31,8 @@
     "S7/S8 and Wave2 evidence runners remain while unique safety/private-oracle consumers are live; TESTING.md alone is not their replacement oracle."
   ],
   "b1_add_only_files": [
-    "jiuwenswarm/server/live_voice/observability_correlation_contract.py",
-    "jiuwenswarm/server/live_voice/live_voice_configuration_declaration.py",
+    "jiuwenswarm/channels/live_voice/observability_correlation_contract.py",
+    "jiuwenswarm/common/schema/live_voice_configuration_declaration.py",
     "tests/unit_tests/live_voice/test_observability_correlation_contract.py",
     "tests/unit_tests/live_voice/test_live_voice_configuration_declaration.py",
     "tests/fixtures/live_voice_retirement_manifest_v1/manifest.json",
@@ -97,7 +97,7 @@
       "delete_precondition": "Repository-wide caller audit proves ProjectCodeExecutorAdapter has no supported consumer; Direct terminalization/recovery/retry/cancel oracles pass."
     },
     {
-      "path": "jiuwenswarm/server/live_voice/product_p3_text_adapter.py",
+      "path": "jiuwenswarm/server/runtime/formal_tasks/product_p3_text_adapter.py",
       "whole_file_deletion_target": false,
       "candidate_symbols": ["_QUERY_OPERATIONS", "_MUTATION_OPERATIONS"],
       "retained_symbols": ["ProductP3TextAdapter", "ProductP3QueryRequest", "ProductP3ProgressRequest", "query", "activate_prepared_query", "activate_progress", "activate_prepared_text_progress", "MUTATION_CONFIRMATION_UNAVAILABLE"],
@@ -129,7 +129,7 @@
       "delete_precondition": "Completed in ddde7b87: the five W2-only flag/key tuples and their branches were removed after zero-caller and ordinary dotenv/startup oracles passed."
     },
     {
-      "path": "jiuwenswarm/server/live_voice/voice_task_bridge.py",
+      "path": "jiuwenswarm/server/runtime/formal_tasks/voice_task_bridge.py",
       "whole_file_deletion_target": false,
       "candidate_symbols": ["DEMO_ITINERARY_TASK_NAME", "TaskCommand", "TaskSpec"],
       "retained_symbols": ["VoiceTaskBridge"],
@@ -137,7 +137,7 @@
       "delete_precondition": "General task input and canonical Task state-machine migration pass."
     },
     {
-      "path": "jiuwenswarm/server/live_voice/batch_speech.py",
+      "path": "jiuwenswarm/channels/live_voice/batch_speech.py",
       "whole_file_deletion_target": false,
       "candidate_symbols": ["PRODUCT_DEMO_POLICY_BYPASS_ENV"],
       "retained_symbols": ["FormalBatchSpeechService", "BatchSpeechProvider", "SpeechAuthorizationResolver"],
@@ -145,7 +145,7 @@
       "delete_precondition": "General policy replaces only the Demo bypass and all Speech authorization tests pass."
     },
     {
-      "path": "jiuwenswarm/server/live_voice/p3_authenticated_composition.py",
+      "path": "jiuwenswarm/server/runtime/formal_tasks/p3_authenticated_composition.py",
       "whole_file_deletion_target": false,
       "candidate_symbols": ["_PRODUCT_DEMO_POLICY_BYPASS_ENV", "_DEMO_ADJUSTMENT_CHECKPOINT_ENV"],
       "retained_symbols": ["P3AuthenticatedComposition", "P3_MUTATIONS", "P3_QUERY_OPERATIONS", "P3_PRODUCTION_OPERATIONS"],
@@ -153,7 +153,7 @@
       "delete_precondition": "General confirmation/policy/checkpoint replacement passes without weakening authority."
     },
     {
-      "path": "jiuwenswarm/server/live_voice/product_composition_registry.py",
+      "path": "jiuwenswarm/channels/live_voice/product_composition_registry.py",
       "whole_file_deletion_target": false,
       "candidate_symbols": ["PRODUCT_DEMO_POLICY_BYPASS_ENV", "_p2_response_generation_indices", "_closed_p2_generation_indices"],
       "retained_symbols": ["ProductCompositionRegistry", "PRODUCT_P3_QUERY_OPERATIONS", "ProductObservabilityAdapter", "activate_product_observability_adapter"],
@@ -479,7 +479,7 @@
       "phase": "inventory",
       "disposition": "retain_until_replacement",
       "deletion_authorized": false,
-      "paths": ["jiuwenswarm/server/live_voice/task_core.py", "jiuwenswarm/server/live_voice/voice_task_bridge.py", "jiuwenswarm/server/live_voice/executor_port.py"],
+      "paths": ["jiuwenswarm/server/runtime/formal_tasks/task_core.py", "jiuwenswarm/server/runtime/formal_tasks/voice_task_bridge.py", "jiuwenswarm/server/live_voice/executor_port.py"],
       "replacement_owner": "P3-7 task lifecycle and executor adapter owners",
       "oracle_migration": ["Authoritative task/attempt/command/event/outbox/executor/checkpoint/effect identities and transitions move to the frozen lifecycle contract."],
       "delete_preconditions": ["Projection parity and replay/conflict tests pass", "Forbidden mutation side effects remain zero."],
@@ -570,7 +570,7 @@
       "phase": "inventory",
       "disposition": "replace_before_generalized_claim",
       "deletion_authorized": false,
-      "paths": ["jiuwenswarm/server/live_voice/demo_fixture_contract.py", "jiuwenswarm/server/live_voice/batch_speech.py", "jiuwenswarm/server/live_voice/fake_verticals.py"],
+      "paths": ["jiuwenswarm/server/live_voice/demo_fixture_contract.py", "jiuwenswarm/channels/live_voice/batch_speech.py", "jiuwenswarm/server/live_voice/fake_verticals.py"],
       "replacement_owner": "Explicit formal profile, general task input/confirmation and Provider owners",
       "oracle_migration": ["Ordinary production stays default-off; generalized task input, confirmation/policy and selected Provider configuration replace exact-demo assumptions."],
       "delete_preconditions": ["Explicit formal profile and physical candidate pass", "General input/confirmation/policy positive and fail-closed negative scenarios pass."],
@@ -583,7 +583,7 @@
       "phase": "inventory",
       "disposition": "retain_current_default_off_and_intent_owners",
       "deletion_authorized": false,
-      "paths": ["jiuwenswarm/channels/web/frontend/.env.production", "jiuwenswarm/server/live_voice/production_task_intent.py"],
+      "paths": ["jiuwenswarm/channels/web/frontend/.env.production", "jiuwenswarm/server/runtime/formal_tasks/production_task_intent.py"],
       "replacement_owner": "Ordinary-production default-off profile and generalized production-intent owners",
       "oracle_migration": ["No migration is authorized: .env.production remains default-off and production_task_intent.py remains active generalized intent authority."],
       "delete_preconditions": ["A separately accepted profile owner preserves ordinary default-off", "A separately accepted intent owner preserves exact P3-6 classification/confirmation semantics."],
@@ -622,7 +622,7 @@
       "phase": "inventory",
       "disposition": "retain_until_generated_validator",
       "deletion_authorized": false,
-      "paths": ["jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/liveVoiceContractV2.ts", "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/liveVoiceRouteTelemetry.ts", "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/liveVoiceObservability.ts"],
+      "paths": ["jiuwenswarm/channels/web/frontend/src/types/interactionContractV2.ts", "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/liveVoiceRouteTelemetry.ts", "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/liveVoiceObservability.ts"],
       "replacement_owner": "P3-7 frozen protocol/schema owner",
       "oracle_migration": ["A generated or single-source validator must preserve exact-object rejection, version gates and closed vocabularies."],
       "delete_preconditions": ["Frozen protocol/schema is accepted", "All positive and unknown-field/version negative tests pass against one replacement."],
@@ -635,7 +635,7 @@
       "phase": "inventory",
       "disposition": "retain_until_generated_replacement",
       "deletion_authorized": false,
-      "paths": ["jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/productCompositionContract.ts", "jiuwenswarm/server/live_voice/product_composition_contract.py"],
+      "paths": ["jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/productCompositionContract.ts", "jiuwenswarm/channels/live_voice/product_composition_contract.py"],
       "replacement_owner": "P3-7 cross-language product-composition contract owner",
       "oracle_migration": ["Keep frontend/backend trust-boundary parity until one accepted generated validator replaces both exact contract checks."],
       "delete_preconditions": ["Generated replacement is accepted", "Unknown-field/version and cross-language parity tests pass."],
@@ -648,7 +648,7 @@
       "phase": "inventory",
       "disposition": "symbol_scoped_await_p3_7_freeze",
       "deletion_authorized": false,
-      "paths": ["jiuwenswarm/server/live_voice/p3_authenticated_composition.py", "jiuwenswarm/server/live_voice/product_p3_text_adapter.py", "jiuwenswarm/server/live_voice/product_composition_registry.py"],
+      "paths": ["jiuwenswarm/server/runtime/formal_tasks/p3_authenticated_composition.py", "jiuwenswarm/server/runtime/formal_tasks/product_p3_text_adapter.py", "jiuwenswarm/channels/live_voice/product_composition_registry.py"],
       "replacement_owner": "P3-7 canonical operation-catalog owner; each active adapter/composition/registry remains its own runtime authority",
       "oracle_migration": ["Only product_p3_text_adapter.py::_QUERY_OPERATIONS and product_p3_text_adapter.py::_MUTATION_OPERATIONS are named consolidation candidates here; active ProductP3TextAdapter query, mutation-rejection, activation and cleanup seams remain retained."],
       "delete_preconditions": ["P3-7 operation vocabulary and per-surface differences are frozen", "Only named allowlist symbols move", "Authentication/scope/version/unknown-operation/mutation-confirmation negatives assert zero Agent/Tool/Task effects."],
@@ -674,7 +674,7 @@
       "phase": "inventory",
       "disposition": "retain_for_p3_8b_integration",
       "deletion_authorized": false,
-      "paths": ["jiuwenswarm/server/live_voice/observability.py", "jiuwenswarm/server/live_voice/observability_otel_codec.py", "jiuwenswarm/server/live_voice/observability_exporter.py", "jiuwenswarm/server/live_voice/product_observability_adapter.py", "jiuwenswarm/server/live_voice/observability_fault_harness.py", "jiuwenswarm/server/live_voice/alpha_privacy_conformance.py"],
+      "paths": ["jiuwenswarm/common/telemetry/observability.py", "jiuwenswarm/channels/live_voice/observability_otel_codec.py", "jiuwenswarm/channels/live_voice/observability_exporter.py", "jiuwenswarm/channels/live_voice/product_observability_adapter.py", "jiuwenswarm/server/live_voice/observability_fault_harness.py", "jiuwenswarm/server/live_voice/alpha_privacy_conformance.py"],
       "replacement_owner": "Accepted P3-8A asset owner and P3-8B integration owner",
       "oracle_migration": ["The frozen audit test-ownership finding is superseded by P3-8A acceptance and current registry integration; preserve codec/adapter/exporter/privacy/failure-isolation truth."],
       "delete_preconditions": ["A separately accepted replacement owns every P3-8A oracle", "P3-8B external-backend and privacy conformance pass."],
@@ -694,5 +694,42 @@
       "affected_tests": ["tests/unit_tests/live_voice/test_live_voice_retirement_manifest.py"],
       "rollback": "Recover documents from Git and restore their index links."
     }
-  ]
+  ],
+  "retired_source_paths": ["jiuwenswarm/server/live_voice/demo_fixture_contract.py"],
+  "retired_source_symbols": {
+    "jiuwenswarm/server/live_voice/project_code_executor.py": ["DEMO_ITINERARY_TASK_NAME", "ProjectCodeExecutorAdapter"],
+    "jiuwenswarm/server/runtime/formal_tasks/voice_task_bridge.py": ["DEMO_ITINERARY_TASK_NAME"],
+    "jiuwenswarm/channels/live_voice/batch_speech.py": ["PRODUCT_DEMO_POLICY_BYPASS_ENV"],
+    "jiuwenswarm/server/runtime/formal_tasks/p3_authenticated_composition.py": ["_PRODUCT_DEMO_POLICY_BYPASS_ENV", "_DEMO_ADJUSTMENT_CHECKPOINT_ENV"],
+    "jiuwenswarm/channels/live_voice/product_composition_registry.py": ["PRODUCT_DEMO_POLICY_BYPASS_ENV"]
+  },
+  "support_relocations_20260911": {
+    "jiuwenswarm/server/live_voice/alpha_benchmark.py": "tests/support/live_voice/alpha_benchmark.py",
+    "jiuwenswarm/server/live_voice/alpha_privacy_conformance.py": "tests/support/live_voice/alpha_privacy_conformance.py",
+    "jiuwenswarm/server/live_voice/executor_port.py": "tests/support/live_voice/executor_port.py",
+    "jiuwenswarm/server/live_voice/fake_verticals.py": "tests/support/live_voice/fake_verticals.py",
+    "jiuwenswarm/server/live_voice/observability_fault_harness.py": "tests/support/live_voice/observability_fault_harness.py",
+    "jiuwenswarm/server/live_voice/product_p2_readiness.py": "tests/support/live_voice/product_p2_readiness.py",
+    "jiuwenswarm/server/live_voice/realtime_media.py": "tests/support/live_voice/realtime_media.py",
+    "jiuwenswarm/server/live_voice/sli_window_contract.py": "tests/support/live_voice/sli_window_contract.py",
+    "jiuwenswarm/server/live_voice/telemetry_privacy_contract.py": "tests/support/live_voice/telemetry_privacy_contract.py",
+    "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/fakeP1Vertical.ts": "jiuwenswarm/channels/web/frontend/tests/support/live_voice/fakeP1Vertical.ts",
+    "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/conversationRuntimeReplica.ts": "jiuwenswarm/channels/web/frontend/tests/support/live_voice/conversationRuntimeReplica.ts",
+    "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/webLifecycleObservationRecorder.ts": "jiuwenswarm/channels/web/frontend/tests/support/live_voice/webLifecycleObservationRecorder.ts"
+  },
+  "host_relocations_20260911": {
+    "jiuwenswarm/server/live_voice/durability_identity.py": "jiuwenswarm/server/runtime/durability/durability_identity.py",
+    "jiuwenswarm/server/live_voice/durability_authority.py": "jiuwenswarm/server/runtime/durability/durability_authority.py",
+    "jiuwenswarm/server/live_voice/durability_checkpoint.py": "jiuwenswarm/server/runtime/durability/durability_checkpoint.py",
+    "jiuwenswarm/server/live_voice/durability_effects.py": "jiuwenswarm/server/runtime/durability/durability_effects.py",
+    "jiuwenswarm/server/live_voice/durability_readers.py": "jiuwenswarm/server/runtime/durability/durability_readers.py",
+    "jiuwenswarm/server/live_voice/durability_recovery_facts.py": "jiuwenswarm/server/runtime/durability/durability_recovery_facts.py",
+    "jiuwenswarm/server/live_voice/task_store.py": "jiuwenswarm/server/runtime/formal_tasks/task_store.py",
+    "jiuwenswarm/server/live_voice/persistent_task_core.py": "jiuwenswarm/server/runtime/formal_tasks/persistent_task_core.py",
+    "jiuwenswarm/server/live_voice/formal_task_models.py": "jiuwenswarm/server/runtime/formal_tasks/formal_task_models.py",
+    "jiuwenswarm/server/live_voice/executor_capabilities.py": "jiuwenswarm/server/runtime/formal_tasks/executor_capabilities.py",
+    "jiuwenswarm/server/live_voice/project_code_executor.py": "jiuwenswarm/server/runtime/formal_tasks/project_code_executor.py",
+    "jiuwenswarm/server/live_voice/file_effect_plan.py": "jiuwenswarm/server/runtime/formal_tasks/file_effect_plan.py",
+    "jiuwenswarm/server/live_voice/task_adjustment_queue.py": "jiuwenswarm/server/runtime/formal_tasks/task_adjustment_queue.py"
+  }
 }

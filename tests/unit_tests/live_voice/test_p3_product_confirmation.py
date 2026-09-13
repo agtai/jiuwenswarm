@@ -8,14 +8,14 @@ from pathlib import Path
 import pytest
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import Assurance, ScopeRef
-from jiuwenswarm.server.live_voice.formal_task_models import FormalTaskViolation
-from jiuwenswarm.server.live_voice.p3_confirmation import (
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import FormalTaskViolation
+from jiuwenswarm.server.runtime.formal_tasks.p3_confirmation import (
     BoundedP3ConfirmationOwner,
     P3ConfirmationBinding,
     P3ConfirmationOwnerContext,
     TrustedP3ConfirmationIssue,
 )
-from jiuwenswarm.server.live_voice.p3_product_confirmation import (
+from jiuwenswarm.server.runtime.formal_tasks.p3_product_confirmation import (
     ProductP3ConfirmationForwarder,
 )
 

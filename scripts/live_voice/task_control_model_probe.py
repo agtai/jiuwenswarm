@@ -19,9 +19,9 @@ async def run(config: Path, cases_path: Path, output: Path) -> int:
     logging.disable(logging.CRITICAL)
     from jiuwenswarm.common.config import _read_with_retry, _normalize_config, get_default_models, resolve_env_vars
     from jiuwenswarm.common.schema.live_voice_contract_v2 import TurnCommit, TerminalOutcome
-    from jiuwenswarm.server.live_voice.p3_model_resolution import ServerModelCatalogResolver
-    from jiuwenswarm.server.live_voice.production_task_intent import AuthenticatedTaskFact, AttemptState, TaskAuthorityRead, TaskState
-    from jiuwenswarm.server.live_voice.task_semantics import TaskSemanticContext, TaskSemanticResolver
+    from jiuwenswarm.server.runtime.agent_adapter.p3_model_resolution import ServerModelCatalogResolver
+    from jiuwenswarm.server.runtime.formal_tasks.production_task_intent import AuthenticatedTaskFact, AttemptState, TaskAuthorityRead, TaskState
+    from jiuwenswarm.server.runtime.formal_tasks.task_semantics import TaskSemanticContext, TaskSemanticResolver
     from jiuwenswarm.server.runtime.agent_adapter.interface_deep import build_model_from_entry
 
     def configured_models():
@@ -86,7 +86,7 @@ async def run(config: Path, cases_path: Path, output: Path) -> int:
     output.write_text(json.dumps({
         "boundary": "configured semantic model only; zero Task/Tool execution",
         "cases_sha256": hashlib.sha256(cases_path.read_bytes()).hexdigest(),
-        "resolver_sha256": hashlib.sha256(Path("jiuwenswarm/server/live_voice/task_semantics.py").read_bytes()).hexdigest(),
+        "resolver_sha256": hashlib.sha256(Path("jiuwenswarm/server/runtime/formal_tasks/task_semantics.py").read_bytes()).hexdigest(),
         "results": results,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     return int(not all(row["passed"] for row in results))

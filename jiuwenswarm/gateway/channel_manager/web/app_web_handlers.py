@@ -2928,20 +2928,20 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     from jiuwenswarm.gateway.live_voice.streaming_synthesis_route import (
         StreamingSynthesisRouteOwner,
     )
-    from jiuwenswarm.server.live_voice.batch_speech import (
+    from jiuwenswarm.channels.live_voice.batch_speech import (
         FormalBatchSpeechService,
         SPEECH_API_BASE_ENV,
         SPEECH_API_KEY_ENV,
         create_environment_batch_speech_provider,
     )
-    from jiuwenswarm.server.live_voice.openai_streaming_speech import (
+    from jiuwenswarm.channels.live_voice.openai_streaming_speech import (
         STREAMING_SPEECH_FLAG,
         select_environment_streaming_speech,
     )
-    from jiuwenswarm.server.live_voice.observability import (
+    from jiuwenswarm.common.telemetry.observability import (
         LiveVoiceObservabilityCollector,
     )
-    from jiuwenswarm.server.live_voice.native_interaction_config import (
+    from jiuwenswarm.channels.live_voice.native_interaction_config import (
         InteractionEngineKind,
         NativeInteractionConfigurationError,
         select_interaction_engine_environment,
@@ -2949,10 +2949,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     from jiuwenswarm.gateway.live_voice.native_interaction_runtime_client import (
         GatewayNativeInteractionRuntimeClient,
     )
-    from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
+    from jiuwenswarm.channels.live_voice.openai_realtime_native_engine import (
         OpenAIRealtimeNativeInteractionEngine,
     )
-    from jiuwenswarm.server.live_voice.openai_realtime_session import (
+    from jiuwenswarm.channels.live_voice.openai_realtime_session import (
         OpenAIRealtimeSessionConfig,
     )
 

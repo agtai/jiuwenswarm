@@ -2,11 +2,11 @@
 
 import pytest
 
-from jiuwenswarm.server.live_voice.presentation_ledger import PresentationSurface
-from jiuwenswarm.server.live_voice.native_business_contract import NativeBusinessAction, NativeBusinessProposal
-from jiuwenswarm.server.live_voice.native_interaction_runtime import NativeInteractionRuntimeError
-from jiuwenswarm.server.live_voice.native_interaction_contract import NativePresentationCursor
-from jiuwenswarm.server.live_voice.voice_task_bridge import UnifiedCommittedInputRoute
+from jiuwenswarm.server.runtime.presentation.presentation_ledger import PresentationSurface
+from jiuwenswarm.channels.live_voice.native_business_contract import NativeBusinessAction, NativeBusinessProposal
+from jiuwenswarm.channels.live_voice.native_interaction_runtime import NativeInteractionRuntimeError
+from jiuwenswarm.common.schema.native_interaction_contract import NativePresentationCursor
+from jiuwenswarm.server.runtime.formal_tasks.voice_task_bridge import UnifiedCommittedInputRoute
 from tests.unit_tests.live_voice.test_native_interaction_runtime import (
     active_owner, delegate_proposal, done, audio, ack_for, turn_commit,
 )

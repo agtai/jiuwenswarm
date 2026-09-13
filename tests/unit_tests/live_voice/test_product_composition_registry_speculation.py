@@ -10,8 +10,8 @@ from pathlib import Path
 import pytest
 
 from jiuwenswarm.common.schema.agent import AgentResponseChunk
-from jiuwenswarm.server.live_voice.formal_task_models import FormalTaskViolation
-from jiuwenswarm.server.live_voice.speculative_dialogue import SpeculativeDialogue
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import FormalTaskViolation
+from jiuwenswarm.channels.live_voice.speculative_dialogue import SpeculativeDialogue
 from tests.support.live_voice.semantic_model import decision
 from tests.unit_tests.live_voice.test_product_composition_registry import (
     ErrorCode,

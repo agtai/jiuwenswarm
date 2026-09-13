@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from jiuwenswarm.server.live_voice.native_interaction_config import (
+from jiuwenswarm.channels.live_voice.native_interaction_config import (
     DEFAULT_NATIVE_REALTIME_MODEL,
     DEFAULT_NATIVE_VAD_EAGERNESS,
     INTERACTION_ENGINE_ENV,

@@ -1603,11 +1603,11 @@ class AgentWebSocketServer:
             from jiuwenswarm.common.schema.live_voice_contract_v2 import (
                 TurnCommitLedger,
             )
-            from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
+            from jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition import (
                 create_p3_composition_from_environment,
                 resolve_p3_database_path_from_environment,
             )
-            from jiuwenswarm.server.live_voice.p3_model_resolution import (
+            from jiuwenswarm.server.runtime.agent_adapter.p3_model_resolution import (
                 ServerModelCatalogResolver,
             )
 
@@ -1621,10 +1621,10 @@ class AgentWebSocketServer:
                 )
             )
             if product_mutation_enabled:
-                from jiuwenswarm.server.live_voice.p3_confirmation import (
+                from jiuwenswarm.server.runtime.formal_tasks.p3_confirmation import (
                     BoundedP3ConfirmationOwner,
                 )
-                from jiuwenswarm.server.live_voice.p3_product_confirmation import (
+                from jiuwenswarm.server.runtime.formal_tasks.p3_product_confirmation import (
                     ProductP3ConfirmationForwarder,
                 )
 
@@ -1715,7 +1715,7 @@ class AgentWebSocketServer:
         registry: Any = None
         observability_runtime: Any = None
         try:
-            from jiuwenswarm.server.live_voice.product_composition_registry import (
+            from jiuwenswarm.channels.live_voice.product_composition_registry import (
                 create_product_composition_registry_from_environment,
             )
 
@@ -1724,7 +1724,7 @@ class AgentWebSocketServer:
             ).strip().lower() in {"1", "true", "yes", "on"}
             if observability_enabled:
                 try:
-                    from jiuwenswarm.server.live_voice.product_observability_runtime import (
+                    from jiuwenswarm.channels.live_voice.product_observability_runtime import (
                         BoundedInMemoryOtelBackend,
                         create_product_observability_runtime_from_environment,
                     )
@@ -1770,6 +1770,7 @@ class AgentWebSocketServer:
             registry = create_product_composition_registry_from_environment(
                 p3_composition=self._live_voice_p3_composition,
                 agent_manager=self._agent_manager,
+                runtime=self._runtime,
                 push_text_event=self._push_live_voice_product_text_event,
                 p3_confirmation_owner=getattr(
                     self, "_live_voice_p3_confirmation_owner", None
@@ -11237,7 +11238,7 @@ class AgentWebSocketServer:
     ) -> None:
         """Route one formal task request without accepting browser authority."""
 
-        from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
+        from jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition import (
             P3_ROUTE_METHODS,
         )
 
@@ -11692,13 +11693,13 @@ class AgentWebSocketServer:
         try:
             import hashlib
 
-            from jiuwenswarm.server.live_voice.observability import (
+            from jiuwenswarm.common.telemetry.observability import (
                 LIVE_VOICE_CONTRACT_VERSION,
                 OBSERVABILITY_SCHEMA_VERSION,
                 create_metric,
                 create_observation,
             )
-            from jiuwenswarm.server.live_voice.product_observability_runtime import (
+            from jiuwenswarm.channels.live_voice.product_observability_runtime import (
                 ProductDiagnosticIdentity,
                 ProductDiagnosticSeam,
             )

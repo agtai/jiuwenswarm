@@ -5,7 +5,7 @@ import { act, create } from 'react-test-renderer';
 import i18next from 'i18next';
 import { I18nextProvider } from 'react-i18next';
 import { RecentTasksPanel } from '../node_modules/.cache/recent-background-tasks/RecentTasksPanel.mjs';
-import { useLiveVoiceTaskStore } from '../node_modules/.cache/recent-background-tasks/liveVoiceTaskStore.mjs';
+import { useFormalTaskStore } from '../node_modules/.cache/recent-background-tasks/liveVoiceTaskStore.mjs';
 
 await i18next.init({ lng: 'zh', resources: { zh: { translation: {
   chat: { recentTasks: '最近任务' }, liveVoice: { formal: { recentTasks: {
@@ -59,11 +59,11 @@ test('right recent-tasks view uses the exact Registry owner and filters session 
 test('shared view release cannot erase a successor owner for the same session', () => {
   const first = { snapshot: () => ({ status: 'idle', session_id: null, tasks: [] }) };
   const successor = { snapshot: () => ({ status: 'idle', session_id: null, tasks: [] }) };
-  const store = useLiveVoiceTaskStore.getState();
+  const store = useFormalTaskStore.getState();
   store.bind('session-a', first);
-  useLiveVoiceTaskStore.getState().bind('session-a', successor);
-  useLiveVoiceTaskStore.getState().release('session-a', first);
-  assert.equal(useLiveVoiceTaskStore.getState().entries['session-a'].owner, successor);
-  useLiveVoiceTaskStore.getState().release('session-a', successor);
-  assert.equal(useLiveVoiceTaskStore.getState().entries['session-a'], undefined);
+  useFormalTaskStore.getState().bind('session-a', successor);
+  useFormalTaskStore.getState().release('session-a', first);
+  assert.equal(useFormalTaskStore.getState().entries['session-a'].owner, successor);
+  useFormalTaskStore.getState().release('session-a', successor);
+  assert.equal(useFormalTaskStore.getState().entries['session-a'], undefined);
 });

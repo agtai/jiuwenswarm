@@ -53,26 +53,26 @@ from jiuwenswarm.gateway.live_voice.streaming_speech_route import (
     StreamingRecognitionOutcome,
     StreamingRecognitionRouteOwner,
 )
-from jiuwenswarm.server.live_voice.openai_streaming_speech import (
+from jiuwenswarm.channels.live_voice.openai_streaming_speech import (
     SpeechDegradationFact,
     SpeechDegradationReason,
     SpeechRouteTier,
     StreamingSpeechSelection,
 )
-from jiuwenswarm.server.live_voice.observability import (
+from jiuwenswarm.common.telemetry.observability import (
     LiveVoiceMetric,
     LiveVoiceObservation,
     LiveVoiceObservabilityCollector,
 )
-from jiuwenswarm.server.live_voice.latency_measurement import L0Milestone
-from jiuwenswarm.server.live_voice.speech_ports import (
+from jiuwenswarm.channels.live_voice.latency_measurement import L0Milestone
+from jiuwenswarm.channels.live_voice.speech_ports import (
     ProviderRef,
     RecognitionAlternative,
     RecognitionEventKind,
     RecognitionHypothesis,
     SpeechMode,
 )
-from jiuwenswarm.server.live_voice.streaming_speech import (
+from jiuwenswarm.channels.live_voice.streaming_speech import (
     CapabilityProvenance,
     ProviderTransport,
     RecognitionCommitDisposition,

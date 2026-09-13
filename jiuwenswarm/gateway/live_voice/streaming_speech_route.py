@@ -28,14 +28,14 @@ from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MediaAudioFrame,
     MediaAuthorityBinding,
 )
-from jiuwenswarm.server.live_voice.openai_streaming_speech import (
+from jiuwenswarm.channels.live_voice.openai_streaming_speech import (
     SpeechDegradationFact,
     SpeechRouteTier,
     StreamingSpeechSelection,
     _reason_for_exception,
 )
-from jiuwenswarm.server.live_voice.speech_ports import RecognitionEventKind, ProviderRef
-from jiuwenswarm.server.live_voice.streaming_speech import (
+from jiuwenswarm.channels.live_voice.speech_ports import RecognitionEventKind, ProviderRef
+from jiuwenswarm.channels.live_voice.streaming_speech import (
     CapabilityProvenance,
     CaptureRef,
     NativeStreamingSpeechProvider,

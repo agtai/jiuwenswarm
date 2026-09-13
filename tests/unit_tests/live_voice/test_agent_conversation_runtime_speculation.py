@@ -8,7 +8,7 @@ import asyncio
 
 import pytest
 
-from jiuwenswarm.server.live_voice.agent_conversation_runtime import (
+from jiuwenswarm.channels.live_voice.agent_conversation_runtime import (
     AgentConversationRuntimeViolation,
 )
 from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (

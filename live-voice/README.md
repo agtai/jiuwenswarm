@@ -18,6 +18,7 @@ linked history is conditional and does not activate work.
 | Documentation change | [Documentation rules](DOCUMENTATION_RULES.md), [documentation-only checks](../TESTING.md#documentation-only-verification) and only the authorities changed by the edit |
 | Architecture/authority/protocol/security/durability change | Exact ACG and governing decision sections; full design only if the long-term boundary itself changes or is ambiguous |
 | Git/review/parallel work | Root `AGENTS.md`, applicable root `TESTING.md` sections and only the active packet named by STATUS |
+| Shared Host/voice ownership integration | [Current integration record](reviews/SHARED_RUNTIME_INTEGRATION_20260913.md), then affected shared Runtime or channel modules |
 | Historical/migration/forensic work | One route from the conditional [reference index](REFERENCE_INDEX.md); never use historical priority/status as the current queue |
 
 ## Section rules

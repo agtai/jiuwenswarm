@@ -7,8 +7,8 @@ import pytest
 
 from jiuwenswarm.common.live_voice_profiling import _CURRENT
 from jiuwenswarm.common import live_voice_audio_diagnostics as diagnostics
-from jiuwenswarm.server.live_voice import openai_realtime_native_engine as native
-from jiuwenswarm.server.live_voice import openai_realtime_session as transport
+import jiuwenswarm.channels.live_voice.openai_realtime_native_engine as native
+import jiuwenswarm.channels.live_voice.openai_realtime_session as transport
 from test_openai_realtime_native_engine import (
     admitted_business_engine, business_function, provider_event, speech_started, speech_stopped, input_committed,
 )

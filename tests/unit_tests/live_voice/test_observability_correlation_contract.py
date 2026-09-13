@@ -9,7 +9,7 @@ from typing import Mapping
 
 import pytest
 
-from jiuwenswarm.server.live_voice.observability_correlation_contract import (
+from jiuwenswarm.channels.live_voice.observability_correlation_contract import (
     OBSERVABILITY_CORRELATION_CONTRACT_VERSION,
     CORRELATION_TOKENIZATION_RECEIPT_VERSION,
     BoundedMetricDimensions,

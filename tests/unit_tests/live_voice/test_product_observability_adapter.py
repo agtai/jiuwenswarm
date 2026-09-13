@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable
 
 import pytest
 
-from jiuwenswarm.server.live_voice.observability import (
+from jiuwenswarm.common.telemetry.observability import (
     LIVE_VOICE_CONTRACT_VERSION,
     OBSERVABILITY_SCHEMA_VERSION,
     LiveVoiceMetric,
@@ -18,25 +18,25 @@ from jiuwenswarm.server.live_voice.observability import (
     create_metric,
     create_observation,
 )
-from jiuwenswarm.server.live_voice.observability_exporter import (
+from jiuwenswarm.channels.live_voice.observability_exporter import (
     ExportRecord,
     LiveVoiceObservabilityExporterBuffer,
 )
-from jiuwenswarm.server.live_voice.product_composition_contract import (
+from jiuwenswarm.channels.live_voice.product_composition_contract import (
     ProductEvidenceId,
     ProductRouteFact,
     ProductRouteReason,
     ProductRouteTruth,
     ProductSegment,
 )
-from jiuwenswarm.server.live_voice.product_composition_root import (
+from jiuwenswarm.channels.live_voice.product_composition_root import (
     ProductCompositionContext,
     ProductCompositionLeaseCloseError,
     ProductCompositionRegistration,
     ProductCompositionRoot,
     ProductSegmentActivation,
 )
-from jiuwenswarm.server.live_voice.product_observability_adapter import (
+from jiuwenswarm.channels.live_voice.product_observability_adapter import (
     ActiveProductObservabilityActivation,
     InactiveProductObservabilityActivation,
     ProductObservabilityActivationError,
@@ -341,7 +341,7 @@ async def test_feature_off_inspects_calls_and_allocates_nothing(
         raise AssertionError("feature-off allocated an exporter buffer")
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_observability_adapter."
+        "jiuwenswarm.channels.live_voice.product_observability_adapter."
         "LiveVoiceObservabilityExporterBuffer",
         reject_allocation,
     )
@@ -395,7 +395,7 @@ async def test_missing_issuer_or_incompatible_dependencies_start_no_worker(
         raise AssertionError("unavailable activation allocated an exporter buffer")
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_observability_adapter."
+        "jiuwenswarm.channels.live_voice.product_observability_adapter."
         "LiveVoiceObservabilityExporterBuffer",
         reject_allocation,
     )
@@ -494,7 +494,7 @@ async def test_marked_sync_exporter_is_rejected_before_every_activation_effect(
         raise AssertionError("marked sync exporter allocated a buffer or worker")
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_observability_adapter."
+        "jiuwenswarm.channels.live_voice.product_observability_adapter."
         "LiveVoiceObservabilityExporterBuffer",
         reject_allocation,
     )
@@ -549,7 +549,7 @@ async def test_spoofed_instance_code_is_rejected_before_every_activation_effect(
         raise AssertionError("spoofed sync exporter allocated a buffer or worker")
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_observability_adapter."
+        "jiuwenswarm.channels.live_voice.product_observability_adapter."
         "LiveVoiceObservabilityExporterBuffer",
         reject_allocation,
     )
@@ -610,7 +610,7 @@ async def test_invalid_post_start_evidence_closes_worker_before_unavailable(
         raise_issuer,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_observability_adapter."
+        "jiuwenswarm.channels.live_voice.product_observability_adapter."
         "LiveVoiceObservabilityExporterBuffer",
         tracking_buffer,
     )

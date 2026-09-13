@@ -32,10 +32,10 @@ async def run(options):
 
     from jiuwenswarm.common.schema.live_voice_contract_v2 import Assurance, ScopeRef
     from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
-    from jiuwenswarm.server.live_voice.p3_authenticated_composition import create_p3_composition_from_environment
-    from jiuwenswarm.server.live_voice.p3_confirmation import BoundedP3ConfirmationOwner
-    from jiuwenswarm.server.live_voice.p3_model_resolution import ServerModelCatalogResolver
-    from jiuwenswarm.server.live_voice.p3_product_confirmation import ProductP3ConfirmationForwarder
+    from jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition import create_p3_composition_from_environment
+    from jiuwenswarm.server.runtime.formal_tasks.p3_confirmation import BoundedP3ConfirmationOwner
+    from jiuwenswarm.server.runtime.agent_adapter.p3_model_resolution import ServerModelCatalogResolver
+    from jiuwenswarm.server.runtime.formal_tasks.p3_product_confirmation import ProductP3ConfirmationForwarder
     from jiuwenswarm.server.runtime.agent_manager import AgentManager
     from jiuwenswarm.server.runtime.session.project_store import find_or_create_code_project_for_dir
     from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata

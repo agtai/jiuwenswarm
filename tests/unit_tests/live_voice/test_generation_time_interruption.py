@@ -22,29 +22,29 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     IdentityKind,
     ResponseRef,
 )
-from jiuwenswarm.server.live_voice.agent_conversation_runtime import (
+from jiuwenswarm.channels.live_voice.agent_conversation_runtime import (
     AgentConversationRuntime,
     AgentConversationRuntimeViolation,
     AgentConversationShutdownStatus,
     GenerationInterruptionFenceStatus,
 )
-from jiuwenswarm.server.live_voice.conversation_runtime import (
+from jiuwenswarm.channels.live_voice.conversation_runtime import (
     InteractionState,
     ResponseState,
 )
-from jiuwenswarm.server.live_voice.conversation_runtime_loop import (
+from jiuwenswarm.channels.live_voice.conversation_runtime_loop import (
     _MAX_RETAINED_GENERATION_INTERRUPTS,
     ConversationRuntimeLoop,
     ConversationRuntimeLoopViolation,
     GenerationInterruptionResult,
     _RetainedGenerationInterrupt,
 )
-from jiuwenswarm.server.live_voice.jiuwenswarm_round_harness import (
+from jiuwenswarm.server.runtime.agent_adapter.jiuwenswarm_round_harness import (
     HarnessRoundHandle,
     JiuWenSwarmRoundHarness,
     RoundCancelResult,
 )
-from jiuwenswarm.server.live_voice.presentation_ledger import (
+from jiuwenswarm.server.runtime.presentation.presentation_ledger import (
     PresentationAck,
     PresentationSurface,
 )
@@ -1036,10 +1036,10 @@ async def test_interruption_seam_exposes_no_cancellation_scope_argument() -> Non
 
     import inspect
 
-    from jiuwenswarm.server.live_voice.product_composition_registry import (
+    from jiuwenswarm.channels.live_voice.product_composition_registry import (
         AgentServerProductCompositionRegistry,
     )
-    from jiuwenswarm.server.live_voice.product_p2_interaction_adapter import (
+    from jiuwenswarm.channels.live_voice.product_p2_interaction_adapter import (
         P2ActivationLease,
     )
 

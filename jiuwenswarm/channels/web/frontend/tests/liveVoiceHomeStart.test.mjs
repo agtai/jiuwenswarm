@@ -305,9 +305,10 @@ test('pending launch has an explicit cancel and a failed inactive launch has vis
   await act(async () => {
     renderer = create(render({ launchPending: true }));
   });
-  const buttons = renderer.root.findAllByType('button');
-  assert.equal(buttons[0].props.disabled, true);
-  await act(async () => buttons[1].props.onClick());
+  const launch = renderer.root.findByProps({ 'aria-label': i18next.t('liveVoice.enable') });
+  const cancel = renderer.root.findByProps({ 'aria-label': i18next.t('liveVoice.exit') });
+  assert.equal(launch.props.disabled, true);
+  await act(async () => cancel.props.onClick());
   assert.equal(cancelled, 1);
   await act(async () => renderer.update(render({ launchError: 'Could not create session' })));
   assert.equal(renderer.root.findByProps({ role: 'alert' }).children[0], 'Could not create session');

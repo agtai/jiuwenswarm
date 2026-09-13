@@ -6,8 +6,8 @@ import pytest
 
 from jiuwenswarm.common import live_voice_audio_diagnostics as sink
 from jiuwenswarm.common import live_voice_profiling as profile
-from jiuwenswarm.server.live_voice import openai_realtime_native_engine as native
-from jiuwenswarm.server.live_voice import openai_realtime_session as transport
+import jiuwenswarm.channels.live_voice.openai_realtime_native_engine as native
+import jiuwenswarm.channels.live_voice.openai_realtime_session as transport
 from scripts.live_voice.analyze_demo_profile import sanitize_record
 from tests.unit_tests.live_voice.test_native_business_contract import action
 from tests.unit_tests.live_voice.test_openai_realtime_native_engine import (

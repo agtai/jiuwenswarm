@@ -86,12 +86,18 @@ support has been discussed, not implemented.
 
 ### Continuation boundary
 
-**Current follow-up (2026-09-12):** rebase the complete Live Voice boundary onto
-official develop, consolidate it into one commit on `hx/0912_livevoice`, resolve
-shared UI/runtime conflicts semantically and redeploy with this machine's private
-configuration and persisted data. The [integration record](reviews/DEVELOP_REBASE_20260912.md)
-owns exact baselines, scope and evidence. This does not reactivate deferred product
-work or claim full physical/product acceptance. No remote update is authorized.
+**Current follow-up (2026-09-13):** integrate the useful changes from the twelve
+slimming commits into `hx/0912_livevoice`, preserving the official develop
+Runtime and SDK baseline. Task/Work authority, durability and result services
+belong to Host; production speech adapters belong to `channels/live_voice`.
+The [integration record](reviews/SHARED_RUNTIME_INTEGRATION_20260913.md) owns
+scope, selected source material, dependency boundaries and verification. The
+user requests one new local commit after review. No new remote update or
+physical Provider/browser acceptance is part of this code integration.
+
+**Completed rebaseline (2026-09-12):** the official develop integration and local
+redeployment are recorded in the [rebase record](reviews/DEVELOP_REBASE_20260912.md).
+This does not reactivate deferred product work or imply full physical acceptance.
 
 **Historical repair (2026-09-10):** repair and redeploy adjustment dispatch/startup
 on baseline `57d3b29f18`, preserving this machine's configured project, data and
