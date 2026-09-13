@@ -10,6 +10,7 @@ linked history is conditional and does not activate work.
 
 | Task | Read after STATUS |
 |---|---|
+| Introduce Live Voice to architects or product managers | [Module introduction guide](architecture/LIVE_VOICE_MODULE_GUIDE.md) for capability groups, responsibility boundaries, data flow and current code mapping |
 | Local browser entry/link or environment reconstruction | [Local entry convention](runbooks/E2E_RUNBOOK.md#local-entry-origin), then the applicable startup section |
 | Current repair or diagnosis | Affected source/tests and directory `AGENTS.md`; only the implicated contract/evidence and applicable root [TESTING.md](../TESTING.md) sections |
 | Another capability/module | That capability row and dependency route in STATUS; affected source/tests; only the relevant accepted design/ACG/decision sections |
