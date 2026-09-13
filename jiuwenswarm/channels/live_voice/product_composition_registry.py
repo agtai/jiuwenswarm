@@ -4489,6 +4489,7 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
             "contract_version": NATIVE_INTERACTION_CONTRACT_VERSION,
             "binding": binding.to_dict(),
             "capability": capability,
+            "notification_admitted_sequence": route.notification_admitted_sequence,
             **({"business_contract_version": NATIVE_BUSINESS_CONTRACT_VERSION,
                 "observation_contract_version": NATIVE_BUSINESS_OBSERVATION_VERSION} if route.native_business_enabled else {}),
         }

@@ -11,7 +11,7 @@ import hmac
 import json
 import math
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
@@ -89,6 +89,8 @@ class GatewayNativeActivation:
     connection_id: str
     business_contract_version: str | None = None
     observation_contract_version: str | None = None
+    # Recovery snapshot, not part of capability/activation identity.
+    notification_admitted_sequence: int = field(default=0, compare=False)
 
 
 def _capability(value: object) -> str:
@@ -709,7 +711,7 @@ class GatewayNativeInteractionRuntimeClient:
             or payload.get("ok") is not True
             or result.get("status") != "active"
             or not isinstance(descriptor, dict)
-            or set(descriptor) not in (
+            or (set(descriptor) - {"notification_admitted_sequence"}) not in (
                 {"contract_version", "binding", "capability"},
                 {"contract_version", "binding", "capability", "business_contract_version"},
                 {"contract_version", "binding", "capability", "business_contract_version", "observation_contract_version"},
@@ -719,6 +721,8 @@ class GatewayNativeInteractionRuntimeClient:
             or ("observation_contract_version" in descriptor
                 and descriptor["observation_contract_version"] != NATIVE_BUSINESS_OBSERVATION_VERSION)
             or descriptor.get("contract_version") != NATIVE_INTERACTION_CONTRACT_VERSION
+            or type(descriptor.get("notification_admitted_sequence", 0)) is not int
+            or not 0 <= descriptor.get("notification_admitted_sequence", 0) <= MAX_SAFE_INTEGER
             or type(connection_id) is not str
             or not connection_id
         ):
@@ -757,7 +761,8 @@ class GatewayNativeInteractionRuntimeClient:
             sanitized,
             result,
             GatewayNativeActivation(binding, capability, connection_id, descriptor.get("business_contract_version"),
-                                    descriptor.get("observation_contract_version")),
+                                    descriptor.get("observation_contract_version"),
+                                    descriptor.get("notification_admitted_sequence", 0)),
         )
 
     def observe_activation_response(
@@ -794,6 +799,9 @@ class GatewayNativeInteractionRuntimeClient:
                     "NATIVE_RUNTIME_ACTIVATION_CONFLICT",
                     "Native activation response conflicts with retained authority",
                 )
+        if prior is not None and prior == activation:
+            activation = replace(activation, notification_admitted_sequence=max(
+                prior.notification_admitted_sequence, activation.notification_admitted_sequence))
         self._activations[key] = activation
         result[NATIVE_BROWSER_DESCRIPTOR_KEY] = {
             "contract_version": NATIVE_INTERACTION_CONTRACT_VERSION,

@@ -388,6 +388,35 @@ def test_internal_native_methods_are_exact_and_absent_from_browser_allowlist() -
     } == NATIVE_INTERNAL_REQ_METHODS
 
 
+@pytest.mark.parametrize("cursor", [-1, True, 1.0, "1", None, 2**53, {}, []])
+def test_native_activation_rejects_invalid_notification_cursor_without_mutation(cursor):
+    client, agent, _ = observed_client()
+    before = dict(client._activations)
+    payload = activation_payload()
+    payload["result"][NATIVE_GATEWAY_DESCRIPTOR_KEY]["notification_admitted_sequence"] = cursor
+    with pytest.raises(NativeRuntimeClientError):
+        client.observe_activation_response(payload, routed_session_id=SCOPE.session_id,
+            connection_id="web-connection-1",
+            request_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_ACTIVATE.value)
+    assert client._activations == before
+    assert agent.requests == []
+
+
+@pytest.mark.parametrize("cursor", [0, 2**53 - 1])
+def test_native_activation_accepts_bounded_private_notification_cursor(cursor):
+    client, agent, _ = observed_client()
+    payload = activation_payload()
+    payload["result"][NATIVE_GATEWAY_DESCRIPTOR_KEY]["notification_admitted_sequence"] = cursor
+    sanitized = client.observe_activation_response(payload, routed_session_id=SCOPE.session_id,
+        connection_id="web-connection-1",
+        request_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_ACTIVATE.value)
+    retained = client.activation_for(session_id=SCOPE.session_id,
+        interaction_id=BINDING.interaction_id, connection_id="web-connection-1")
+    assert retained.notification_admitted_sequence == cursor
+    assert "notification_admitted_sequence" not in json.dumps(sanitized)
+    assert agent.requests == []
+
+
 def test_gateway_native_activation_handle_is_exact_private_and_connection_bound() -> (
     None
 ):

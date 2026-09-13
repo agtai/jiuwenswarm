@@ -5767,6 +5767,37 @@ class DedicatedMediaProductRegistry:
                         else []
                     ),
                 )
+                # The private client has consumed the Host descriptor before this
+                # observer runs. Never infer authority from a Browser candidate.
+                resolver = getattr(self._native_runtime_client, "activation_for", None)
+                native_activation = resolver(
+                    session_id=session_id, interaction_id=interaction_id,
+                    connection_id=owner_connection_id,
+                ) if callable(resolver) else None
+                if isinstance(native_activation, GatewayNativeActivation) and (
+                    native_activation.binding.scope.session_id,
+                    native_activation.binding.interaction_id,
+                    native_activation.binding.correlation_id,
+                    native_activation.binding.activation_id,
+                    native_activation.binding.activation_generation,
+                    native_activation.connection_id,
+                ) == (
+                    session_id, interaction_id, correlation_id, activation_id,
+                    activation_generation, owner_connection_id,
+                ):
+                    previous_high_water = authority.notification_fence.agent_high_water
+                    authority.notification_fence.agent_high_water = max(
+                        previous_high_water,
+                        native_activation.notification_admitted_sequence,
+                    )
+                    if authority.notification_fence.agent_high_water != previous_high_water:
+                        _LOGGER.info(
+                            "live_voice_native_notification_cursor_restored "
+                            "session_id=%s interaction_id=%s activation_generation=%s "
+                            "previous_sequence=%s host_sequence=%s",
+                            session_id, interaction_id, activation_generation,
+                            previous_high_water, native_activation.notification_admitted_sequence,
+                        )
                 if existing is not None and not same_activation:
                     self._revoke_media_for_product_activation(existing)
                 elif existing is not None:

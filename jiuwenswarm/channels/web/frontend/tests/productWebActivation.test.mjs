@@ -527,6 +527,112 @@ test('explicit media start refreshes one exact active P2 authority with singlefl
   );
 });
 
+function nativeActivationResponse() {
+  return response('active', { native_interaction: {
+    contract_version: 'live-voice.native-interaction.v1', engine: 'openai-realtime-native', model: 'test',
+  } });
+}
+
+for (const neutral of [false, true]) {
+  test(`media refresh serializes an existing poll and gates the next poll (neutral=${neutral})`, async () => {
+    const calls = [];
+    let resolvePoll;
+    let resolveRefresh;
+    const pendingPoll = new Promise(resolve => { resolvePoll = resolve; });
+    const pendingRefresh = new Promise(resolve => { resolveRefresh = resolve; });
+    const owner = new ProductWebP2ActivationOwner({ enabled: true, request: async (method, params, requestId) => {
+      calls.push([method, params.notification_sequence, requestId]);
+      if (calls.length === 1) return nativeActivationResponse();
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) return pendingRefresh;
+      if (calls.length === 2) return pendingPoll;
+      return response('notification', { kind: 'transport.keepalive' });
+    } });
+    await owner.start(binding);
+    const first = owner.nextNotification();
+    const refreshing = owner.refreshMediaAuthority();
+    const next = owner.nextNotification();
+    assert.deepEqual(calls.map(([method]) => method), [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_NOTIFICATION_NEXT_METHOD]);
+    resolvePoll(neutral ? nativeAudioNotification() : response('notification', { kind: 'transport.keepalive' }));
+    await first;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(calls.length, 3);
+    assert.equal(calls[2][0], PRODUCT_P2_ACTIVATE_METHOD);
+    // Delay snapshot delivery; no unfenced successor poll may enter Host here.
+    resolveRefresh(response('active', { replayed: true }));
+    await refreshing;
+    await next;
+    assert.equal(calls.length, 4);
+    assert.equal(calls[3][0], PRODUCT_P2_NOTIFICATION_NEXT_METHOD);
+    assert.equal(calls[3][1], neutral ? 1 : 2);
+  });
+}
+
+test('failed retained poll aborts media refresh without losing retry ownership', async () => {
+  const calls = [];
+  let rejectPoll;
+  const pendingPoll = new Promise((_, reject) => { rejectPoll = reject; });
+  const owner = new ProductWebP2ActivationOwner({ enabled: true, request: async method => {
+    calls.push(method);
+    if (method === PRODUCT_P2_ACTIVATE_METHOD) return nativeActivationResponse();
+    return pendingPoll;
+  } });
+  await owner.start(binding);
+  const first = owner.nextNotification();
+  const refreshing = owner.refreshMediaAuthority();
+  const rejected = Promise.all([assert.rejects(first, /response lost/), assert.rejects(refreshing, /response lost/)]);
+  rejectPoll(new Error('response lost'));
+  await rejected;
+  assert.equal(owner.hasPendingNotification(), true);
+  assert.equal(owner.authorizesMediaStart(binding), false);
+  assert.deepEqual(calls, [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_NOTIFICATION_NEXT_METHOD]);
+});
+
+test('media refresh resolves a previously timed-out notification using its exact request ID first', async () => {
+  const calls = [];
+  let resolveRetry;
+  const retry = new Promise(resolve => { resolveRetry = resolve; });
+  const owner = new ProductWebP2ActivationOwner({ enabled: true, request: async (method, params, requestId) => {
+    calls.push([method, params.notification_sequence, requestId]);
+    if (calls.length === 1) return nativeActivationResponse();
+    if (calls.length === 2) throw new Error('response lost');
+    if (method === PRODUCT_P2_NOTIFICATION_NEXT_METHOD) return retry;
+    return response('active', { replayed: true });
+  } });
+  await owner.start(binding);
+  await assert.rejects(owner.nextNotification(), /response lost/);
+  const refreshing = owner.refreshMediaAuthority();
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls[2], calls[1]);
+  resolveRetry(nativeAudioNotification());
+  await refreshing;
+  assert.equal(calls.length, 4);
+  assert.equal(calls[3][0], PRODUCT_P2_ACTIVATE_METHOD);
+  assert.equal(owner.hasPendingNotification(), false);
+  assert.equal((await owner.nextNotification()).kind, 'native.audio');
+  assert.equal(calls.length, 4); // Refresh cannot swallow the retained result.
+});
+
+test('close fences media refresh while it waits for a retained poll', async () => {
+  const calls = [];
+  let resolvePoll;
+  const pendingPoll = new Promise(resolve => { resolvePoll = resolve; });
+  const owner = new ProductWebP2ActivationOwner({ enabled: true, request: async method => {
+    calls.push(method);
+    if (method === PRODUCT_P2_NOTIFICATION_NEXT_METHOD) return pendingPoll;
+    return method === PRODUCT_P2_CLOSE_METHOD ? response('closed') : nativeActivationResponse();
+  } });
+  await owner.start(binding);
+  const first = owner.nextNotification();
+  const refreshing = owner.refreshMediaAuthority();
+  const rejected = Promise.all([assert.rejects(first, /no longer current/), assert.rejects(refreshing)]);
+  const closing = owner.close();
+  resolvePoll(response('notification', { kind: 'transport.keepalive' }));
+  await rejected;
+  await closing;
+  assert.equal(owner.snapshot().status, 'closed');
+  assert.deepEqual(calls, [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_NOTIFICATION_NEXT_METHOD, PRODUCT_P2_CLOSE_METHOD]);
+});
+
 test('media authority refresh fails closed on a mismatched response and retains cleanup', async () => {
   const calls = [];
   const owner = new ProductWebP2ActivationOwner({

@@ -1859,10 +1859,8 @@ def test_native_media_activation_skips_cascade_speech_and_binds_private_handle()
     }
     record = _pending_record(registry, _media_ticket(activated))
     assert record.native_activation == _native_activation()
-    assert client.lookups == [
-        ("session-1", "interaction-1", "connection-1"),
-        ("session-1", "interaction-1", "connection-1"),
-    ]
+    assert client.lookups
+    assert set(client.lookups) == {("session-1", "interaction-1", "connection-1")}
 
 
 def test_native_media_activation_without_exact_private_handle_has_zero_route() -> None:
@@ -2211,6 +2209,77 @@ def test_all_gateway_local_notification_orders_are_sequence_neutral(
         )
         == 1
     )
+
+
+@pytest.mark.parametrize("elapsed", [899, 901])
+@pytest.mark.parametrize("prune_first", [False, True, "recreate"])
+def test_native_notification_reactivation_restores_host_cursor(elapsed, prune_first):
+    from tests.unit_tests.gateway.test_native_interaction_runtime_client import (
+        BINDING, SCOPE, FakeAgentClient, activation_payload,
+    )
+    from jiuwenswarm.gateway.live_voice.native_interaction_runtime_client import (
+        GatewayNativeInteractionRuntimeClient,
+    )
+
+    clock = [0.0]
+    client = GatewayNativeInteractionRuntimeClient(FakeAgentClient(), native_model="test")
+    registry = DedicatedMediaProductRegistry(
+        enabled=True, native_runtime_client=client, monotonic=lambda: clock[0],
+    )
+    binding = dict(session_id=SCOPE.session_id, interaction_id=BINDING.interaction_id,
+        correlation_id=BINDING.correlation_id, activation_id=BINDING.activation_id,
+        activation_generation=1, connection_id="connection-1")
+
+    def observe(cursor):
+        payload = activation_payload()
+        payload["product_composition"] = _formal_p2_manifest()
+        payload["result"]["_native_gateway"]["notification_admitted_sequence"] = cursor
+        sanitized = client.observe_activation_response(payload,
+            routed_session_id=SCOPE.session_id, connection_id="connection-1",
+            request_method="live_voice.composition.p2.activate")
+        assert "notification_admitted_sequence" not in str(sanitized)
+        registry.observe_agent_response(sanitized, routed_session_id=SCOPE.session_id,
+            connection_id="connection-1", request_method="live_voice.composition.p2.activate")
+
+    observe(0)
+    for sequence in range(1, 4):
+        assert registry.mark_native_notification_forwarded(
+            request_id=f"host-{sequence}", notification_sequence=sequence, **binding)
+    clock[0] = elapsed
+    if prune_first == "recreate":
+        registry = DedicatedMediaProductRegistry(
+            enabled=True, native_runtime_client=client, monotonic=lambda: clock[0],
+        )
+    elif prune_first:
+        with registry._lock:
+            registry._prune(clock[0])
+    observe(3)
+    # A delayed activation snapshot cannot rewind the retained fence.
+    observe(2)
+    queue = asyncio.Queue()
+    queue.put_nowait({"status": "notification", "kind": "native.audio"})
+    registry._native_notifications[(SCOPE.session_id, BINDING.interaction_id, "connection-1")] = queue
+    for wrong in ({"connection_id": "other"}, {"activation_id": "other"},
+                  {"session_id": "other"}, {"correlation_id": "other"}):
+        assert registry.take_native_notification_response(request_id="wrong",
+            notification_sequence=4, **(binding | wrong)) is None
+        assert queue.qsize() == 1
+    response = registry.take_native_notification_response(
+        request_id="local-4", notification_sequence=4, **binding)
+    assert response is not None and response["result"]["sequence_effect"] == "neutral"
+    assert queue.empty()
+    assert registry.take_native_notification_response(
+        request_id="local-4", notification_sequence=4, **binding) == response
+    # Local audio does not consume Host sequence 4.
+    assert registry.mark_native_notification_forwarded(
+        request_id="host-4", notification_sequence=4, **binding)
+    observe(3)
+    queue.put_nowait({"status": "notification", "kind": "native.audio"})
+    assert registry.take_native_notification_response(
+        request_id="host-4", notification_sequence=4, **binding) is None
+    assert queue.qsize() == 1
+    assert registry.take_native_notification_response(
+        request_id="local-5", notification_sequence=5, **binding) is not None
 
 
 def test_native_notification_fence_forwards_committed_candidate_without_mapping() -> (

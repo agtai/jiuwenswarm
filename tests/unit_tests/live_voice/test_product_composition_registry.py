@@ -2618,6 +2618,64 @@ async def test_native_activation_replays_capability_and_admits_exact_turn(
 
 
 @pytest.mark.asyncio
+async def test_native_reactivation_cursor_crosses_host_gateway_recovery_seam(tmp_path, monkeypatch):
+    from jiuwenswarm.gateway.live_voice.native_interaction_runtime_client import (
+        GatewayNativeInteractionRuntimeClient,
+    )
+    from jiuwenswarm.gateway.live_voice.dedicated_media_registration import DedicatedMediaProductRegistry
+
+    registry, _p3, manager, _pushed = _registry(tmp_path,
+        interaction_engine=InteractionEngineKind.OPENAI_REALTIME_NATIVE)
+    monkeypatch.setattr(
+        "jiuwenswarm.channels.live_voice.product_composition_registry._P2_NOTIFICATION_LONG_POLL_TIMEOUT_SECONDS",
+        0.001)
+    params = _p2_params(interaction_engine="openai-realtime-native")
+    class NoBusinessTransport:
+        async def send_request(self, envelope):
+            raise AssertionError("Activation recovery must not dispatch business work")
+
+    client = GatewayNativeInteractionRuntimeClient(NoBusinessTransport(), native_model="test")
+    clock = [0.0]
+    media = DedicatedMediaProductRegistry(enabled=True, native_runtime_client=client,
+        monotonic=lambda: clock[0])
+
+    async def activate(request_id):
+        response = await registry.handle_p2_activate(params=params, request_id=request_id,
+            session_id=SCOPE.session_id, channel_id="web")
+        assert response.ok
+        # Exercise the actual wire serialization and private decoder, not a
+        # hand-built cursor. No provider or business execution is necessary.
+        payload = json.loads(json.dumps(response.payload))
+        sanitized = client.observe_activation_response(payload, routed_session_id=SCOPE.session_id,
+            connection_id="socket-1", request_method="live_voice.composition.p2.activate")
+        media.observe_agent_response(sanitized, routed_session_id=SCOPE.session_id,
+            connection_id="socket-1", request_method="live_voice.composition.p2.activate")
+        return payload["result"]["_native_gateway"]["notification_admitted_sequence"]
+
+    try:
+        assert await activate("first") == 0
+        for sequence in range(1, 4):
+            poll = await registry.handle_p2_notification_next(
+                params=_p2_params(notification_sequence=sequence),
+                request_id=f"poll-{sequence}", session_id=SCOPE.session_id)
+            assert poll.ok
+        clock[0] = 901
+        assert await activate("recovery") == 3
+        queue = asyncio.Queue()
+        queue.put_nowait({"status": "notification", "kind": "native.audio"})
+        media._native_notifications[(SCOPE.session_id, "interaction-1", "socket-1")] = queue
+        result = media.take_native_notification_response(request_id="audio-4", notification_sequence=4,
+            session_id=SCOPE.session_id, interaction_id="interaction-1", connection_id="socket-1",
+            correlation_id=params["correlation_id"], activation_id=params["activation_id"],
+            activation_generation=params["activation_generation"])
+        assert result is not None and result["result"]["sequence_effect"] == "neutral"
+        assert queue.empty()
+        assert manager.agent.calls == 0
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
 async def test_native_activation_action_ledger_crosses_generic_256_default(
     tmp_path: Path,
 ) -> None:

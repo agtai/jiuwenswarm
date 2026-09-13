@@ -1023,6 +1023,7 @@ export class ProductWebP2ActivationOwner {
   private notificationRequestId: string | null = null;
   private notificationPromise: Promise<JsonObject> | null = null;
   private committedNotificationSequence = 0;
+  private nativeNotificationRecovery = false;
   private notificationQueue: JsonObject[] = [];
   private lastNotificationPublishSeq: number | null = null;
   private replayableNotificationBatch: Readonly<{
@@ -1110,6 +1111,8 @@ export class ProductWebP2ActivationOwner {
       .then(value => {
         try {
           const result = requireResult(value, 'active', binding);
+          const native = objectValue(result.native_interaction);
+          this.nativeNotificationRecovery = native?.contract_version === 'live-voice.native-interaction.v1' && native.engine === 'openai-realtime-native';
           this.adoptVoiceTaskDiscovery(result);
           this.adoptAgentModelSelection(result);
           this.activationReplayed = result.replayed === true ? true : result.replayed === false ? false : null;
@@ -1153,7 +1156,24 @@ export class ProductWebP2ActivationOwner {
       return Promise.reject(error);
     }
     let retained: Promise<ProductWebP2ActivationSnapshot>;
-    retained = this.request(PRODUCT_P2_ACTIVATE_METHOD, this.activationParams(binding))
+    // The Host cursor snapshot must follow the retained poll's settlement.
+    // New polls wait on mediaAuthorityRefreshPromise below, so no admission can
+    // overtake the snapshot while Gateway is restoring an expired fence.
+    const requestRefresh = () => {
+      if (this.closing || this.binding === null || !sameBinding(this.binding, binding)) {
+        throw new Error('product P2 activation changed before media authority refresh');
+      }
+      return this.request(PRODUCT_P2_ACTIVATE_METHOD, this.activationParams(binding));
+    };
+    const pendingNotification = this.nativeNotificationRecovery
+      ? (this.notificationPromise ?? (this.notificationRequestId !== null ? this.nextNotification().then(result => {
+          // This retry is owned by refresh, not the presentation consumer.
+          // Preserve its first item alongside any already retained batch tail.
+          this.notificationQueue.unshift(result);
+          return result;
+        }) : null))
+      : null;
+    retained = (pendingNotification ? pendingNotification.then(requestRefresh) : requestRefresh())
       .then(value => {
         let result: JsonObject;
         try {
@@ -1328,6 +1348,7 @@ export class ProductWebP2ActivationOwner {
   }
 
   async nextNotification(): Promise<JsonObject> {
+    while (this.nativeNotificationRecovery && this.mediaAuthorityRefreshPromise) await this.mediaAuthorityRefreshPromise;
     const binding = this.requireActiveBinding();
     const queued = this.notificationQueue.shift();
     if (queued !== undefined) return queued;

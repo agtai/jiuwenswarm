@@ -86,7 +86,14 @@ support has been discussed, not implemented.
 
 ### Continuation boundary
 
-**Current follow-up (2026-09-13):** integrate the useful changes from the twelve
+**Current repair (2026-09-13):** restore Native notification sequencing after
+Gateway authority expiry and serialize browser refresh with notification polling.
+The [repair record](reviews/NOTIFICATION_SEQUENCE_RECOVERY_20260913.md) owns the
+private Host cursor, exact Gateway restoration, concurrency review and checks.
+Local redeployment preserves configured data/model settings; physical playback
+after a long idle remains the user's validation, not full candidate acceptance.
+
+**Completed integration (2026-09-13):** integrate the useful changes from the twelve
 slimming commits into `hx/0912_livevoice`, preserving the official develop
 Runtime and SDK baseline. Task/Work authority, durability and result services
 belong to Host; production speech adapters belong to `channels/live_voice`.
