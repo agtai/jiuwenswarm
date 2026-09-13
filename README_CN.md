@@ -60,10 +60,16 @@
 
 ## 最新动态
 
-- **2026-05-18**：`v0.2.0` 发布，JiuwenClaw 正式升级为 JiuwenSwarm，桌面端发布与自动更新、Swarm 模式与演进能力增强、CLI/TUI 命令扩展。
-- **2026-05-21**：openJiuwen 圆桌派直播，开放式分享 Swarm Skills Hub 生态共建与 Skills 自演进。
-- **2026-06-02**：`v0.2.1` 发布，Swarm 集群模式前端显示优化、TUI 接入 Auto Harness 新指令、自动化演进与定时任务体系完善。
+- **2026-08-06**：`v0.2.4.beta3` 发布，重点降低 Agent 实例启动链路的冷启动时延。
+- **2026-07-28**：`v0.2.4.beta2` 发布，改进任务调度机制并优化前端交互逻辑。
+- **2026-07-24**：`v0.2.4.beta1` 发布，完善 Code 工作模式及其前端支持，包括工作区选择/切换与代码差异展示。
+- **2026-07-14**：`v0.2.3` 发布，增强集群模式协作能力，新增浏览器子 Agent 隔离、同 Session 联机协作、图片附件与多模态对话、Skill-Omni 能力及新的 TUI 命令，并包含稳定性修复。
 - **2026-06-12**：受邀参加新加坡 Lorong AI 社区活动。
+- **2026-06-02**：`v0.2.1` 发布，Swarm 集群模式前端显示优化、TUI 接入 Auto Harness 新指令、自动化演进与定时任务体系完善。
+- **2026-05-21**：openJiuwen 圆桌派直播，开放式分享 Swarm Skills Hub 生态共建与 Skills 自演进。
+- **2026-05-18**：`v0.2.0` 发布，JiuwenClaw 正式升级为 JiuwenSwarm，桌面端发布与自动更新、Swarm 模式与演进能力增强、CLI/TUI 命令扩展。
+
+完整版本说明见 [GitHub Releases](https://github.com/openJiuwen-ai/jiuwenswarm/releases)。
 
 ## 安装与启动
 
@@ -204,8 +210,8 @@ JiuwenSwarm 支持三种执行模式，按需切换：
 | 官网 | 产品介绍、动态与生态建设 | [访问官网](https://openjiuwen.com) |
 | SIG | 技术路线、工程实践、生态共建 | [加入 SIG](https://openjiuwen.com/community/sig-center) |
 | Swarm Skills Hub | 浏览、发布和复用 JiuwenSwarm Skill | [访问 Swarm Skills Hub](https://swarmskills.openjiuwen.com/) |
-    
-## License  
+
+## License
 
 本项目基于 [Apache License 2.0](LICENSE) 开源。
 

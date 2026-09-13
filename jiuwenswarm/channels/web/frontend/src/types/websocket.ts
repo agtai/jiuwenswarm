@@ -39,6 +39,8 @@ export type WebMessage = WsRequest | WsResponse | WsEvent;
 export interface WebRequestOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
+  /** Stable caller-owned id for retained, exact replay after response loss. */
+  requestId?: string;
   /** 对应协议里请求消息的顶层 is_stream 字段（如 command.goal 的 set/resume） */
   isStream?: boolean;
   /** Keep the existing request pending until the runtime confirms acceptance. */
@@ -55,6 +57,7 @@ export interface WebConnectOptions {
 
 export interface WebError extends Error {
   code?: string;
+  reason?: string;
   requestId?: string;
   retriable?: boolean;
   /**

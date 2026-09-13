@@ -1,0 +1,15 @@
+{
+  "status": "fallback",
+  "operation": "speech.recognize.stream",
+  "capture": {
+    "capture_id": "capture-1",
+    "capture_generation": 0,
+    "track_id": "track-1",
+    "final": true
+  },
+  "fallback_tier": "batch",
+  "reason_id": "STREAMING_SPEECH_EVENT_QUEUE_EXHAUSTED",
+  "visible": true,
+  "x_obs_event": "failure.observed",
+  "x_obs_metric": "live_voice.failure_total"
+}

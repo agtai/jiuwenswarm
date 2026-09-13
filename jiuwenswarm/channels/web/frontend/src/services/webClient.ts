@@ -13,6 +13,7 @@ import { resolveUserId } from '../utils/userId';
 import i18n from '../i18n';
 import { GoalRecord } from '../types/goal';
 import { createSessionEventGate } from './sessionEventGate';
+import { diagnosticIdentity, markAudioRpcRejection, profileAudioOperation } from '../features/live-voice/formal/audioDiagnostics';
 
 type EventHandler = (event: WsEvent) => void;
 type TypedEventHandler<TPayload> = (event: WsEvent & { payload: TPayload }) => void;
@@ -25,8 +26,25 @@ interface PendingRequest {
   awaitRuntimeAccepted: boolean;
 }
 
-const MAX_RECONNECT_ATTEMPTS = 5;
 const DEFAULT_TIMEOUT_MS = 15000;
+
+/** Keep recovery observable without leaving a live tab asleep for 8-16s. */
+export function webReconnectDelayMs(attempt: number): number {
+  if (!Number.isInteger(attempt) || attempt < 1) return 1000;
+  return Math.min(1000 * 2 ** Math.min(attempt - 1, 1), 2000);
+}
+
+export function extractWebErrorReason(payload: unknown, fallbackCode?: unknown): string | undefined {
+  const fallback = typeof fallbackCode === 'string' && fallbackCode.trim() ? fallbackCode.trim() : undefined;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return fallback;
+  const record = payload as Record<string, unknown>;
+  const detail =
+    record.error && typeof record.error === 'object' && !Array.isArray(record.error)
+      ? (record.error as Record<string, unknown>)
+      : null;
+  const reason = detail?.reason ?? record.reason;
+  return typeof reason === 'string' && reason.trim() ? reason.trim() : fallback;
+}
 
 const LEGACY_EVENT_MAP: Record<string, string> = {
   connection_ack: 'connection.ack',
@@ -262,13 +280,30 @@ class WebClient {
     params?: Record<string, unknown>,
     options: WebRequestOptions = {}
   ): Promise<T> {
+    if (!method.startsWith('live_voice.')) return this.requestCore<T>(method, params, options);
+    const fields: Record<string, unknown> = { ...diagnosticIdentity(params), rpc_method: method, timeout_ms: options.timeoutMs ?? DEFAULT_TIMEOUT_MS };
+    return profileAudioOperation('browser.rpc', fields, () => this.requestCore<T>(method, params, options, fields));
+  }
+
+  private async requestCore<T>(
+    method: string, params: Record<string, unknown> | undefined, options: WebRequestOptions,
+    diagnosticFields?: Record<string, unknown>,
+  ): Promise<T> {
     await this.ensureReady();
 
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw this.createWebError(i18n.t('network.connectionUnavailable'), 'WS_NOT_READY', undefined, true);
     }
 
-    const id = this.generateRequestId();
+    const requestedId = options.requestId?.trim();
+    if (requestedId !== undefined && (!requestedId || requestedId.length > 256)) {
+      throw this.createWebError('request id is invalid', 'INVALID_REQUEST_ID', undefined, false);
+    }
+    const id = requestedId ?? this.generateRequestId();
+    if (diagnosticFields) diagnosticFields.request_id = id;
+    if (this.pending.has(id)) {
+      throw this.createWebError('request id is already in flight', 'REQUEST_ID_IN_FLIGHT', id, false);
+    }
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const message: WsRequest = {
       type: 'req',
@@ -467,15 +502,16 @@ class WebClient {
       return;
     }
 
-    pending.reject(
-      this.createWebError(
-        message.error ?? i18n.t('network.requestFailed'),
-        message.code,
-        message.id,
-        this.isRetriableCode(message.code),
-        message.payload
-      )
+    const error = this.createWebError(
+      message.error ?? i18n.t('network.requestFailed'),
+      message.code,
+      message.id,
+      this.isRetriableCode(message.code),
+      message.payload
     );
+    error.reason = extractWebErrorReason(message.payload, message.code);
+    markAudioRpcRejection(error);
+    pending.reject(error);
   }
 
   private resolveRuntimeAcceptedPending(message: WsEvent): void {
@@ -522,11 +558,9 @@ class WebClient {
     this.reconnectAttempts += 1;
     this.updateState('reconnecting');
 
-    // 前 N 次使用指数退避，超过后改为固定间隔持续重试，后端恢复后能自动检测并恢复连接
-    const delay =
-      this.reconnectAttempts <= MAX_RECONNECT_ATTEMPTS
-        ? Math.min(1000 * 2 ** (this.reconnectAttempts - 1), 30000)
-        : 2000; // 每 2 秒持续尝试
+    // Continue retrying, but never leave an already-open product tab waiting
+    // through a long exponential backoff after the private runtime recovers.
+    const delay = webReconnectDelayMs(this.reconnectAttempts);
 
     this.reconnectTimer = window.setTimeout(() => {
       void this.connect(this.lastConnectOptions);

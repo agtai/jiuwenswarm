@@ -89,6 +89,7 @@ def _adapter(
     adapter._last_mode = "agent"  # pylint: disable=protected-access
     adapter._is_session_scoped_adapter = True  # pylint: disable=protected-access
     adapter._session_adapters = {}  # pylint: disable=protected-access
+    adapter._instance_overrides = {}
     return adapter
 
 
@@ -287,6 +288,56 @@ class _FakeAgent:
 
     async def normal_request(self) -> str:
         return "ok"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dedicated,clean_support", [(True, False), (False, True)])
+async def test_background_personal_context_never_mounts_on_host_refresh(
+    monkeypatch, dedicated, clean_support,
+):
+    agent = _FakeAgent()
+    adapter = _adapter(agent)
+    adapter._is_code_agent = True
+    adapter._last_mode = "code.normal"
+    adapter._is_dedicated_background_project_adapter = dedicated
+    adapter._instance_overrides = {"project_clean_runtime_support": clean_support}
+    constructed = []
+
+    def forbidden_context_read(*args, **kwargs):
+        constructed.append((args, kwargs))
+        raise AssertionError("background task opened personal context")
+
+    monkeypatch.setattr(interface_deep, "PersonalContextRail", forbidden_context_read)
+    await adapter._sync_personal_context_rail("code.normal")
+    for enabled in (False, True, True):
+        adapter.set_personal_context_runtime_enabled(enabled)
+        await adapter.refresh_personal_context_rail()
+    assert constructed == []
+    assert agent.register_attempts == []
+    assert adapter._personal_context_rail is None
+
+
+@pytest.mark.asyncio
+async def test_background_personal_context_detach_failure_retains_owner_and_blocks():
+    from jiuwenswarm.server.runtime.agent_adapter.interface_code import JiuwenSwarmCodeAdapter
+
+    agent = _FakeAgent(fail_unregister=True)
+    child = object.__new__(JiuwenSwarmCodeAdapter)
+    child.__dict__.update(_adapter(agent).__dict__)
+    rail = object()
+    child._personal_context_rail = rail
+    agent.registered.append(rail)
+    with pytest.raises(RuntimeError, match="unregister failed"):
+        await child._disable_background_project_non_file_rails()
+    assert child._personal_context_rail is rail
+    assert agent.registered == [rail]
+    assert agent.register_attempts == []
+    agent.fail_unregister = False
+    await child._disable_background_project_non_file_rails()
+    await child._disable_background_project_non_file_rails()
+    assert child._personal_context_rail is None
+    assert agent.registered == []
+    assert agent.unregister_attempts == [rail, rail]
 
 
 class _FakeRail:

@@ -28,6 +28,20 @@ from jiuwenswarm.gateway.heartbeat import HeartbeatServiceUnavailableError
 from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
 
 
+from jiuwenswarm.gateway.live_voice.dedicated_media_registration import (
+    MEDIA_FEATURE_ENV,
+)
+from jiuwenswarm.gateway.live_voice.streaming_synthesis_route import (
+    StreamingSynthesisRouteOwner,
+)
+from jiuwenswarm.gateway.live_voice.streaming_speech_route import (
+    StreamingRecognitionRouteOwner,
+)
+from jiuwenswarm.server.live_voice.openai_streaming_speech import (
+    STREAMING_SPEECH_FLAG,
+)
+
+
 class FakeWebChannel:
     def __init__(self):
         self.channel_id = "web"
@@ -247,17 +261,141 @@ class FakeMessageHandler:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", ["gpt-5.6", "gpt-4o"])
+async def test_validate_model_uses_actual_compatible_sdk_request(monkeypatch, model_name):
+    import json
+    import httpx
+    from openai import AsyncOpenAI
+    from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
+
+    requests = []
+    def respond(request):
+        body = json.loads(request.content)
+        requests.append(body)
+        if model_name == "gpt-5.6":
+            assert request.url.path == "/v1/responses"
+            return httpx.Response(200, json={"id": "resp_test", "created_at": 0, "object": "response",
+                "model": model_name, "status": "incomplete", "output": [],
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "usage": {"input_tokens": 4, "output_tokens": 3, "total_tokens": 7}})
+        return httpx.Response(200, json={"id": "test", "created": 0, "object": "chat.completion",
+            "model": model_name, "choices": [{"index": 0, "message": {"role": "assistant", "content": ""}, "finish_reason": "length"}],
+            "usage": {"prompt_tokens": 4, "completion_tokens": 3, "total_tokens": 7}})
+
+    async with AsyncOpenAI(api_key="test-key", http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond))) as client:
+        monkeypatch.setattr(OpenAIModelClient, "_create_async_openai_client", lambda self, timeout=None: client)
+        monkeypatch.setattr(app_web_handlers, "_resolve_model_config_obj_for_validate", lambda *args: {})
+        channel = FakeWebChannel()
+        _register_web_handlers(WebHandlersBindParams(channel=channel))
+        params = {"model_provider": "OpenAI", "model": model_name,
+                  "api_base": "https://api.openai.com/v1", "api_key": "test-key", "verify_ssl": True}
+        await channel.methods["config.validate_model"](object(), "probe", params, "test-session")
+        assert channel.responses[-1]["ok"] is True
+        assert channel.responses[-1]["payload"]["model_provider"] == "OpenAI"
+        assert len(requests) == 1
+        if model_name == "gpt-5.6":
+            assert requests[0]["max_output_tokens"] == 3
+            assert "temperature" not in requests[0]
+            assert "max_tokens" not in requests[0]
+        else:
+            assert requests[0]["max_tokens"] == 3
+            assert requests[0]["temperature"] == 0.95
+        await channel.methods["config.validate_model"](object(), "bad-key", {**params, "api_key": ""}, "test-session")
+        assert channel.responses[-1]["ok"] is False
+        assert channel.responses[-1]["code"] == "BAD_REQUEST"
+        assert len(requests) == 1
+
+
+@pytest.mark.asyncio
 async def test_web_disconnect_unregisters_physical_subscriptions() -> None:
     channel = FakeWebChannel()
     message_handler = FakeMessageHandler()
     _register_web_handlers(
         WebHandlersBindParams(channel=channel, message_handler=message_handler)
     )
+    forgotten: list[str] = []
+    channel.live_voice_native_runtime_client = SimpleNamespace(
+        forget_connection=lambda connection_id: forgotten.append(connection_id)
+    )
     ws = SimpleNamespace(_jiuwen_ws_id="web-ws-dead")
 
     await channel.disconnect_handler(ws, {"sess-web"})
 
     assert message_handler.disconnected_websockets == [("web", "web-ws-dead")]
+    assert forgotten == ["web-ws-dead"]
+
+
+@pytest.mark.parametrize("eagerness", ["auto", "high"])
+@pytest.mark.parametrize("budget", ["inf", "4096"])
+@pytest.mark.parametrize("engine_setting", [None, "openai-realtime-native"])
+def test_web_handlers_select_native_runtime_client_once(
+    monkeypatch: pytest.MonkeyPatch,
+    eagerness: str,
+    budget: str,
+    engine_setting: str | None,
+) -> None:
+    monkeypatch.delenv("LIVE_VOICE_INTERACTION_ENGINE", raising=False)
+    monkeypatch.delenv("LIVE_VOICE_NATIVE_REALTIME_MODEL", raising=False)
+    monkeypatch.delenv("LIVE_VOICE_NATIVE_ENDPOINT_MODE", raising=False)
+    if engine_setting is not None:
+        monkeypatch.setenv("LIVE_VOICE_INTERACTION_ENGINE", engine_setting)
+    monkeypatch.setenv("LIVE_VOICE_SPEECH_API_KEY", "private-test-key")
+    monkeypatch.setenv("LIVE_VOICE_SPEECH_API_BASE", "https://api.openai.com/v1")
+    monkeypatch.setenv("LIVE_VOICE_NATIVE_VAD_EAGERNESS", eagerness)
+    monkeypatch.setenv("LIVE_VOICE_NATIVE_MAX_OUTPUT_TOKENS", budget)
+    channel = FakeWebChannel()
+    agent = FakeAgentClient()
+
+    _register_web_handlers(WebHandlersBindParams(channel=channel, agent_client=agent))
+
+    assert channel.live_voice_interaction_engine == "openai-realtime-native"
+    assert channel.live_voice_native_runtime_client is not None
+    assert (
+        channel.live_voice_media_registry.native_runtime_client
+        is channel.live_voice_native_runtime_client
+    )
+    assert callable(channel.live_voice_media_registry._native_engine_factory)
+    from jiuwenswarm.common.schema.live_voice_contract_v2 import Assurance, ScopeRef
+    from jiuwenswarm.server.live_voice.native_interaction_contract import NativeInteractionBinding
+    binding = NativeInteractionBinding(ScopeRef("user", "project", "session", Assurance.AUTHENTICATED),
+                                       "interaction", "activation", 1, "correlation")
+    engine = channel.live_voice_media_registry._native_engine_factory(binding)
+    assert engine._session._config.model == "gpt-realtime-2.1-mini"
+    assert engine._endpoint_mode == "server-vad-300"
+    assert engine._vad_eagerness == eagerness
+    assert engine._max_output_tokens == (budget if budget == "inf" else int(budget))
+    assert engine._session.snapshot().client_event_count == 0
+
+
+def test_invalid_native_endpoint_setting_leaves_no_runtime_client_or_factory(monkeypatch):
+    monkeypatch.setenv("LIVE_VOICE_INTERACTION_ENGINE", "openai-realtime-native")
+    monkeypatch.setenv("LIVE_VOICE_NATIVE_VAD_EAGERNESS", "medium")
+    channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=channel, agent_client=FakeAgentClient()))
+    assert channel.live_voice_interaction_engine == "unavailable"
+    assert channel.live_voice_native_runtime_client is None
+    assert channel.live_voice_media_registry._native_engine_factory is None
+
+
+@pytest.mark.parametrize("engine_setting", [None, "openai-realtime-native"])
+def test_native_engine_without_gateway_provider_secret_fails_before_activation(
+    monkeypatch: pytest.MonkeyPatch,
+    engine_setting: str | None,
+) -> None:
+    monkeypatch.delenv("LIVE_VOICE_INTERACTION_ENGINE", raising=False)
+    if engine_setting is not None:
+        monkeypatch.setenv("LIVE_VOICE_INTERACTION_ENGINE", engine_setting)
+    monkeypatch.delenv("LIVE_VOICE_SPEECH_API_KEY", raising=False)
+    channel = FakeWebChannel()
+
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, agent_client=FakeAgentClient())
+    )
+
+    assert channel.live_voice_interaction_engine == "unavailable"
+    assert channel.live_voice_native_runtime_client is None
+    assert channel.live_voice_media_registry.native_runtime_client is None
+    assert channel.live_voice_media_registry._native_engine_factory is None
 
 
 class FakeChannelManager:
@@ -696,6 +834,45 @@ async def test_agentos_cron_update_project_fields_with_dict_job(monkeypatch) -> 
     assert patch["project_id"] == "user-proj-1"
     assert patch["work_mode"] == "code"
     assert patch["_agentos_project_binding_verified"] is True
+
+
+@pytest.mark.asyncio
+async def test_web_registration_constructs_both_streaming_direction_owners(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    enabled_channel = FakeWebChannel()
+    monkeypatch.setenv(MEDIA_FEATURE_ENV, "true")
+    monkeypatch.setenv(STREAMING_SPEECH_FLAG, "true")
+
+    _register_web_handlers(WebHandlersBindParams(channel=enabled_channel))
+
+    owner = enabled_channel.live_voice_streaming_synthesis_owner
+    recognition_owner = enabled_channel.live_voice_streaming_speech_owner
+    assert isinstance(owner, StreamingSynthesisRouteOwner)
+    assert isinstance(recognition_owner, StreamingRecognitionRouteOwner)
+    assert (
+        enabled_channel.live_voice_media_registry._streaming_synthesis_owner is owner
+    )
+    assert (
+        enabled_channel.live_voice_media_registry._streaming_recognition_owner
+        is recognition_owner
+    )
+    assert enabled_channel.live_voice_speech_service is not None
+    await owner.close()
+    await recognition_owner.close()
+
+    disabled_channel = FakeWebChannel()
+    monkeypatch.setenv(STREAMING_SPEECH_FLAG, "false")
+
+    _register_web_handlers(WebHandlersBindParams(channel=disabled_channel))
+
+    assert disabled_channel.live_voice_streaming_synthesis_owner is None
+    assert disabled_channel.live_voice_media_registry._streaming_synthesis_owner is None
+    assert isinstance(
+        disabled_channel.live_voice_streaming_speech_owner,
+        StreamingRecognitionRouteOwner,
+    )
+    await disabled_channel.live_voice_streaming_speech_owner.close()
 
 
 @pytest.mark.asyncio
@@ -2778,6 +2955,32 @@ def test_web_forwards_only_canonical_personal_context_rpc_methods():
     assert forwarded == methods
     assert no_local == methods
     assert len(methods) == 25
+
+
+def test_web_schedule_and_issue_rpc_methods_are_agent_only():
+    expected = {
+        "schedule.check_config",
+        "schedule.update_config",
+        "schedule.create",
+        "schedule.run",
+        "schedule.list",
+        "schedule.status",
+        "schedule.logs",
+        "schedule.cancel",
+        "schedule.delete",
+        "issue.watch_once",
+        "issue.state.list",
+        "issue.matrix",
+        "issue.delete",
+    }
+
+    exposed = {
+        method
+        for method in app_web_handlers._FORWARD_REQ_METHODS
+        if method.startswith(("schedule.", "issue."))
+    }
+    assert exposed == expected
+    assert expected <= app_web_handlers._FORWARD_NO_LOCAL_HANDLER_METHODS
 
 
 # =====================================================================

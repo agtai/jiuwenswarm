@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
+from enum import Enum
+from urllib.parse import urlparse
 
 from jiuwenswarm.common.reasoning_config import (
     normalize_reasoning_level,
@@ -56,7 +58,9 @@ def _resolve_model_name(model_name: str, model_config_obj: Any) -> str:
     if model_name:
         return str(model_name).strip()
     if isinstance(model_config_obj, Mapping):
-        configured_name = model_config_obj.get("model") or model_config_obj.get("model_name")
+        configured_name = model_config_obj.get("model") or model_config_obj.get(
+            "model_name"
+        )
         return str(configured_name or "").strip()
     return ""
 
@@ -166,7 +170,39 @@ def build_reasoning_model_request_kwargs(
     )
 
 
+def bounded_semantic_request_options(
+    model_client_config: Mapping[str, Any],
+    model_config_obj: Any = None,
+) -> dict[str, Any]:
+    """Use verified non-thinking capability for formal spoken interaction.
+
+    This is a per-invocation option, not a saved model or ordinary Agent policy.
+    Providers without this verified capability retain their configured behaviour.
+    """
+    # Preserve the existing verified formal capability after ordinary reasoning
+    # configuration moved to the SDK's general provider planning API.
+    provider = model_client_config.get("client_provider")
+    provider = provider.value if isinstance(provider, Enum) else provider
+    provider = str(provider or "").strip().lower()
+    api_base = str(model_client_config.get("api_base") or model_client_config.get("base_url") or "").strip()
+    if api_base and "://" not in api_base:
+        api_base = f"https://{api_base}"
+    host = (urlparse(api_base).hostname or "").lower()
+    model = _resolve_model_name(
+        model_client_config.get("model_name") or "", _model_config_to_dict(model_config_obj)
+    ).lower()
+    if (provider not in {"openai", "deepseek", "dashscope"}
+            or host != "api.deepseek.com"
+            or model not in {"deepseek-v4-pro", "deepseek-v4-flash"}):
+        return {}
+    configured_body = _model_config_to_dict(model_config_obj).get("extra_body")
+    extra_body = dict(configured_body) if isinstance(configured_body, dict) else {}
+    extra_body["thinking"] = {"type": "disabled"}
+    return {"extra_body": extra_body}
+
+
 __all__ = [
+    "bounded_semantic_request_options",
     "build_reasoning_model_request_kwargs",
     "inject_reasoning_params",
 ]

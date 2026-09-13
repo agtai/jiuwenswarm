@@ -1,0 +1,344 @@
+{
+  "date": "2026-09-07",
+  "boundary": "Real selected Realtime Provider output/preflight and zero-played truncation; no Runtime admission or Agent/Tool/Task execution. Real selected TTS traverses registered media leaf with synthetic terminal Task/Native activation, simulated network ACK peer and serialized synthetic canonical failure receipt.",
+  "performance_claim": "None. These conformance observations are not paired latency or physical microphone/speaker measurements.",
+  "failed_samples_retained": "Earlier audio shape failures caused an exact observed final_answer/output_audio compatibility repair. The named-tool sample includes unsupported commentary/text and is intentionally fail-closed; it does not establish supported function-only conformance.",
+  "realtime_samples": [
+    {
+      "label": "helper-frozen",
+      "source_hashes": {
+        "jiuwenswarm/server/live_voice/native_continuation_preparation.py": "f098eb87a1f86f1c9099979a96cafbf755a8e791bffe1ed93f8b8b766ff0de84",
+        "jiuwenswarm/server/live_voice/openai_realtime_native_engine.py": "0d7e7479f2dbaa50aa805a8735513f6527ec377922a23230862680df0149a387",
+        "jiuwenswarm/server/live_voice/native_business_tools.py": "50bbbae71bbdaa3fff27ba553448a3a3705fa1f32e370ee467ebeffe85e7f4fb"
+      },
+      "cases": [
+        {
+          "variant": "audio",
+          "model": "gpt-realtime-2",
+          "real_provider": true,
+          "runtime_admissions": 0,
+          "agent_tool_task_effects": 0,
+          "physical_playback": false,
+          "render_ack_calls": 0,
+          "passed": false,
+          "failure_type": "PreparedOutputViolation",
+          "failure_reason": "NATIVE_PREPARED_TERMINAL_UNREPRESENTED",
+          "session_close_complete": true,
+          "event_counts": {
+            "conversation.item.added": 2,
+            "conversation.item.done": 2,
+            "response.created": 1,
+            "response.output_item.added": 1,
+            "response.content_part.added": 1,
+            "response.output_audio_transcript.delta": 7,
+            "response.output_audio.delta": 7,
+            "response.output_audio.done": 1,
+            "response.output_audio_transcript.done": 1,
+            "response.content_part.done": 1,
+            "response.output_item.done": 1,
+            "response.done": 1
+          },
+          "elapsed_ms": 2696.2
+        }
+      ],
+      "private_config_unchanged": true
+    },
+    {
+      "label": "shape-capture",
+      "source_hashes": {
+        "jiuwenswarm/server/live_voice/native_continuation_preparation.py": "f098eb87a1f86f1c9099979a96cafbf755a8e791bffe1ed93f8b8b766ff0de84",
+        "jiuwenswarm/server/live_voice/openai_realtime_native_engine.py": "0d7e7479f2dbaa50aa805a8735513f6527ec377922a23230862680df0149a387",
+        "jiuwenswarm/server/live_voice/native_business_tools.py": "50bbbae71bbdaa3fff27ba553448a3a3705fa1f32e370ee467ebeffe85e7f4fb"
+      },
+      "cases": [
+        {
+          "variant": "audio",
+          "model": "gpt-realtime-2",
+          "real_provider": true,
+          "runtime_admissions": 0,
+          "agent_tool_task_effects": 0,
+          "physical_playback": false,
+          "render_ack_calls": 0,
+          "passed": false,
+          "failure_type": "PreparedOutputViolation",
+          "failure_reason": "NATIVE_PREPARED_TERMINAL_UNREPRESENTED",
+          "session_close_complete": true,
+          "event_counts": {
+            "conversation.item.added": 2,
+            "conversation.item.done": 2,
+            "response.created": 1,
+            "response.output_item.added": 1,
+            "response.content_part.added": 1,
+            "response.output_audio_transcript.delta": 7,
+            "response.output_audio.delta": 6,
+            "response.output_audio.done": 1,
+            "response.output_audio_transcript.done": 1,
+            "response.content_part.done": 1,
+            "response.output_item.done": 1,
+            "response.done": 1
+          },
+          "elapsed_ms": 2003.11
+        }
+      ],
+      "private_config_unchanged": true
+    },
+    {
+      "label": "named-shape",
+      "source_hashes": {
+        "jiuwenswarm/server/live_voice/native_continuation_preparation.py": "f098eb87a1f86f1c9099979a96cafbf755a8e791bffe1ed93f8b8b766ff0de84",
+        "jiuwenswarm/server/live_voice/openai_realtime_native_engine.py": "0d7e7479f2dbaa50aa805a8735513f6527ec377922a23230862680df0149a387",
+        "jiuwenswarm/server/live_voice/native_business_tools.py": "50bbbae71bbdaa3fff27ba553448a3a3705fa1f32e370ee467ebeffe85e7f4fb"
+      },
+      "cases": [
+        {
+          "variant": "named_function",
+          "model": "gpt-realtime-2",
+          "real_provider": true,
+          "runtime_admissions": 0,
+          "agent_tool_task_effects": 0,
+          "physical_playback": false,
+          "render_ack_calls": 0,
+          "passed": false,
+          "failure_type": "PreparedOutputViolation",
+          "failure_reason": "NATIVE_PREPARED_OUTPUT_UNSUPPORTED",
+          "session_close_complete": true,
+          "event_counts": {
+            "conversation.item.added": 2,
+            "conversation.item.done": 1,
+            "response.created": 1,
+            "response.output_item.added": 1,
+            "response.content_part.added": 1
+          },
+          "elapsed_ms": 1909.03
+        }
+      ],
+      "private_config_unchanged": true
+    },
+    {
+      "label": "audio-compatible",
+      "source_hashes": {
+        "jiuwenswarm/server/live_voice/native_continuation_preparation.py": "522b3aa96e5bd4c6fe78ae3a65fe17e84fb236467ec2a1409d6ae0e34404e535",
+        "jiuwenswarm/server/live_voice/openai_realtime_native_engine.py": "0d7e7479f2dbaa50aa805a8735513f6527ec377922a23230862680df0149a387",
+        "jiuwenswarm/server/live_voice/native_business_tools.py": "50bbbae71bbdaa3fff27ba553448a3a3705fa1f32e370ee467ebeffe85e7f4fb"
+      },
+      "cases": [
+        {
+          "variant": "audio",
+          "model": "gpt-realtime-2",
+          "real_provider": true,
+          "runtime_admissions": 0,
+          "agent_tool_task_effects": 0,
+          "physical_playback": false,
+          "render_ack_calls": 0,
+          "terminal_validated": true,
+          "output_events": 21,
+          "retained_output_bytes": 169267,
+          "audio_targets": 1,
+          "cleanup_unsupported": false,
+          "preflight_ms": 2291.59,
+          "zero_played_truncation_confirmed": true,
+          "passed": true,
+          "session_close_complete": true,
+          "event_counts": {
+            "conversation.item.added": 2,
+            "conversation.item.done": 2,
+            "response.created": 1,
+            "response.output_item.added": 1,
+            "response.content_part.added": 1,
+            "response.output_audio_transcript.delta": 7,
+            "response.output_audio.delta": 7,
+            "response.output_audio.done": 1,
+            "response.output_audio_transcript.done": 1,
+            "response.content_part.done": 1,
+            "response.output_item.done": 1,
+            "response.done": 1
+          },
+          "elapsed_ms": 2463.24
+        }
+      ],
+      "private_config_unchanged": true
+    },
+    {
+      "label": "integrated-reviewed",
+      "source_hashes": {
+        "jiuwenswarm/server/live_voice/native_continuation_preparation.py": "6a1baa97d1b4411bf531e6824e05f44950175c2f239fafbc406c0414e320da24",
+        "jiuwenswarm/server/live_voice/openai_realtime_native_engine.py": "b100d95cd6994fc8223b5918210d2f3cd48e40f3aaae10e1519ba127cdb2ff2e",
+        "jiuwenswarm/server/live_voice/native_business_tools.py": "fee49962ad09fdd60419977bcc8c70dc7d2b772078d96aa312c7def21125c819"
+      },
+      "cases": [
+        {
+          "variant": "audio",
+          "model": "gpt-realtime-2",
+          "real_provider": true,
+          "runtime_admissions": 0,
+          "agent_tool_task_effects": 0,
+          "physical_playback": false,
+          "render_ack_calls": 0,
+          "terminal_validated": true,
+          "output_events": 20,
+          "retained_output_bytes": 156247,
+          "audio_targets": 1,
+          "cleanup_unsupported": false,
+          "preflight_ms": 3147.29,
+          "zero_played_truncation_confirmed": true,
+          "helper_cleanup_complete": true,
+          "passed": true,
+          "session_close_complete": true,
+          "event_counts": {
+            "conversation.item.added": 2,
+            "conversation.item.done": 2,
+            "response.created": 1,
+            "response.output_item.added": 1,
+            "response.content_part.added": 1,
+            "response.output_audio_transcript.delta": 7,
+            "response.output_audio.delta": 6,
+            "response.output_audio.done": 1,
+            "response.output_audio_transcript.done": 1,
+            "response.content_part.done": 1,
+            "response.output_item.done": 1,
+            "response.done": 1
+          },
+          "elapsed_ms": 3320.66
+        }
+      ],
+      "private_config_unchanged": true
+    }
+  ],
+  "task_retirement_samples": [
+    {
+      "label": "p2-retirement-final",
+      "source_hashes": {
+        "jiuwenswarm/gateway/live_voice/task_notification_preparation.py": "d5ad4762f94adcd72546a95675a090bfdd5bc3ae7bceb41172f89e40ef3f6e03",
+        "jiuwenswarm/gateway/live_voice/dedicated_media_registration.py": "76baa4dd1c808e5e128a1664702973df6d1d4713c6bc38a666afac1c4cc3ba6e",
+        "jiuwenswarm/gateway/live_voice/product_streaming_synthesis.py": "b1378c632da9ad06746dff06eb162d267ae5b45b610165ea252a9ad5f4d08514",
+        "jiuwenswarm/gateway/live_voice/streaming_synthesis_route.py": "9226e4a3bd40c5964ecb9cc37aba21dc64853dcf880603d83678ecf748d93407"
+      },
+      "cases": [
+        {
+          "action": "claim",
+          "model": "gpt-4o-mini-tts-2025-12-15",
+          "voice": "marin",
+          "real_provider": true,
+          "terminal_task_fixture": "synthetic",
+          "native_activation_fixture": "synthetic",
+          "physical_playback": false,
+          "task_mutations": 0,
+          "render_ack_calls": 0,
+          "ready_ms": 2039.18,
+          "ready_has_no_ticket_or_receipt": true,
+          "claim_ms": 0.27,
+          "frames": 115,
+          "samples": 55200,
+          "pcm_sha256": "f4e223a65c12fef4e606ff2d773ac456a9f7de577d9c8c176f9ba020c388d353",
+          "pcm_ms": 2300.0,
+          "source_complete": true,
+          "receipts_after_consumption": 0,
+          "registered_media_socket_leaf": true,
+          "network_ack_peer": "simulated",
+          "transport_completion_is_not_render_receipt": true,
+          "eof_remains_revocable_before_render_ack": true,
+          "canonical_failure_releases_handoff_without_render_ack": true,
+          "canonical_failure_receipt": "serialized_synthetic_formal_server_shape",
+          "passed": true,
+          "elapsed_ms": 2520.28,
+          "route_retained_tasks": 0,
+          "provider_cleanup_complete": true,
+          "preparation_retained_count": 0
+        },
+        {
+          "action": "cancel",
+          "model": "gpt-4o-mini-tts-2025-12-15",
+          "voice": "marin",
+          "real_provider": true,
+          "terminal_task_fixture": "synthetic",
+          "native_activation_fixture": "synthetic",
+          "physical_playback": false,
+          "task_mutations": 0,
+          "render_ack_calls": 0,
+          "ready_ms": 936.73,
+          "ready_has_no_ticket_or_receipt": true,
+          "cancel_status": "cancelled",
+          "cancel_has_no_ticket_receipt_or_parent_close": true,
+          "canonical_failure_releases_handoff_without_render_ack": true,
+          "canonical_failure_receipt": "serialized_synthetic_formal_server_shape",
+          "passed": true,
+          "elapsed_ms": 946.17,
+          "route_retained_tasks": 0,
+          "provider_cleanup_complete": true,
+          "preparation_retained_count": 0
+        }
+      ],
+      "private_config_unchanged": true
+    },
+    {
+      "label": "p2-retirement-reviewed",
+      "source_hashes": {
+        "jiuwenswarm/gateway/live_voice/task_notification_preparation.py": "d5ad4762f94adcd72546a95675a090bfdd5bc3ae7bceb41172f89e40ef3f6e03",
+        "jiuwenswarm/gateway/live_voice/dedicated_media_registration.py": "c8e2257386616780ceb1ddce6024fc55e8e2ba89abe3ba75ec0d1db2087842f5",
+        "jiuwenswarm/gateway/live_voice/product_streaming_synthesis.py": "b1378c632da9ad06746dff06eb162d267ae5b45b610165ea252a9ad5f4d08514",
+        "jiuwenswarm/gateway/live_voice/streaming_synthesis_route.py": "9226e4a3bd40c5964ecb9cc37aba21dc64853dcf880603d83678ecf748d93407"
+      },
+      "cases": [
+        {
+          "action": "claim",
+          "model": "gpt-4o-mini-tts-2025-12-15",
+          "voice": "marin",
+          "real_provider": true,
+          "terminal_task_fixture": "synthetic",
+          "native_activation_fixture": "synthetic",
+          "physical_playback": false,
+          "task_mutations": 0,
+          "render_ack_calls": 0,
+          "ready_ms": 1350.17,
+          "ready_has_no_ticket_or_receipt": true,
+          "claim_ms": 0.26,
+          "frames": 105,
+          "samples": 50400,
+          "pcm_sha256": "efdcd6349d51eeb126f8fb059c840a988f3ac3e761f65b944e5c94862e791237",
+          "pcm_ms": 2100.0,
+          "source_complete": true,
+          "receipts_after_consumption": 0,
+          "registered_media_socket_leaf": true,
+          "network_ack_peer": "simulated",
+          "transport_completion_is_not_render_receipt": true,
+          "eof_remains_revocable_before_render_ack": true,
+          "canonical_failure_releases_handoff_without_render_ack": true,
+          "canonical_failure_receipt": "serialized_synthetic_formal_server_shape",
+          "passed": true,
+          "elapsed_ms": 1801.03,
+          "route_retained_tasks": 0,
+          "provider_cleanup_complete": true,
+          "preparation_retained_count": 0
+        },
+        {
+          "action": "cancel",
+          "model": "gpt-4o-mini-tts-2025-12-15",
+          "voice": "marin",
+          "real_provider": true,
+          "terminal_task_fixture": "synthetic",
+          "native_activation_fixture": "synthetic",
+          "physical_playback": false,
+          "task_mutations": 0,
+          "render_ack_calls": 0,
+          "ready_ms": 670.96,
+          "ready_has_no_ticket_or_receipt": true,
+          "cancel_status": "cancelled",
+          "cancel_has_no_ticket_receipt_or_parent_close": true,
+          "canonical_failure_releases_handoff_without_render_ack": true,
+          "canonical_failure_receipt": "serialized_synthetic_formal_server_shape",
+          "passed": true,
+          "elapsed_ms": 680.33,
+          "route_retained_tasks": 0,
+          "provider_cleanup_complete": true,
+          "preparation_retained_count": 0
+        }
+      ],
+      "private_config_unchanged": true
+    }
+  ],
+  "local_probe_sha256": {
+    "p2_real_preparation_probe.py": "90d0f931a279160cc70c22afcadf95573563f6f18b45abeb27cf7c21235e0aa0",
+    "p7_real_tts_probe.py": "010466fec9be9bd7a50c8992841a26c47a02291a8c54e884beecf0e5e28b0d65"
+  },
+  "local_raw_events": "Synthetic Provider output stays in ignored logs only; raw PCM/transcripts and credentials are not included here."
+}

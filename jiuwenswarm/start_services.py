@@ -327,7 +327,8 @@ def _resolve_ports_with_fallback(cmd: InstanceCommand, scan_range: int = 10) -> 
     )
     try:
         if cmd.is_default:
-            _upsert_env_ports(get_env_file(), alt_ports)
+            if not os.environ.get("JIUWENSWARM_CONFIG_DIR", "").strip():
+                _upsert_env_ports(get_env_file(), alt_ports)
         else:
             update_instances_yaml(cmd.name, cmd.config.workspace, alt_ports)
             create_bootstrap_env(cmd.config)
@@ -366,6 +367,11 @@ def _sync_default_env_ports(ports: dict[str, int]) -> int | None:
     Returns:
         None on success, 1 if persistence failed.
     """
+    # Explicit configuration is read in place. _start_process supplies the
+    # actual resolved ports to every child; dotenv preserves that environment.
+    if os.environ.get("JIUWENSWARM_CONFIG_DIR", "").strip():
+        return None
+
     from jiuwenswarm.instance_manager.config import _upsert_env_ports
 
     try:

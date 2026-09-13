@@ -319,6 +319,16 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         "x-original-host",
     }
     _WS_LOG_MAX_CHARS = 2000
+    _WS_PRIVATE_JSON_KEY = re.compile(
+        r'"(?:final[-_]*text|raw[-_]*text|voice[-_]*commit[-_]*receipt|'
+        r'data[-_]*base64|audio[-_]*base64|audio[-_]*bytes|raw[-_]*audio|pcm|'
+        r'samples|display[-_]*text|spoken[-_]*text|transcript|text|instruction|'
+        r'auth[-_]*token|authorization|api[-_]*key|access[-_]*token|'
+        r'refresh[-_]*token|credential|credentials|secret|ticket|media[-_]*ticket|'
+        r'endpoint[-_]*path|subject[-_]*id|lease[-_]*id|authority[-_]*evidence[-_]*id|'
+        r'media[-_]*session[-_]*id)"\s*:',
+        re.IGNORECASE,
+    )
     _HTTP_PROXY_TIMEOUT = 30
     _WS_CONNECT_TIMEOUT = 10
     _WS_SELECT_TIMEOUT = 60
@@ -444,6 +454,76 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             text = str(value)
         return cls._truncate_for_ws_log(text)
 
+    @classmethod
+    def _redact_ws_media_for_log(cls, value: Any) -> Any:
+        """Project websocket diagnostics without private Live Voice content."""
+
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.startswith(("{", "[")):
+                try:
+                    wrapped = json.loads(stripped)
+                except json.JSONDecodeError:
+                    wrapped = None
+                if isinstance(wrapped, (dict, list)):
+                    redacted = cls._redact_ws_media_for_log(wrapped)
+                    if redacted != wrapped:
+                        return json.dumps(
+                            redacted,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+            if cls._WS_PRIVATE_JSON_KEY.search(value):
+                return "<redacted:live-voice-private>"
+            return value
+        if isinstance(value, dict):
+            projected: dict[Any, Any] = {}
+            for key, item in value.items():
+                normalized = str(key).strip().lower().replace("-", "_")
+                compact_key = normalized.replace("_", "")
+                if compact_key in {
+                    "finaltext",
+                    "rawtext",
+                    "voicecommitreceipt",
+                }:
+                    projected[key] = "<redacted:live-voice-private>"
+                    continue
+                if normalized in {
+                    "data_base64",
+                    "audio_base64",
+                    "audio_bytes",
+                    "raw_audio",
+                    "pcm",
+                    "samples",
+                    "display_text",
+                    "spoken_text",
+                    "transcript",
+                    "text",
+                    "instruction",
+                    "auth_token",
+                    "authorization",
+                    "api_key",
+                    "access_token",
+                    "refresh_token",
+                    "credential",
+                    "credentials",
+                    "secret",
+                    "ticket",
+                    "media_ticket",
+                    "endpoint_path",
+                    "subject_id",
+                    "lease_id",
+                    "authority_evidence_id",
+                    "media_session_id",
+                }:
+                    projected[key] = "<redacted:live-voice-private>"
+                else:
+                    projected[key] = cls._redact_ws_media_for_log(item)
+            return projected
+        if isinstance(value, list):
+            return [cls._redact_ws_media_for_log(item) for item in value]
+        return value
+
     def _log_ws_business_message(self, direction: str, raw_message: str) -> None:
         try:
             payload = json.loads(raw_message)
@@ -459,7 +539,9 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 direction,
                 self._format_ws_part(payload.get("id")),
                 self._format_ws_part(payload.get("method")),
-                self._format_ws_part(payload.get("params")),
+                self._format_ws_part(
+                    self._redact_ws_media_for_log(payload.get("params"))
+                ),
             )
             return
         if msg_type == "res":
@@ -468,7 +550,9 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 direction,
                 self._format_ws_part(payload.get("id")),
                 self._format_ws_part(payload.get("ok")),
-                self._format_ws_part(payload.get("payload")),
+                self._format_ws_part(
+                    self._redact_ws_media_for_log(payload.get("payload"))
+                ),
                 self._format_ws_part(payload.get("error")),
                 self._format_ws_part(payload.get("code")),
             )
@@ -480,7 +564,9 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 self._format_ws_part(payload.get("event")),
                 self._format_ws_part(payload.get("seq")),
                 self._format_ws_part(payload.get("stream_id")),
-                self._format_ws_part(payload.get("payload")),
+                self._format_ws_part(
+                    self._redact_ws_media_for_log(payload.get("payload"))
+                ),
             )
 
     def _is_api_route(self) -> bool:
@@ -788,6 +874,30 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         finally:
             conn.close()
 
+    def _connect_websocket_upstream(self, host: str, port: int) -> socket.socket:
+        # A local media attach has a 3s browser deadline. Waiting 10s for its
+        # first TCP connection guarantees failure and leaves an orphaned proxy
+        # request. Retry only before sending the HTTP upgrade or any capability.
+        local_media = (
+            urlparse(self.path).path == "/ws/live-voice/media"
+            # Numeric loopback avoids DNS/multiple-address attempts exceeding
+            # this budget. Hostname and remote connections retain their policy.
+            and host in {"127.0.0.1", "::1"}
+        )
+        attempts = 2 if local_media else 1
+        for attempt in range(attempts):
+            try:
+                upstream = socket.create_connection(
+                    (host, port), timeout=1.0 if local_media else self._WS_CONNECT_TIMEOUT,
+                )
+                upstream.settimeout(self._WS_CONNECT_TIMEOUT)
+                return upstream
+            except (TimeoutError, ConnectionRefusedError):
+                if attempt + 1 == attempts:
+                    raise
+                self.logger.warning("live_voice_media_proxy_connect_retry attempt=%s", attempt + 1)
+        raise AssertionError("WebSocket connection attempts exhausted")
+
     def _proxy_websocket_tunnel(self) -> None:
         parsed = urlparse(self.ws_target)
         if parsed.scheme not in ("ws", "wss", "http", "https"):
@@ -806,19 +916,33 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         # 正常已就绪路径，也避免把后端启动竞争暴露给前端。
         upstream: socket.socket | None = None
         connect_error: OSError | None = None
-        connect_deadline = time.monotonic() + min(float(self._WS_CONNECT_TIMEOUT), 8.0)
-        while upstream is None:
+        if urlparse(self.path).path == "/ws/live-voice/media" and upstream_host in {"127.0.0.1", "::1"}:
             try:
-                upstream = socket.create_connection(
-                    (upstream_host, upstream_port),
-                    timeout=min(0.25, self._WS_CONNECT_TIMEOUT),
-                )
+                upstream = self._connect_websocket_upstream(upstream_host, upstream_port)
             except OSError as exc:
                 connect_error = exc
-                if time.monotonic() >= connect_deadline:
-                    break
-                time.sleep(0.05)
+        else:
+            connect_deadline = time.monotonic() + min(float(self._WS_CONNECT_TIMEOUT), 8.0)
+            while upstream is None:
+                try:
+                    upstream = socket.create_connection(
+                        (upstream_host, upstream_port),
+                        timeout=min(0.25, self._WS_CONNECT_TIMEOUT),
+                    )
+                except OSError as exc:
+                    connect_error = exc
+                    if time.monotonic() >= connect_deadline:
+                        break
+                    time.sleep(0.05)
 
+        if upstream is not None and parsed.scheme in ("wss", "https"):
+            try:
+                ctx = ssl.create_default_context() if _get_ssl_verify() else _get_insecure_ssl_context()
+                upstream = ctx.wrap_socket(upstream, server_hostname=upstream_host)
+            except OSError as exc:
+                upstream.close()
+                upstream = None
+                connect_error = exc
         if upstream is None:
             self.log_error(
                 "proxy ws connect failed: %s",
@@ -834,7 +958,12 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                     ),
                 ),
             )
-            self.send_error(502, "proxy ws connect failed")
+            try:
+                self.send_error(502, "proxy ws connect failed")
+            except (ConnectionError, OSError):
+                # The browser can close its timed-out attach before the proxy
+                # finishes; no handshake or media payload has been forwarded.
+                pass
             return
 
         try:

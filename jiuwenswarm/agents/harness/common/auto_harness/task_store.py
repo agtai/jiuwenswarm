@@ -8,7 +8,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shutil
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -30,9 +32,45 @@ from .run_log_status import (
 logger = logging.getLogger(__name__)
 
 
+_STORE_LOCKS_GUARD = threading.Lock()
+_STORE_LOCKS_BY_PATH: dict[str, asyncio.Lock] = {}
+
+
+def _normalized_store_path(path: Path) -> str:
+    """Return the process-wide identity for one task index file."""
+    return os.path.normcase(str(path.resolve(strict=False)))
+
+
+def _lock_for_store(path: Path) -> asyncio.Lock:
+    """Share read-modify-write coordination across store instances."""
+    store_key = _normalized_store_path(path)
+    with _STORE_LOCKS_GUARD:
+        lock = _STORE_LOCKS_BY_PATH.get(store_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _STORE_LOCKS_BY_PATH[store_key] = lock
+        return lock
+
+
 def _sync_write_json(path: Path, data: str) -> None:
-    """Synchronous JSON file write — called via asyncio.to_thread."""
-    path.write_text(data, encoding="utf-8")
+    """Atomically replace one JSON file — called via asyncio.to_thread."""
+    temp_path = path.with_name(
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    try:
+        with temp_path.open("w", encoding="utf-8", newline="\n") as file:
+            file.write(data)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temp_path, path)
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning(
+                "[TaskStore] Failed to clean temporary task index: %s",
+                temp_path,
+            )
 
 
 class TaskStore:
@@ -56,7 +94,7 @@ class TaskStore:
         self._tasks_file = data_dir / "scheduled-tasks.json"
         self._runs_dir = data_dir / "runs"
         self._tasks_cache: Optional[dict[str, Any]] = None
-        self._save_lock: asyncio.Lock = asyncio.Lock()
+        self._store_lock = _lock_for_store(self._tasks_file)
         self._skipped_stage_inferers: list[SkippedStageInferer] = []
         self._progress_enrichers: list[ProgressEnricher] = []
         self._ensure_dirs()
@@ -86,29 +124,168 @@ class TaskStore:
             return result
 
     async def _save_tasks(self, data: dict[str, Any]) -> None:
-        """Save tasks — updates in-memory cache first, then persists to disk via to_thread."""
+        """Persist a caller-locked snapshot, publishing its cache only on success."""
         data["last_updated"] = datetime.now(timezone.utc).isoformat()
-        self._tasks_cache = data
-
         json_str = json.dumps(data, ensure_ascii=False, indent=2)
-        async with self._save_lock:
+        try:
             await asyncio.to_thread(_sync_write_json, self._tasks_file, json_str)
+        except Exception:
+            # The caller may already have mutated the old cached object. Never
+            # expose that uncommitted state after a failed replace.
+            self._tasks_cache = None
+            raise
+        self._tasks_cache = data
 
     async def add_task(self, task: dict[str, Any]) -> None:
         """Add a new scheduled task."""
-        data = self._load_tasks()
-        data["tasks"].append(task)
-        await self._save_tasks(data)
+        async with self._store_lock:
+            self._tasks_cache = None
+            data = self._load_tasks()
+            data["tasks"].append(task)
+            await self._save_tasks(data)
         logger.info("[TaskStore] Added task: %s", task.get("task_id"))
+
+    async def get_or_create_task_for_command(
+        self,
+        task: dict[str, Any],
+        *,
+        owner_scope: dict[str, str],
+        origin_namespace: str,
+        idempotency_key: str,
+        fingerprint: str,
+    ) -> dict[str, Any]:
+        """Atomically persist or replay one idempotent create command.
+
+        This is a single-process guarantee. The command ledger and winning task
+        are written in the same JSON snapshot, but the JSON store does not
+        provide cross-process compare-and-swap or exactly-once execution.
+        """
+        async with self._store_lock:
+            # Another TaskStore instance for this path may have committed while
+            # this instance retained an older cache. Refresh under the shared
+            # command lock before deciding replay/conflict/create.
+            self._tasks_cache = None
+            data = self._load_tasks()
+            commands = data.setdefault("create_commands", [])
+            for command in commands:
+                if not isinstance(command, dict):
+                    continue
+                if (
+                    command.get("owner_scope") != owner_scope
+                    or command.get("origin_namespace") != origin_namespace
+                    or command.get("idempotency_key") != idempotency_key
+                ):
+                    continue
+
+                existing_task_id = str(command.get("task_id") or "")
+                if command.get("fingerprint") != fingerprint:
+                    return {
+                        "result": "conflict",
+                        "existing_task_id": existing_task_id,
+                    }
+
+                existing_task = next(
+                    (
+                        item
+                        for item in data.get("tasks", [])
+                        if item.get("task_id") == existing_task_id
+                    ),
+                    None,
+                )
+                return {
+                    "result": "replay",
+                    "task_id": existing_task_id,
+                    "task": dict(existing_task) if existing_task is not None else None,
+                    "deleted_at": command.get("deleted_at"),
+                    "owner_scope": command.get("owner_scope"),
+                    "origin_namespace": command.get("origin_namespace"),
+                    "idempotency_key": command.get("idempotency_key"),
+                    "execution_target": command.get("execution_target"),
+                    "execution_contract": command.get("execution_contract"),
+                }
+
+            task_id = str(task.get("task_id") or "")
+            if not task_id:
+                raise ValueError("task_id is required")
+            if any(item.get("task_id") == task_id for item in data.get("tasks", [])):
+                raise ValueError(f"Task already exists: {task_id}")
+
+            created_at = datetime.now(timezone.utc).isoformat()
+            data.setdefault("tasks", []).append(task)
+            command_record = {
+                "owner_scope": dict(owner_scope),
+                "origin_namespace": origin_namespace,
+                "idempotency_key": idempotency_key,
+                "fingerprint": fingerprint,
+                "task_id": task_id,
+                "execution_target": dict(task.get("execution_target") or {}),
+                "created_at": created_at,
+                "deleted_at": None,
+            }
+            if isinstance(task.get("execution_contract"), dict):
+                command_record["execution_contract"] = dict(
+                    task["execution_contract"]
+                )
+            commands.append(command_record)
+            await self._save_tasks(data)
+            logger.info(
+                "[TaskStore] Added idempotent task: %s namespace=%s",
+                task_id,
+                origin_namespace,
+            )
+            return {
+                "result": "created",
+                "task_id": task_id,
+                "task": dict(task),
+            }
+
+    def list_tasks_for_create_command(
+        self,
+        *,
+        owner_scope: dict[str, str],
+        origin_namespace: str,
+        idempotency_key: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List live tasks matching an exact owner scope and command namespace."""
+        data = self._load_tasks()
+        matching_task_ids: list[str] = []
+        for command in data.get("create_commands", []):
+            if not isinstance(command, dict):
+                continue
+            if command.get("owner_scope") != owner_scope:
+                continue
+            if command.get("origin_namespace") != origin_namespace:
+                continue
+            if (
+                idempotency_key is not None
+                and command.get("idempotency_key") != idempotency_key
+            ):
+                continue
+            task_id = command.get("task_id")
+            if isinstance(task_id, str) and task_id:
+                matching_task_ids.append(task_id)
+
+        tasks_by_id = {
+            task.get("task_id"): task
+            for task in data.get("tasks", [])
+            if isinstance(task, dict)
+        }
+        return [
+            tasks_by_id[task_id]
+            for task_id in matching_task_ids
+            if task_id in tasks_by_id
+        ]
 
     async def update_task(self, task_id: str, updates: dict[str, Any]) -> None:
         """Update an existing task."""
-        data = self._load_tasks()
-        for task in data.get("tasks", []):
-            if task.get("task_id") == task_id:
-                task.update(updates)
-                break
-        await self._save_tasks(data)
+        async with self._store_lock:
+            self._tasks_cache = None
+            data = self._load_tasks()
+            for task in data.get("tasks", []):
+                if task.get("task_id") == task_id:
+                    task.update(updates)
+                    break
+            await self._save_tasks(data)
 
     def get_task(self, task_id: str) -> Optional[dict[str, Any]]:
         """Get task by ID — reads from in-memory cache (zero I/O)."""
@@ -237,22 +414,48 @@ class TaskStore:
         Returns:
             True if task was deleted, False if not found
         """
-        data = self._load_tasks()
-        tasks = data.get("tasks", [])
+        async with self._store_lock:
+            self._tasks_cache = None
+            data = self._load_tasks()
+            tasks = data.get("tasks", [])
 
-        task_found = False
-        new_tasks = []
-        for task in tasks:
-            if task.get("task_id") == task_id:
-                task_found = True
-            else:
-                new_tasks.append(task)
+            task_found = False
+            deleted_task: dict[str, Any] | None = None
+            new_tasks = []
+            for task in tasks:
+                if task.get("task_id") == task_id:
+                    task_found = True
+                    deleted_task = task
+                else:
+                    new_tasks.append(task)
 
-        if not task_found:
-            return False
+            if not task_found:
+                return False
 
-        data["tasks"] = new_tasks
-        await self._save_tasks(data)
+            deleted_at = datetime.now(timezone.utc).isoformat()
+            for command in data.get("create_commands", []):
+                if isinstance(command, dict) and command.get("task_id") == task_id:
+                    command["deleted_at"] = deleted_at
+                    assert deleted_task is not None
+                    command.setdefault(
+                        "owner_scope",
+                        deleted_task.get("owner_scope"),
+                    )
+                    command.setdefault(
+                        "origin_namespace",
+                        deleted_task.get("origin_namespace"),
+                    )
+                    command.setdefault(
+                        "idempotency_key",
+                        deleted_task.get("idempotency_key"),
+                    )
+                    command.setdefault(
+                        "execution_target",
+                        dict(deleted_task.get("execution_target") or {}),
+                    )
+
+            data["tasks"] = new_tasks
+            await self._save_tasks(data)
 
         # Remove log directory (in thread to avoid blocking event loop)
         run_dir = self._runs_dir / task_id
@@ -267,15 +470,26 @@ class TaskStore:
         return True
 
     async def add_execution_record(self, task_id: str, record: dict[str, Any]) -> None:
-        """Add execution record to task history."""
-        data = self._load_tasks()
-        for task in data.get("tasks", []):
-            if task.get("task_id") == task_id:
-                history = task.get("execution_history", [])
-                history.append(record)
-                task["execution_history"] = history
-                break
-        await self._save_tasks(data)
+        """Add or replace an execution record, idempotently by execution ID."""
+        async with self._store_lock:
+            self._tasks_cache = None
+            data = self._load_tasks()
+            for task in data.get("tasks", []):
+                if task.get("task_id") == task_id:
+                    history = task.get("execution_history", [])
+                    execution_id = record.get("execution_id")
+                    replaced = False
+                    if execution_id:
+                        for index, existing in enumerate(history):
+                            if existing.get("execution_id") == execution_id:
+                                history[index] = {**existing, **record}
+                                replaced = True
+                                break
+                    if not replaced:
+                        history.append(record)
+                    task["execution_history"] = history
+                    break
+            await self._save_tasks(data)
 
     def get_log_path(self, task_id: str, execution_id: str) -> Path:
         """Get path for execution log file."""
@@ -449,53 +663,111 @@ class TaskStore:
         data = self._load_tasks()
         return any(t.get("status") in {"completed", "running"} for t in data.get("tasks", []))
 
-    async def reconcile_task_statuses(self) -> int:
+    async def reconcile_task_statuses(
+        self,
+        *,
+        origin_namespace: str | None = None,
+    ) -> int:
         """Re-check task logs and fix stale status values."""
-        data = self._load_tasks()
-        corrected = 0
+        async with self._store_lock:
+            self._tasks_cache = None
+            data = self._load_tasks()
+            corrected = 0
 
-        for task in data.get("tasks", []):
-            task_id = task.get("task_id")
-            old_status = task.get("status")
+            for task in data.get("tasks", []):
+                if (
+                    origin_namespace is not None
+                    and task.get("origin_namespace") != origin_namespace
+                ):
+                    continue
+                task_id = task.get("task_id")
+                old_status = task.get("status")
 
-            if old_status not in ("completed", "success", "failed", "running"):
-                continue
+                if old_status not in ("completed", "success", "failed", "running"):
+                    continue
 
-            history = task.get("execution_history", [])
-            latest = history[-1] if history else None
-            current_execution_id = str(task.get("current_execution_id") or "")
-            log_path = resolve_latest_task_log_path(task, self._runs_dir)
-            if log_path is None:
-                continue
-
-            if old_status == "running" and not has_terminal_session_event(log_path):
-                continue
-
-            result = self.determine_pipeline_status_from_log(log_path)
-            new_status = "failed" if result["failed"] else "success"
-
-            if new_status != old_status:
-                task["status"] = new_status
-                task["current_execution_id"] = None
-                if latest is None or latest.get("execution_id") != current_execution_id:
-                    latest = {
-                        "execution_id": current_execution_id,
-                        "started_at": task.get("created_at"),
-                        "completed_at": datetime.now(timezone.utc).isoformat(),
-                        "log_path": str(log_path),
-                    }
-                    history.append(latest)
-                    task["execution_history"] = history
-                latest["status"] = new_status
-                if result["error"]:
-                    latest["error"] = result["error"]
-                corrected += 1
-                logger.info(
-                    "[TaskStore] Reconciled task %s: %s -> %s",
-                    task_id, old_status, new_status,
+                history = task.get("execution_history", [])
+                latest = history[-1] if history else None
+                current_execution_id = str(task.get("current_execution_id") or "")
+                log_path = resolve_latest_task_log_path(task, self._runs_dir)
+                orphaned_running = old_status == "running" and (
+                    log_path is None or not has_terminal_session_event(log_path)
                 )
+                if orphaned_running:
+                    completed_at = datetime.now(timezone.utc).isoformat()
+                    formal_carrier = task.get("origin_namespace") == "live_voice"
+                    terminal_status = "interrupted" if formal_carrier else "failed"
+                    error = (
+                        "FORMAL_EXECUTION_LOST_ON_PROCESS_RESTART"
+                        if formal_carrier
+                        else "任务执行在服务重启后失去运行上下文"
+                    )
+                    task.update(
+                        {
+                            "status": terminal_status,
+                            "current_execution_id": None,
+                            "last_error": error,
+                            "completed_at": completed_at,
+                        }
+                    )
+                    if (
+                        latest is None
+                        or (
+                            current_execution_id
+                            and latest.get("execution_id") != current_execution_id
+                        )
+                    ):
+                        latest = {
+                            "execution_id": current_execution_id or "unknown",
+                            "started_at": task.get("created_at"),
+                        }
+                        if log_path is not None:
+                            latest["log_path"] = str(log_path)
+                        history.append(latest)
+                        task["execution_history"] = history
+                    latest.update(
+                        {
+                            "status": terminal_status,
+                            "error": error,
+                            "completed_at": completed_at,
+                        }
+                    )
+                    corrected += 1
+                    logger.warning(
+                        "[TaskStore] Reconciled orphaned running task %s as %s",
+                        task_id,
+                        terminal_status,
+                    )
+                    continue
 
-        if corrected > 0:
-            await self._save_tasks(data)
+                if log_path is None:
+                    continue
 
-        return corrected
+                result = self.determine_pipeline_status_from_log(log_path)
+                new_status = "failed" if result["failed"] else "success"
+
+                if new_status != old_status:
+                    task["status"] = new_status
+                    task["current_execution_id"] = None
+                    if latest is None or latest.get("execution_id") != current_execution_id:
+                        latest = {
+                            "execution_id": current_execution_id,
+                            "started_at": task.get("created_at"),
+                            "completed_at": datetime.now(timezone.utc).isoformat(),
+                            "log_path": str(log_path),
+                        }
+                        history.append(latest)
+                        task["execution_history"] = history
+                    latest["status"] = new_status
+                    if result["error"]:
+                        latest["error"] = result["error"]
+                    corrected += 1
+                    logger.info(
+                        "[TaskStore] Reconciled task %s: %s -> %s",
+                        task_id, old_status, new_status,
+                    )
+
+            if corrected > 0:
+                await self._save_tasks(data)
+
+            return corrected

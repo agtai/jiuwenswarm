@@ -1,0 +1,138 @@
+{
+  "case": "recorded-audio15-proposal-refinement",
+  "input": {
+    "analysis": null,
+    "commit": {
+      "commit_id": "web-commit-1788416831263-2",
+      "committed_at": "2026-09-03T06:27:11.263Z",
+      "context_refs": [
+        {
+          "expires_at": null,
+          "extensions": {},
+          "permissions": [
+            "agent.context.read"
+          ],
+          "redaction": {
+            "fields": [],
+            "policy_id": "live_voice.presented_text.v1",
+            "redacted": false
+          },
+          "revision": {
+            "kind": "snapshot",
+            "value": "sha256:774262f148ddbcf9d839e635a1322d531a9af5af625743fe526f446176e6ac31"
+          },
+          "scope": {
+            "assurance": "authenticated",
+            "project_id": "proj_89c8499f",
+            "session_id": "web_1a065eb6981_522afcb2f1d8",
+            "subject_id": "isolated-semantic-audio"
+          },
+          "source": "live_voice.cr_committed_user",
+          "stable_id": "formal-context:e1d4ad22ad9be5062b7f0619acc64a7becdb3a64b51af6d65f4fc5905ec2c432",
+          "uri": "live-voice-cr://context/e1d4ad22ad9be5062b7f0619acc64a7becdb3a64b51af6d65f4fc5905ec2c432"
+        },
+        {
+          "expires_at": null,
+          "extensions": {},
+          "permissions": [
+            "agent.context.read"
+          ],
+          "redaction": {
+            "fields": [],
+            "policy_id": "live_voice.presented_text.v1",
+            "redacted": false
+          },
+          "revision": {
+            "kind": "snapshot",
+            "value": "sha256:2c29e979946de04910352359002a004fcd775b468676924ed207b48e835f26d3"
+          },
+          "scope": {
+            "assurance": "authenticated",
+            "project_id": "proj_89c8499f",
+            "session_id": "web_1a065eb6981_522afcb2f1d8",
+            "subject_id": "isolated-semantic-audio"
+          },
+          "source": "live_voice.cr_presented_assistant",
+          "stable_id": "formal-context:505f19772ce04b8ff73b27c0dcb001f7492cf7dae1c9cd4a366c45936ff32ae6",
+          "uri": "live-voice-cr://context/505f19772ce04b8ff73b27c0dcb001f7492cf7dae1c9cd4a366c45936ff32ae6"
+        }
+      ],
+      "contract_version": "live-voice.contract.v2",
+      "hypothesis_provenance": {
+        "capture_generation": 15,
+        "capture_id": "9231f910-1964-4585-857c-79807a28116f",
+        "critical_token_input": {
+          "input_generation": 2
+        },
+        "critical_token_policy": "eligible",
+        "kind": "committed_speech",
+        "provider": "formal-batch-speech",
+        "speech_operation_id": "streaming-recognition-media-lease-1035efc8d4bb36b2fcba96f5aee5dcd6"
+      },
+      "interaction_id": "web-interaction-f93acb86-905c-4488-aae3-91dcc68d2637-web_1a065eb6981_522afcb2f1d8-25086f55-e9ff-46a7-aa30-ccbf0a9ebc3a",
+      "scope": {
+        "assurance": "authenticated",
+        "project_id": "proj_89c8499f",
+        "session_id": "web_1a065eb6981_522afcb2f1d8",
+        "subject_id": "isolated-semantic-audio"
+      },
+      "text": "你在后台处理吧,任务叫行程调整。 准时到达最重要,新增交通和接驳支出尽量不超过一千五,原机票退款单独列,酒店先不要动。逐项核对资料里的交通和接驳组合,写出核对表和最终方案,保存为出行方案MD。不要订票,退款或者发送任何消息。",
+      "turn_id": "web-turn-1788416831263-2"
+    },
+    "context": {
+      "authority_fingerprint": "adb1910abf2d599e9bee167f7847ff33c7dd0a710eb28e933c2802217524512d",
+      "conversation_id": "web_1a065eb6981_522afcb2f1d8",
+      "history": [
+        {
+          "role": "user",
+          "source_id": "web-commit-1788416653329-1",
+          "text": "我刚收到通知,今晚北京去上海的航班取消了。我明天上午十点有个客户会议,你先看一下项目里的订单和会议资料,帮我判断怎么调整最稳妥。请先分析,不要现在创建后台任务。"
+        },
+        {
+          "role": "assistant",
+          "source_id": "agent-analysis:65ffeb0de97a56f2466b1b83a0b7983ece99ef2d7986066ef5dc71a2d270ed62",
+          "text": "建议今晚就走，高铁最稳：明早航班约09:10–09:20才落地，转场近2小时，赶不上10点会议。首选T01，北京南17:35→虹桥22:05，票价598–662元需新购，约23:35前到静安酒店，未超酒店02:00保留时限；T02（18:05→22:45）可作备选。原订单SIM-7801请在18:00前联系承运方选择全额退票980元，比改签稳妥，改签需承运方确认且今晚班次到沪太晚。注意快照只是“有座未预订”，需尽快下单；上海小雨。需要我据此整理一份预订执行清单吗？"
+        }
+      ],
+      "pending": [
+        {
+          "arguments": {
+            "instruction": "根据刚完成的分析整理一份预订执行清单：确认选择今晚高铁T01（北京南17:35→虹桥22:05，票价598–662元需重新购买）并以T02（18:05→22:45）作为备选；说明需在18:00前联系承运方对原订单SIM-7801选择全额退票980元；注明行程约23:35前抵达静安酒店且未超过酒店02:00保留时限；给出下单及出行提醒（上海小雨、座位需正式预订）等执行要点。",
+            "name": "预订执行清单"
+          },
+          "id": "semantic-3906b76dcaa44a198b03738f72684f6e",
+          "kind": "proposal",
+          "operation": "task.create",
+          "source_id": "agent-analysis:65ffeb0de97a56f2466b1b83a0b7983ece99ef2d7986066ef5dc71a2d270ed62",
+          "target": null,
+          "target_kind": null,
+          "version": 1
+        }
+      ],
+      "scope": {
+        "assurance": "authenticated",
+        "project_id": "proj_89c8499f",
+        "session_id": "web_1a065eb6981_522afcb2f1d8",
+        "subject_id": "isolated-semantic-audio"
+      },
+      "tasks": []
+    },
+    "phase": "committed_input",
+    "source_span_bounds": {
+      "source_end": 112,
+      "source_start": 0
+    }
+  },
+  "expected": {
+    "route": "task",
+    "operation": "task.create",
+    "reference_id": "semantic-3906b76dcaa44a198b03738f72684f6e",
+    "continuation_action": "accept_proposal",
+    "instruction_contains": [
+      "1500",
+      "出行方案.md"
+    ],
+    "name": "行程调整"
+  },
+  "source": "Actual audio attempt 15; test-only frozen transcribed input and prior analysis. No Task/Tool/audio success claim."
+}

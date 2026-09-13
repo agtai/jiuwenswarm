@@ -14,6 +14,7 @@ import copy
 import json
 import re
 from collections.abc import Mapping
+from collections import deque
 from typing import Any, List, Optional
 
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
@@ -75,6 +76,96 @@ from jiuwenswarm.common.todo_snapshot import format_todos_for_frontend
 
 _TODO_TOOL_NAMES = frozenset(["todo_create", "todo_get", "todo_list", "todo_modify"])
 _TERMINAL_PROJECTION_STATE_ATTRIBUTE = "_jiuwenswarm_terminal_projection_v1"
+_FORMAL_TOOL_EVENT_CAPACITY = 192
+# Trusted registered file readers and the existing free web readers. No shell, task_tool,
+# arbitrary connector, mutable wiki/memory or tool-loader capability is admitted.
+NATIVE_READ_ONLY_TOOL_NAMES = frozenset({
+    "read_file", "list_files", "glob", "grep", "free_search", "fetch_webpage",
+})
+_TOOL_OUTCOME_MAX_DEPTH = 32
+_TOOL_OUTCOME_MAX_NODES = 2048
+_INVALID_TOOL_OUTCOME = object()
+_TOOL_FAILURE_STATUSES = frozenset(
+    {
+        "error",
+        "failed",
+        "failure",
+        "rejected",
+        "cancelled",
+        "canceled",
+        "interrupted",
+        "skipped",
+        "permission_denied",
+        "denied",
+        "aborted",
+        "timeout",
+    }
+)
+_TOOL_SUCCESS_STATUSES = frozenset({"completed", "done", "ok", "success"})
+
+
+class FormalToolEventCapture:
+    """Bounded callback-owned tool evidence for one formal invocation."""
+
+    def __init__(self, session_id: str) -> None:
+        self.session_id = session_id
+        self._events: deque[OutputSchema] = deque()
+        self._pending_results: set[str] = set()
+        self._seen_tool_call_ids: set[str] = set()
+        self._closed = False
+
+    def capture_call(
+        self,
+        tool_call_id: str,
+        tool_call: OutputSchema,
+        tool_update: OutputSchema,
+    ) -> None:
+        if self._closed:
+            raise RuntimeError("FORMAL_TOOL_EVENT_CAPTURE_CLOSED")
+        if not tool_call_id or tool_call_id in self._seen_tool_call_ids:
+            raise RuntimeError("FORMAL_TOOL_EVENT_BINDING_INVALID")
+        # Reserve the result slot before the Tool executes so capacity failure
+        # is rejected before any external Tool side effect.
+        if (
+            len(self._events) + len(self._pending_results) + 3
+            > _FORMAL_TOOL_EVENT_CAPACITY
+        ):
+            raise RuntimeError("FORMAL_TOOL_EVENT_CAPTURE_CAPACITY_EXCEEDED")
+        self._events.extend((tool_call, tool_update))
+        self._pending_results.add(tool_call_id)
+        self._seen_tool_call_ids.add(tool_call_id)
+
+    def capture_result(self, tool_call_id: str, tool_result: OutputSchema) -> None:
+        if self._closed:
+            raise RuntimeError("FORMAL_TOOL_EVENT_CAPTURE_CLOSED")
+        if not tool_call_id or tool_call_id not in self._pending_results:
+            raise RuntimeError("FORMAL_TOOL_EVENT_SEQUENCE_INVALID")
+        self._events.append(tool_result)
+        self._pending_results.remove(tool_call_id)
+
+    def drain(self) -> tuple[OutputSchema, ...]:
+        drained = tuple(self._events)
+        self._events.clear()
+        return drained
+
+    @property
+    def has_pending_results(self) -> bool:
+        return bool(self._pending_results)
+
+    def expects_result(self, tool_call_id: str) -> bool:
+        return tool_call_id in self._pending_results
+
+    def finish(self) -> tuple[OutputSchema, ...]:
+        if self._pending_results:
+            raise RuntimeError("FORMAL_TOOL_EVENT_CAPTURE_INCOMPLETE")
+        self._closed = True
+        return self.drain()
+
+    def abort(self) -> None:
+        self._closed = True
+        self._events.clear()
+        self._pending_results.clear()
+        self._seen_tool_call_ids.clear()
 
 
 def _structured_tool_result_payload(result: Any) -> Any | None:
@@ -84,6 +175,13 @@ def _structured_tool_result_payload(result: Any) -> Any | None:
     if isinstance(result, (dict, list)):
         return result
     return None
+
+
+def _tool_callback_outcome_value(result: Any) -> Any:
+    detailed_output = _structured_tool_result_payload(result)
+    if detailed_output is None or detailed_output is result:
+        return result
+    return [result, detailed_output]
 
 
 def _parse_tool_call_arguments(tool_call: Any) -> dict[str, Any]:
@@ -162,61 +260,150 @@ def _ask_user_question_payload_from_interrupt(tool_call: Any, interrupt: Any) ->
     return convert_interactions_to_ask_user_question([{"id": request_id, "value": value_obj}])
 
 
+def _boolish_state(value: Any) -> bool | object:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        if value == 0:
+            return False
+        if value == 1:
+            return True
+        return _INVALID_TOOL_OUTCOME
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"false", "0", "no"}:
+            return False
+        if normalized in {"true", "1", "yes"}:
+            return True
+    return _INVALID_TOOL_OUTCOME
+
+
 def _boolish_false(value: Any) -> bool:
-    if value is False:
-        return True
-    return isinstance(value, str) and value.strip().lower() in {"false", "0", "no"}
+    return _boolish_state(value) is False
 
 
 def _boolish_true(value: Any) -> bool:
-    if value is True:
-        return True
-    return isinstance(value, str) and value.strip().lower() in {"true", "1", "yes"}
+    return _boolish_state(value) is True
 
 
-def _nonzero_exit(value: Any) -> bool | None:
+def _nonzero_exit(value: Any) -> bool | object:
     if isinstance(value, bool):
-        return None
+        return _INVALID_TOOL_OUTCOME
     if isinstance(value, int):
         return value != 0
     if isinstance(value, str):
         try:
             return int(value.strip()) != 0
         except ValueError:
-            return None
-    return None
+            return _INVALID_TOOL_OUTCOME
+    return _INVALID_TOOL_OUTCOME
+
+
+def _structured_error_present(value: Any) -> bool:
+    if value is None or value is False:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (bytes, bytearray, dict, list, tuple, set)):
+        return len(value) > 0
+    if isinstance(value, (int, float)):
+        return value != 0
+    return True
+
+
+def _scan_structured_tool_result(value: dict[Any, Any] | list[Any]) -> bool | None:
+    """Scan JSON-like callback output without trusting traversal order.
+
+    Every nested dict/list is inspected. Cycles and structures beyond the
+    bounded observation budget are malformed and therefore fail closed.
+    """
+
+    stack: list[tuple[Any, int, bool]] = [(value, 0, True)]
+    seen_containers: set[int] = set()
+    explicit_success = False
+    visited_nodes = 0
+
+    while stack:
+        current, depth, strict_status = stack.pop()
+        visited_nodes += 1
+        if visited_nodes > _TOOL_OUTCOME_MAX_NODES or depth > _TOOL_OUTCOME_MAX_DEPTH:
+            return True
+
+        if not isinstance(current, (dict, list)):
+            continue
+        identity = id(current)
+        if identity in seen_containers:
+            return True
+        seen_containers.add(identity)
+
+        if isinstance(current, dict):
+            if "success" in current:
+                success = _boolish_state(current.get("success"))
+                if success is _INVALID_TOOL_OUTCOME:
+                    return True
+                if success is False:
+                    return True
+                if success is True:
+                    explicit_success = True
+
+            for key in ("is_error", "isError"):
+                if key not in current:
+                    continue
+                is_error = _boolish_state(current.get(key))
+                if is_error is _INVALID_TOOL_OUTCOME:
+                    return True
+                if is_error is True:
+                    return True
+                if is_error is False:
+                    explicit_success = True
+
+            if "status" in current:
+                status = current.get("status")
+                if not isinstance(status, str):
+                    if strict_status:
+                        return True
+                else:
+                    normalized_status = status.strip().lower()
+                    if normalized_status in _TOOL_FAILURE_STATUSES:
+                        return True
+                    if normalized_status in _TOOL_SUCCESS_STATUSES:
+                        explicit_success = True
+                    elif strict_status:
+                        return True
+
+            if "error" in current and _structured_error_present(current.get("error")):
+                return True
+
+            for key in ("exit_code", "exitCode", "returncode", "return_code"):
+                if key not in current:
+                    continue
+                exit_failed = _nonzero_exit(current.get(key))
+                if exit_failed is _INVALID_TOOL_OUTCOME:
+                    return True
+                if exit_failed is True:
+                    return True
+                if exit_failed is False:
+                    explicit_success = True
+
+            children = ((child, False) for child in current.values())
+        else:
+            # A top-level list represents one or more callback result roots.
+            # Once a result dict is entered, nested status fields can describe
+            # business metadata (for example a Symphony graph node's "final"
+            # state). Known failure states still fail at every depth, while an
+            # unrelated nested status must not override the root outcome.
+            children = ((child, strict_status) for child in current)
+
+        if visited_nodes + len(stack) + len(current) > _TOOL_OUTCOME_MAX_NODES:
+            return True
+        stack.extend((child, depth + 1, child_strict) for child, child_strict in children)
+
+    return False if explicit_success else None
 
 
 def _infer_tool_result_error(value: Any) -> bool | None:
-    if isinstance(value, dict):
-        if "success" in value:
-            if _boolish_false(value.get("success")):
-                return True
-            if _boolish_true(value.get("success")):
-                return False
-        if _boolish_true(value.get("is_error")) or _boolish_true(value.get("isError")):
-            return True
-        status = value.get("status")
-        if isinstance(status, str) and status.strip().lower() in {"error", "failed", "failure"}:
-            return True
-        for key in ("exit_code", "exitCode", "returncode", "return_code"):
-            exit_failed = _nonzero_exit(value.get(key))
-            if exit_failed is not None:
-                return exit_failed
-        for key in ("data", "raw_output", "rawOutput", "result"):
-            nested = value.get(key)
-            if isinstance(nested, (dict, list)):
-                nested_error = _infer_tool_result_error(nested)
-                if nested_error is not None:
-                    return nested_error
-        return None
-
-    if isinstance(value, list):
-        for item in value:
-            item_error = _infer_tool_result_error(item)
-            if item_error:
-                return True
-        return None
+    if isinstance(value, (dict, list)):
+        return _scan_structured_tool_result(value)
 
     if isinstance(value, str):
         text = value.strip()
@@ -227,9 +414,7 @@ def _infer_tool_result_error(value: Any) -> bool | None:
         except Exception:
             parsed = None
         if isinstance(parsed, (dict, list)):
-            parsed_error = _infer_tool_result_error(parsed)
-            if parsed_error is not None:
-                return parsed_error
+            return _scan_structured_tool_result(parsed)
         if re.search(r"\bsuccess\s*[:=]\s*False\b", text, re.IGNORECASE):
             return True
         if text.startswith("[ERROR]"):
@@ -268,6 +453,8 @@ def _enrich_trusted_reviewer_result(
     payload["reviewer_metadata"] = metadata
     if not _trusted_reviewer_denied(metadata):
         return
+    payload["success"] = False
+    payload["is_error"] = True
     payload["permission_decision"] = "deny"
     payload["permission_status"] = "denied"
     payload["status"] = "denied"
@@ -278,6 +465,26 @@ def _enrich_trusted_reviewer_result(
         if isinstance(value, str):
             payload["result"] = value[:60000]
             return
+
+def _resolved_tool_callback_error_state(
+    value: Any,
+    *,
+    force_error: bool = False,
+) -> bool:
+    """Resolve outcome at the trusted Tool callback boundary.
+
+    A callback exception or an explicit structured failure remains an error.
+    Otherwise, normal callback completion is the success authority; arbitrary
+    result text is never interpreted as a success signal.
+    """
+
+    if force_error:
+        return True
+    try:
+        inferred = _infer_tool_result_error(value)
+    except BaseException:  # noqa: BLE001 -- malformed outcomes fail closed
+        return True
+    return inferred if inferred is not None else False
 
 
 class JiuSwarmStreamEventRail(DeepAgentRail):
@@ -313,6 +520,9 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         # would cause cross-session contamination (session A cancel kills session B).
         self._abort_requested: dict[str, bool] = {}
         self._pause_events: dict[str, asyncio.Event] = {}
+        # Tools-only pause: a formal session whose model may run while every
+        # tool call waits (speculative dialogue candidates). Set = allowed.
+        self._tool_pause_events: dict[str, asyncio.Event] = {}
         # Per-session conversation context
         self._conversation_ids: dict[str, str] = {}
         self._main_sessions: dict[str, Session] = {}
@@ -336,6 +546,9 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         # cleanup_session drops leftovers when the session is destroyed.
         self._emitted_tool_call_ids: dict[str, str] = {}
         self._symphony_stream_handler = SymphonyToolStreamHandler()
+        self._formal_tool_event_captures: dict[str, FormalToolEventCapture] = {}
+        self._formal_read_only_sessions: set[str] = set()
+        self._formal_no_tool_sessions: set[str] = set()
 
     def init(self, agent: Any) -> None:
         self._deep_agent = agent
@@ -532,6 +745,24 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             self._pause_events[sid] = event
         return event
 
+    def _get_tool_pause_event(self, sid: str) -> asyncio.Event:
+        event = self._tool_pause_events.get(sid)
+        if event is None:
+            event = asyncio.Event()
+            event.set()
+            self._tool_pause_events[sid] = event
+        return event
+
+    def pause_tools(self, session_id: str = "") -> None:
+        """Hold every tool call of ``session_id``; model calls keep running."""
+
+        sid = session_id or "default"
+        self._get_tool_pause_event(sid).clear()
+
+    def resume_tools(self, session_id: str = "") -> None:
+        sid = session_id or "default"
+        self._get_tool_pause_event(sid).set()
+
     def pause(self, session_id: str = "") -> None:
         sid = session_id or "default"
         self._get_pause_event(sid).clear()
@@ -545,6 +776,9 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         sid = session_id or "default"
         self._abort_requested[sid] = True
         self._get_pause_event(sid).set()
+        # A tool call parked on the tools-only pause must wake up and see
+        # the abort instead of running.
+        self._get_tool_pause_event(sid).set()
         if sid:
             try:
                 from openjiuwen.core.sys_operation.shell_process_registry import (
@@ -602,6 +836,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         sid = session_id or "default"
         self._abort_requested.pop(sid, None)
         self._pause_events.pop(sid, None)
+        self._tool_pause_events.pop(sid, None)
         self._conversation_ids.pop(sid, None)
         self._main_sessions.pop(sid, None)
         self._cancelled_tool_results.pop(sid, None)
@@ -613,6 +848,8 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             for tc_id, owner_sid in self._emitted_tool_call_ids.items()
             if owner_sid != sid
         }
+        self._formal_no_tool_sessions.discard(sid)
+        self._formal_read_only_sessions.discard(sid)
 
     def quarantine_session(
         self, session_id: str, session: Session | None = None
@@ -641,6 +878,51 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         if sid in self._quarantined_sessions or persisted is True:
             self._quarantined_sessions.add(sid)
             raise RuntimeError("session_runtime_quarantined")
+
+    def open_formal_tool_event_capture(
+        self,
+        session_id: str,
+        *,
+        allow_tools: bool = True,
+        read_only_tools: bool = False,
+    ) -> FormalToolEventCapture:
+        """Open the sole callback-authoritative capture for ``session_id``."""
+
+        if not isinstance(session_id, str) or not session_id.startswith("lv-formal-"):
+            raise RuntimeError("FORMAL_TOOL_EVENT_CAPTURE_SESSION_INVALID")
+        if session_id in self._formal_tool_event_captures:
+            raise RuntimeError("FORMAL_TOOL_EVENT_CAPTURE_CONFLICT")
+        if type(allow_tools) is not bool or type(read_only_tools) is not bool:
+            raise RuntimeError("FORMAL_TOOL_POLICY_INVALID")
+        capture = FormalToolEventCapture(session_id)
+        self._formal_tool_event_captures[session_id] = capture
+        if not allow_tools:
+            self._formal_no_tool_sessions.add(session_id)
+        if read_only_tools:
+            self._formal_read_only_sessions.add(session_id)
+        return capture
+
+    def close_formal_tool_event_capture(
+        self,
+        session_id: str,
+        capture: FormalToolEventCapture,
+        *,
+        abort: bool,
+    ) -> tuple[OutputSchema, ...]:
+        """Release one exact capture without hiding incomplete success."""
+
+        if self._formal_tool_event_captures.get(session_id) is not capture:
+            raise RuntimeError("FORMAL_TOOL_EVENT_CAPTURE_OWNERSHIP_LOST")
+        try:
+            if abort:
+                capture.abort()
+                return ()
+            return capture.finish()
+        finally:
+            if self._formal_tool_event_captures.get(session_id) is capture:
+                self._formal_tool_event_captures.pop(session_id, None)
+            self._formal_no_tool_sessions.discard(session_id)
+            self._formal_read_only_sessions.discard(session_id)
 
     def get_cancelled_tool_results(self, session_id: str = "") -> list[dict[str, Any]]:
         """Get cancelled tool results collected during interrupt.
@@ -873,12 +1155,36 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         if self._abort_requested.get(sid, False):
             raise asyncio.CancelledError("Agent abort requested")
 
-        self._inject_tool_call_goal_schema(ctx)
+        if sid in self._formal_no_tool_sessions:
+            try:
+                ctx.inputs.tools = []
+            except (AttributeError, TypeError) as exc:
+                raise RuntimeError("FORMAL_NO_TOOL_MODEL_INPUT_REJECTED") from exc
+        else:
+            if sid in self._formal_read_only_sessions:
+                from openjiuwen.core.runner.callback.errors import AbortError
+                try:
+                    ctx.inputs.tools = [tool for tool in ctx.inputs.tools
+                                        if getattr(tool, "name", None) in NATIVE_READ_ONLY_TOOL_NAMES]
+                except (AttributeError, TypeError) as error:
+                    raise AbortError("FORMAL_READ_ONLY_MODEL_INPUT_REJECTED", cause=error) from error
+            self._inject_tool_call_goal_schema(ctx)
 
         if ctx.context is not None:
             if not self._read_image_multimodal_enabled():
                 strip_image_content_from_model_context(ctx.context)
             await self._fix_incomplete_tool_context(ctx)
+
+        checkpoint = getattr(self, "background_model_checkpoint", None)
+        if checkpoint is not None:
+            try:
+                await checkpoint(ctx)
+            except Exception as error:
+                # The SDK logs ordinary callback exceptions and continues. A
+                # failed constraint adoption must prevent the next model call.
+                from openjiuwen.core.runner.callback.errors import AbortError
+
+                raise AbortError("BACKGROUND_TASK_CHECKPOINT_FAILED", cause=error) from error
 
     @staticmethod
     def _inject_tool_call_goal_schema(ctx: AgentCallbackContext) -> None:
@@ -964,6 +1270,29 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         await self._get_pause_event(sid).wait()
         if self._abort_requested.get(sid, False):
             raise asyncio.CancelledError("Agent abort requested")
+        await self._get_tool_pause_event(sid).wait()
+        if self._abort_requested.get(sid, False):
+            raise asyncio.CancelledError("Agent abort requested")
+        if sid in self._formal_read_only_sessions:
+            from openjiuwen.core.runner.callback.errors import AbortError
+            inputs = ctx.inputs
+            if (sid in self._formal_no_tool_sessions
+                    or not isinstance(inputs, ToolCallInputs)
+                    or getattr(inputs.tool_call, "name", None) not in NATIVE_READ_ONLY_TOOL_NAMES
+                    or inputs.tool_name != getattr(inputs.tool_call, "name", None)):
+                # Ordinary callback errors are logged and ignored by the SDK.
+                # AbortError is the execution boundary, before all tool effects.
+                raise AbortError("FORMAL_READ_ONLY_TOOL_FORBIDDEN")
+        if sid in self._formal_no_tool_sessions:
+            raise RuntimeError("FORMAL_TOOL_EXECUTION_FORBIDDEN")
+
+        file_checkpoint = getattr(self, "background_file_checkpoint", None)
+        if file_checkpoint is not None:
+            try:
+                await file_checkpoint(ctx)
+            except Exception as error:
+                from openjiuwen.core.runner.callback.errors import AbortError
+                raise AbortError("BACKGROUND_FILE_EFFECT_REJECTED", cause=error) from error
 
         session = ctx.session
         if session is not None and isinstance(ctx.inputs, ToolCallInputs):
@@ -987,29 +1316,37 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             # rail 周期时会带着相同 id 再进这里，重复发射会在 history.jsonl 留下
             # 重复记录（#3785）。
             tc_id = getattr(tc, "id", "")
-            if not (tc_id and self._emitted_tool_call_ids.get(tc_id) == sid):
-                tool_call_emitted = await self._emit_tool_call(
-                    session,
-                    tc,
-                    model_display_name=model_display,
+            capture = self._formal_tool_event_captures.get(sid)
+            if capture is not None:
+                capture.capture_call(
+                    self._tool_call_id(tc),
+                    self._tool_call_output(tc, model_display_name=model_display),
+                    self._tool_update_output(tc, status="in_progress"),
                 )
-                in_progress_emitted = await self._emit_tool_update(
-                    session,
-                    tc,
-                    status="in_progress",
-                )
-                if (
-                    tool_call_emitted
-                    and in_progress_emitted
-                    and reviewer_progress_metadata is not None
-                ):
-                    await self._emit_reviewer_tool_update(
+            else:
+                if not (tc_id and self._emitted_tool_call_ids.get(tc_id) == sid):
+                    tool_call_emitted = await self._emit_tool_call(
                         session,
-                        tool_call_id=tc_id,
-                        reviewer_metadata=reviewer_progress_metadata,
+                        tc,
+                        model_display_name=model_display,
                     )
-                if tc_id:
-                    self._emitted_tool_call_ids[tc_id] = sid
+                    in_progress_emitted = await self._emit_tool_update(
+                        session,
+                        tc,
+                        status="in_progress",
+                    )
+                    if (
+                        tool_call_emitted
+                        and in_progress_emitted
+                        and reviewer_progress_metadata is not None
+                    ):
+                        await self._emit_reviewer_tool_update(
+                            session,
+                            tool_call_id=tc_id,
+                            reviewer_metadata=reviewer_progress_metadata,
+                        )
+                    if tc_id:
+                        self._emitted_tool_call_ids[tc_id] = sid
             self._symphony_stream_handler.bind_progress(
                 ctx,
                 session,
@@ -1034,11 +1371,16 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
 
         tc = ctx.inputs.tool_call
         tc_id = getattr(tc, "id", "")
+        sid = self._resolve_sid(ctx, session)
         if is_marked_permission_interrupt(ctx, ctx.exception):
             return
         if getattr(ctx, _TERMINAL_PROJECTION_STATE_ATTRIBUTE, None):
             return
         setattr(ctx, _TERMINAL_PROJECTION_STATE_ATTRIBUTE, "projecting")
+        callback_failed = _resolved_tool_callback_error_state(
+            _tool_callback_outcome_value(ctx.inputs.tool_result),
+            force_error=ctx.exception is not None,
+        )
         projected = False
         try:
             self._symphony_stream_handler.reset_progress(ctx)
@@ -1055,12 +1397,29 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                 or _extract_tool_interrupt(ctx.exception)
             )
             if interrupt is None:
-                projected = await self._emit_tool_result(
-                    session,
-                    tc,
-                    tool_result,
-                    reviewer_metadata=reviewer_metadata,
-                )
+                capture = self._formal_tool_event_captures.get(sid)
+                if capture is not None:
+                    if capture.expects_result(tc_id):
+                        event = self._tool_result_output(
+                            tc, tool_result, force_error=callback_failed,
+                        )
+                        _enrich_trusted_reviewer_result(
+                            event.payload["tool_result"],
+                            _structured_tool_result_payload(tool_result),
+                            reviewer_metadata,
+                        )
+                        capture.capture_result(tc_id, event)
+                        projected = True
+                    elif ctx.exception is None:
+                        raise RuntimeError("FORMAL_TOOL_EVENT_SEQUENCE_INVALID")
+                else:
+                    projected = await self._emit_tool_result(
+                        session,
+                        tc,
+                        tool_result,
+                        reviewer_metadata=reviewer_metadata,
+                        force_error=callback_failed,
+                    )
                 if projected:
                     setattr(ctx, _TERMINAL_PROJECTION_STATE_ATTRIBUTE, "projected")
                     consume_reviewer_tool_result_metadata(
@@ -1072,7 +1431,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                 delattr(ctx, _TERMINAL_PROJECTION_STATE_ATTRIBUTE)
         if interrupt is None and not projected:
             return
-        if projected:
+        if projected and not callback_failed and not (reviewer_metadata and _trusted_reviewer_denied(reviewer_metadata)):
             self._symphony_stream_handler.request_force_finish(
                 ctx,
                 tc,
@@ -1087,7 +1446,6 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         )
 
         tool_name = ctx.inputs.tool_name
-        sid = self._resolve_sid(ctx, session)
         conv_id = self._conversation_ids.get(sid, "")
         if not conv_id:
             return
@@ -1097,6 +1455,25 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             # stays authoritative even when a resumed/supplement turn uses a
             # different stream session object.
             await self._emit_todo_updated(session, conv_id)
+
+    async def on_tool_exception(self, ctx: AgentCallbackContext) -> None:
+        """Close a reserved formal result with the real callback exception."""
+
+        if not isinstance(ctx.inputs, ToolCallInputs):
+            return
+        sid = self._resolve_sid(ctx, ctx.session)
+        capture = self._formal_tool_event_captures.get(sid)
+        if capture is None:
+            return
+        tc = ctx.inputs.tool_call
+        tc_id = getattr(tc, "id", "")
+        self._symphony_stream_handler.reset_progress(ctx)
+        if tc_id:
+            self._inflight_tool_calls.pop(tc_id, None)
+        capture.capture_result(
+            self._tool_call_id(tc),
+            self._tool_result_output(tc, ctx.exception, force_error=True),
+        )
 
     # ------------------------------------------------------------------
     # on_model_exception: attempt context repair
@@ -1110,6 +1487,82 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
     # ------------------------------------------------------------------
     # Private helpers (migrated from JiuSwarmReActAgent)
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _tool_call_output(
+        tool_call: Any,
+        *,
+        model_display_name: str = "",
+    ) -> OutputSchema:
+        name = getattr(tool_call, "name", "")
+        arguments = getattr(tool_call, "arguments", {})
+        frozen_arguments = copy.deepcopy(arguments)
+        tool_call_payload: dict[str, Any] = {
+            "name": name,
+            "arguments": frozen_arguments,
+            "tool_call_id": getattr(tool_call, "id", ""),
+        }
+        display_name = (model_display_name or "").strip() or build_tool_display_name(
+            name, arguments
+        )
+        if display_name:
+            tool_call_payload["display_name"] = display_name
+        return OutputSchema(
+            type="tool_call",
+            index=0,
+            payload={"tool_call": tool_call_payload},
+        )
+
+    def _tool_result_output(
+        self,
+        tool_call: Any,
+        result: Any,
+        *,
+        force_error: bool = False,
+    ) -> OutputSchema:
+        raw_output = _structured_tool_result_payload(result)
+        tool_result_payload = {
+            "tool_name": getattr(tool_call, "name", "") if tool_call else "",
+            "tool_call_id": getattr(tool_call, "id", "") if tool_call else "",
+            "result": str(result)[:60000] if result is not None else "",
+        }
+        if raw_output is not None:
+            frozen_raw_output = copy.deepcopy(raw_output)
+            tool_result_payload["raw_output"] = frozen_raw_output
+            self._symphony_stream_handler.enrich_result_payload(
+                tool_call,
+                tool_result_payload,
+                frozen_raw_output,
+            )
+        error_state = _resolved_tool_callback_error_state(
+            _tool_callback_outcome_value(result),
+            force_error=force_error,
+        )
+        tool_result_payload["success"] = not error_state
+        if error_state:
+            tool_result_payload["status"] = "error"
+            tool_result_payload["is_error"] = True
+        return OutputSchema(
+            type="tool_result",
+            index=0,
+            payload={"tool_result": tool_result_payload},
+        )
+
+    @staticmethod
+    def _tool_update_output(tool_call: Any, *, status: str) -> OutputSchema:
+        arguments = getattr(tool_call, "arguments", {}) if tool_call else {}
+        return OutputSchema(
+            type="tool_update",
+            index=0,
+            payload={
+                "tool_update": {
+                    "tool_name": getattr(tool_call, "name", "") if tool_call else "",
+                    "tool_call_id": getattr(tool_call, "id", "") if tool_call else "",
+                    "arguments": copy.deepcopy(arguments),
+                    "status": str(status or "").strip() or "in_progress",
+                }
+            },
+        )
 
     @staticmethod
     async def _emit_tool_call(
@@ -1150,6 +1603,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         tool_call: Any,
         result: Any,
         *,
+        force_error: bool = False,
         reviewer_metadata: Mapping[str, Any] | None = None,
     ) -> bool:
         try:
@@ -1166,12 +1620,14 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                     tool_result_payload,
                     raw_output,
                 )
-            error_state = _infer_tool_result_error(raw_output if raw_output is not None else result)
-            if error_state is not None:
-                tool_result_payload["success"] = not error_state
-                if error_state:
-                    tool_result_payload["status"] = "error"
-                    tool_result_payload["is_error"] = True
+            error_state = _resolved_tool_callback_error_state(
+                _tool_callback_outcome_value(result),
+                force_error=force_error,
+            )
+            tool_result_payload["success"] = not error_state
+            if error_state:
+                tool_result_payload["status"] = "error"
+                tool_result_payload["is_error"] = True
             _enrich_trusted_reviewer_result(
                 tool_result_payload,
                 raw_output,

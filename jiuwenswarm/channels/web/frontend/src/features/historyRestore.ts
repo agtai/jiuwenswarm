@@ -1,3 +1,4 @@
+import { taskNotificationBindingKey } from './live-voice/formal/taskNotificationIdentity';
 import { Message, MessageRole, UsageSummary, FileDownloadItem, MediaItem, WsEvent, ToolExecution } from '../types';
 import { webClient } from '../services/webClient';
 import { normalizeFinalContent } from '../utils/finalContent';
@@ -19,6 +20,15 @@ import {
 } from './contextUsage/contextUsageModel';
 
 export { HistoryRecordReassembler };
+
+function nativeHistoryTurn(record: Record<string, unknown>): { nativeTurnKey?: string } {
+  const value = record.formal_binding;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const binding = value as Record<string, unknown>;
+  if (binding.source !== 'openai_realtime_input_audio_transcription' && binding.surface !== 'native_audio') return {};
+  return typeof binding.interaction_id === 'string' && typeof binding.turn_id === 'string'
+    ? { nativeTurnKey: JSON.stringify([binding.interaction_id, binding.turn_id]) } : {};
+}
 
 export const HISTORY_GET_METHOD = 'history.get';
 export const HISTORY_MESSAGE_EVENT = 'history.message';
@@ -957,6 +967,7 @@ function parseHistoryTimelineEntry(
         role: 'user',
         content,
         timestamp: at,
+        ...nativeHistoryTurn(record),
         ...(mediaItems.length > 0 ? { mediaItems } : {}),
         ...(isGoalObjectiveMessage ? { isGoalObjectiveMessage: true } : {}),
         ...(skills && skills.length > 0 ? { skills } : {}),
@@ -1108,6 +1119,9 @@ function parseHistoryTimelineEntry(
         ...(record.channel_id === 'video_duplex' || payload.channel_id === 'video_duplex'
           ? { keepExpanded: true }
           : {}),
+        ...nativeHistoryTurn(record),
+        ...(() => { const eventKey = taskNotificationBindingKey(record.task_event_binding, sessionId);
+          return eventKey ? { taskNotification: { eventKey, presentation: 'text' as const } } : {}; })(),
         ...(completedAt ? { completedAt } : {}),
         ...(isProactiveRecommendation ? { isProactiveRecommendation } : {}),
         ...(isProactiveRecommendation && histProactiveType
@@ -1323,9 +1337,28 @@ function sinkGoalCompletionCardsToTurnEnd(
   if (!changed) {
     return entries;
   }
-  return out.sort(
-    (a, b) => safeTimestampMs(entryTimestamp(a)) - safeTimestampMs(entryTimestamp(b))
-  );
+  return sortHistoryEntries(out);
+}
+
+function sortHistoryEntries(entries: HistoryTimelineEntry[]): HistoryTimelineEntry[] {
+  // An unknown timestamp is an ordering barrier, not epoch zero. Preserve the
+  // source boundary while sorting each run of known event times independently.
+  const sorted: HistoryTimelineEntry[] = [];
+  let run: HistoryTimelineEntry[] = [];
+  const flush = () => {
+    sorted.push(...run.sort((a, b) => parseTimestampToMs(entryTimestamp(a)) - parseTimestampToMs(entryTimestamp(b))));
+    run = [];
+  };
+  for (const entry of entries) {
+    if (Number.isFinite(parseTimestampToMs(entryTimestamp(entry)))) {
+      run.push(entry);
+    } else {
+      flush();
+      sorted.push(entry);
+    }
+  }
+  flush();
+  return sorted;
 }
 
 /** 将 history 条目折叠成消息/工具/思考，供 restore / page / 文件预览共用。入口统一升序。 */
@@ -1333,9 +1366,7 @@ function materializeHistoryTimeline(
   rawEntries: HistoryTimelineEntry[]
 ): MaterializedHistoryTimeline {
   // restore 用 unshift 倒序入列；sink / 折叠依赖时间升序，这里统一排一次。
-  const sortedEntries = [...rawEntries].sort(
-    (a, b) => safeTimestampMs(entryTimestamp(a)) - safeTimestampMs(entryTimestamp(b))
-  );
+  const sortedEntries = sortHistoryEntries(rawEntries);
   const entries = sinkGoalCompletionCardsToTurnEnd(sortedEntries);
   const messages: Message[] = [];
   const toolReplay: HistoryToolReplayItem[] = [];
@@ -1523,13 +1554,9 @@ export function parseHistoryJsonFileToTimelinePreview(
     }
   }
 
-  // 文件预览按记录原始顺序；同戳时 sourceIndex 由后续 timeline 排序兜底。
-  entries.sort((a, b) => {
-    const aAt = a.kind === 'message' ? a.message.timestamp : a.at;
-    const bAt = b.kind === 'message' ? b.message.timestamp : b.at;
-    return safeTimestampMs(aAt) - safeTimestampMs(bAt);
-  });
-
+  // Preserve source order around undated messages: an unknown timestamp must
+  // not move a user boundary ahead of the request it replaces. Timeline rendering
+  // sorts dated events and binds Native replies to their exact user turn.
   const { messages, toolReplay, reasoningReplay, contextUsageReplay } = materializeHistoryTimeline(entries);
   const executions = buildToolExecutionsFromReplay(toolReplay);
   const reasoningSegments = buildReasoningSegmentsFromReplay(sessionId, reasoningReplay);

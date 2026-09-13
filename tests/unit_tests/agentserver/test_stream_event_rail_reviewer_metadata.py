@@ -149,7 +149,12 @@ async def test_trusted_approval_does_not_trust_tool_denial_fields() -> None:
     assert payload["reviewer_metadata"]["decision_source"] == "auto_reviewer"
     assert "permission_decision" not in payload
     assert "permission_status" not in payload
-    assert "status" not in payload
+    # Trusted approval does not make contradictory tool output successful or
+    # grant the tool authority to publish a permission-denied decision.
+    assert payload["reviewer_metadata"]["final_reviewer_status"] == "approved"
+    assert payload["status"] == "error"
+    assert payload["success"] is False
+    assert payload["is_error"] is True
     assert payload["raw_output"]["permission_decision"] == "deny"
 
 

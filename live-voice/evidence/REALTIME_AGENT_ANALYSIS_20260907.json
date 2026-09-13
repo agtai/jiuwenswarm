@@ -1,0 +1,506 @@
+{
+  "schema_version": 1,
+  "boundary": "Synthetic TurnCommit -> actual AgentManager formal P2 facade -> real SDK/model and file tools -> complete final answer; no microphone/voice admission/Task/played history.",
+  "selected_model_changed": false,
+  "physical_performance_claim": false,
+  "early_publication": false,
+  "fixture": "现场 安排 v2.md: chosen warehouse departure 09:05 + 35 min, alternative office 08:40 + 25 min, event 10:00 with 25 min check-in lead, superseded v1 warehouse duration 20 min.",
+  "expected_facts": "Current warehouse arrival 09:40 misses check-in cutoff 09:35 by 5 min. Depart by 09:00 with v2 duration; office and v1 facts cannot replace the current plan.",
+  "interpretation": "Final output-policy sample leads with the correct conclusion and preserves source/version/literals. All successful samples use three model calls and actual glob/read_file. Candidate output is shorter; cold session setup and network variance prevent latency attribution. No measured overall speedup: final candidate 12.18s vs one baseline 10.06s.",
+  "local_probe": "logs/p4_real_agent_probe.py",
+  "samples": [
+    {
+      "label": "candidate",
+      "source_head": "595e176571e5965e65879220f0f952af874a5bfb",
+      "source_dirty": true,
+      "fixture_sha256": "9f891c40fa150975856f660b21fb7c8c6a86623f2c6b6454984db0dea15c1a7a",
+      "question_sha256": "234c0a7fe324b8ecca61b3450a5f33f7df38da77cbcbff26fc56233bab06bac0",
+      "model_identity": "deepseek-v4-flash#0",
+      "model_config_version": "e3ed8c0f9de4aeed889885737122a54fccf82632423bd9ca9592239d2c3af2b6",
+      "setup_ms": 8511.78,
+      "cleanup_complete": true,
+      "configuration_unchanged": true,
+      "fixture_unchanged": true,
+      "project_file_count": 1,
+      "failure_type": "RuntimeError",
+      "model_calls": 0,
+      "tool_events": [],
+      "final_chars": 0,
+      "model_observations": [],
+      "source_binding_complete": false,
+      "probe_failure_reason": "FORMAL_EXECUTION_UNSUPPORTED: probe initially selected a Code facade; zero Agent execution"
+    },
+    {
+      "label": "candidate2",
+      "source_head": "595e176571e5965e65879220f0f952af874a5bfb",
+      "source_dirty": true,
+      "fixture_sha256": "9f891c40fa150975856f660b21fb7c8c6a86623f2c6b6454984db0dea15c1a7a",
+      "question_sha256": "234c0a7fe324b8ecca61b3450a5f33f7df38da77cbcbff26fc56233bab06bac0",
+      "model_identity": "deepseek-v4-flash#0",
+      "model_config_version": "e3ed8c0f9de4aeed889885737122a54fccf82632423bd9ca9592239d2c3af2b6",
+      "setup_ms": 10988.61,
+      "execution_ms": 14803.13,
+      "succeeded": true,
+      "cleanup_complete": true,
+      "configuration_unchanged": true,
+      "fixture_unchanged": true,
+      "project_file_count": 1,
+      "final_text": "我已读取《现场 安排 v2.md》，以下是分析结论。\n\n## 结论\n\n**当前仓库乘车方案赶不上签到，需要调整。**\n\n## 依据（版本 v2，文件第 1–5 行）\n\n- 仓库乘车：**09:05 出发，行车 35 分钟** → 到达时间 = 09:05 + 35 分钟 = **09:40**\n- 现场活动 **10:00 开始**，必须**提前 25 分钟**到场签到 → 最晚签到时间 = 10:00 − 25 分钟 = **09:35**\n- 仓库方案到达 09:40，**晚于**最晚签到 09:35，**迟到 5 分钟**，赶不上签到。\n\n## 需要怎样调整\n\n要让仓库方案赶得上，需满足「出发时间 + 行车时间 ≤ 09:35」。可选调整方向：\n\n1. **提前出发**：保持行车 35 分钟不变，则出发时间最晚须为 **09:00**（09:00 + 35 = 09:35，刚好踩线）。即至少比现在的 09:05 提前 5 分钟。\n2. **缩短行车时间**：若出发时间保持 09:05，则行车时间须 ≤ 30 分钟（09:05 + 30 = 09:35）。注意 v1 曾记录仓库行车 20 分钟，但已被 v2 取代，不能直接套用旧值。\n3. **改用办公室车辆方案**：文件第 3 行记录办公室车辆 **08:40 出发、行车 25 分钟** → 到达 09:05，早于 09:35，**可以赶上签到**。这是文件内现成的可行备选。\n\n## 说明\n\n- 以上时间均为文件 v2 中记录的数值，未做任何修改。\n- 若行车时间存在不确定性（如路况），建议预留缓冲，实际出发时间应早于上述最晚值。\n- 按你的要求，我未修改文件、未创建任务。",
+      "model_calls": 3,
+      "tool_events": [
+        {
+          "event": "chat.tool_call",
+          "elapsed_ms": 9675.52,
+          "tool_name": "glob"
+        },
+        {
+          "event": "chat.tool_result",
+          "elapsed_ms": 9688.02
+        },
+        {
+          "event": "chat.tool_call",
+          "elapsed_ms": 10894.77,
+          "tool_name": "read_file"
+        },
+        {
+          "event": "chat.tool_result",
+          "elapsed_ms": 10936.94
+        },
+        {
+          "event": "chat.final",
+          "elapsed_ms": 14795.03
+        }
+      ],
+      "final_chars": 726,
+      "model_observations": [
+        {
+          "event": "formal_model_first_output",
+          "seq": 1,
+          "elapsed_ms": 478.4301999898162
+        },
+        {
+          "event": "formal_model_first_output",
+          "seq": 2,
+          "elapsed_ms": 404.1987000091467
+        },
+        {
+          "event": "formal_model_first_output",
+          "seq": 3,
+          "elapsed_ms": 549.6187999960966
+        }
+      ],
+      "source_binding_complete": false
+    },
+    {
+      "label": "baseline",
+      "source_head": "ebeb5aa4db828b69489ce205de85ebd1d3a1c5a5",
+      "source_dirty": true,
+      "fixture_sha256": "9f891c40fa150975856f660b21fb7c8c6a86623f2c6b6454984db0dea15c1a7a",
+      "question_sha256": "234c0a7fe324b8ecca61b3450a5f33f7df38da77cbcbff26fc56233bab06bac0",
+      "model_identity": "deepseek-v4-flash#0",
+      "model_config_version": "e3ed8c0f9de4aeed889885737122a54fccf82632423bd9ca9592239d2c3af2b6",
+      "setup_ms": 9223.01,
+      "execution_ms": 10060.54,
+      "succeeded": true,
+      "cleanup_complete": true,
+      "configuration_unchanged": true,
+      "fixture_unchanged": true,
+      "project_file_count": 1,
+      "final_text": "我已读取《现场 安排 v2.md》，依据该文件内容分析如下。\n\n**依据版本**：v2（文件第 1 行明确标注\"最新现场安排，版本 v2\"）。\n\n**关键时间数据（v2）**：\n- 仓库乘车方案：09:05 出发，行车 35 分钟\n- 现场活动：10:00 开始\n- 签到要求：必须提前 25 分钟到场，即最晚 **09:35** 签到\n\n**判断：赶不上签到。**\n\n计算：09:05 出发 + 35 分钟行车 = **09:40 到达**，而签到截止是 **09:35**。到达时间比签到截止晚 **5 分钟**，因此仓库乘车方案赶不上签到。\n\n**需要怎样调整**（供参考，未修改文件）：\n- 方案 A：把仓库出发时间提前到 **09:00 或更早**（09:00 出发 + 35 分钟 = 09:35，刚好踩线；建议 08:55 出发留出余量）。\n- 方案 B：改用文件第 3 行提到的办公室车辆方案——08:40 出发、行车 25 分钟，08:40 + 25 = **09:05 到达**，比签到截止早 30 分钟，可以赶上。\n\n补充说明：文件第 5 行提示归档 v1 曾记录仓库行车 20 分钟，但该数据已被 v2 取代，不应再作为依据。若按 v1 的 20 分钟算（09:05+20=09:25）虽能赶上，但 v2 已明确更新为 35 分钟，故以 v2 为准。\n\n我未修改任何文件，也未创建任务。",
+      "model_calls": 3,
+      "tool_events": [
+        {
+          "event": "chat.tool_call",
+          "elapsed_ms": 5175.1,
+          "tool_name": "glob"
+        },
+        {
+          "event": "chat.tool_result",
+          "elapsed_ms": 5183.4
+        },
+        {
+          "event": "chat.tool_call",
+          "elapsed_ms": 6655.54,
+          "tool_name": "read_file"
+        },
+        {
+          "event": "chat.tool_result",
+          "elapsed_ms": 6692.85
+        },
+        {
+          "event": "chat.final",
+          "elapsed_ms": 10057.06
+        }
+      ],
+      "final_chars": 605,
+      "model_observations": [
+        {
+          "event": "formal_model_request",
+          "seq": 1
+        },
+        {
+          "event": "formal_model_first_output",
+          "seq": 1,
+          "elapsed_ms": 515.7122000236996
+        },
+        {
+          "event": "formal_model_result",
+          "seq": 1,
+          "elapsed_ms": 1172.9008000111207,
+          "first_output_ms": 515.7122000236996,
+          "chunk_count": 31,
+          "output_chars": 62
+        },
+        {
+          "event": "formal_model_request",
+          "seq": 2
+        },
+        {
+          "event": "formal_model_first_output",
+          "seq": 2,
+          "elapsed_ms": 450.3096000116784
+        },
+        {
+          "event": "formal_model_result",
+          "seq": 2,
+          "elapsed_ms": 1425.5478999984916,
+          "first_output_ms": 450.3096000116784,
+          "chunk_count": 51,
+          "output_chars": 0
+        },
+        {
+          "event": "formal_model_request",
+          "seq": 3
+        },
+        {
+          "event": "formal_model_first_output",
+          "seq": 3,
+          "elapsed_ms": 459.99409997602925
+        },
+        {
+          "event": "formal_model_result",
+          "seq": 3,
+          "elapsed_ms": 3312.348599982215,
+          "first_output_ms": 459.99409997602925,
+          "chunk_count": 383,
+          "output_chars": 605
+        }
+      ],
+      "source_binding_complete": true,
+      "source_files": {
+        "jiuwenswarm/server/runtime/agent_adapter/formal_live_voice.py": "9b7728c3982f5d9d920156c0126e70ec1b77b6b2ecdb0fb93750aa1284cba7d9",
+        "jiuwenswarm/server/runtime/agent_adapter/interface_deep.py": "ba5d279166e1612d5143fe536b4b2ca13b0577f2b5769db18b683843b796cb97"
+      },
+      "binding_note": "Relevant files unchanged from ebeb5aa4; unrelated P5 Gateway edits excluded."
+    },
+    {
+      "label": "candidate3",
+      "source_head": "595e176571e5965e65879220f0f952af874a5bfb",
+      "source_dirty": true,
+      "fixture_sha256": "9f891c40fa150975856f660b21fb7c8c6a86623f2c6b6454984db0dea15c1a7a",
+      "question_sha256": "234c0a7fe324b8ecca61b3450a5f33f7df38da77cbcbff26fc56233bab06bac0",
+      "model_identity": "deepseek-v4-flash#0",
+      "model_config_version": "e3ed8c0f9de4aeed889885737122a54fccf82632423bd9ca9592239d2c3af2b6",
+      "setup_ms": 5178.34,
+      "execution_ms": 7488.09,
+      "succeeded": true,
+      "cleanup_complete": true,
+      "configuration_unchanged": true,
+      "fixture_unchanged": true,
+      "project_file_count": 1,
+      "final_text": "根据《现场 安排 v2.md》的内容分析：\n\n**结论：当前仓库乘车方案赶不上签到，需要调整。**\n\n**依据版本与时间：**\n- 版本：v2（文件第 1 行标注\"最新现场安排，版本 v2\"）\n- 仓库乘车：09:05 出发，行车 35 分钟 → 到达时间 09:40\n- 现场活动 10:00 开始，必须提前 25 分钟到场签到 → 签到截止 09:35\n\n**判断：**\n- 仓库方案到达 09:40，晚于签到截止 09:35，**迟到 5 分钟，赶不上签到**。\n- 办公室方案（08:40 出发 + 25 分钟 = 09:05 到达）能赶上，但当前未采用。\n\n**需要怎样调整：**\n- 若坚持用仓库车辆，需把出发时间提前到 09:00 或更早（09:00 出发 + 35 分钟 = 09:35，正好卡点；稳妥起见应早于 09:00）。\n- 或改采用办公室方案（08:40 出发，09:05 到达，富余 30 分钟）。\n\n注：v1 曾记录仓库行车 20 分钟，已被 v2 取代，故以 v2 的 35 分钟为准。本次仅分析，未修改文件、未创建任务。",
+      "model_calls": 3,
+      "tool_events": [
+        {
+          "event": "chat.tool_call",
+          "elapsed_ms": 3279.96,
+          "tool_name": "glob"
+        },
+        {
+          "event": "chat.tool_result",
+          "elapsed_ms": 3283.37
+        },
+        {
+          "event": "chat.tool_call",
+          "elapsed_ms": 4775.58,
+          "tool_name": "read_file"
+        },
+        {
+          "event": "chat.tool_result",
+          "elapsed_ms": 4799.48
+        },
+        {
+          "event": "chat.final",
+          "elapsed_ms": 7485.34
+        }
+      ],
+      "final_chars": 477,
+      "model_observations": [
+        {
+          "event": "formal_model_request",
+          "seq": 1
+        },
+        {
+          "event": "formal_model_first_output",
+          "seq": 1,
+          "elapsed_ms": 468.49279999150895
+        },
+        {
+          "event": "formal_model_result",
+          "seq": 1,
+          "elapsed_ms": 1456.3305999909062,
+          "first_output_ms": 468.49279999150895,
+          "chunk_count": 50,
+          "output_chars": 69
+        },
+        {
+          "event": "formal_model_request",
+          "seq": 2
+        },
+        {
+          "event": "formal_model_first_output",
+          "seq": 2,
+          "elapsed_ms": 395.4096999950707
+        },
+        {
+          "event": "formal_model_result",
+          "seq": 2,
+          "elapsed_ms": 1471.164399990812,
+          "first_output_ms": 395.4096999950707,
+          "chunk_count": 76,
+          "output_chars": 0
+        },
+        {
+          "event": "formal_model_request",
+          "seq": 3
+        },
+        {
+          "event": "formal_model_first_output",
+          "seq": 3,
+          "elapsed_ms": 454.6468000044115
+        },
+        {
+          "event": "formal_model_result",
+          "seq": 3,
+          "elapsed_ms": 2639.8667999892496,
+          "first_output_ms": 454.6468000044115,
+          "chunk_count": 308,
+          "output_chars": 477
+        }
+      ],
+      "source_binding_complete": false
+    },
+    {
+      "label": "visibility",
+      "source_head": "595e176571e5965e65879220f0f952af874a5bfb",
+      "source_dirty": true,
+      "source_files": {
+        "jiuwenswarm/server/runtime/agent_adapter/formal_live_voice.py": "9b6eb8746c2a914d749b843922fa5acfa6908dceeee6e49b073f7d92a8e3c2dd",
+        "jiuwenswarm/server/runtime/agent_adapter/interface_deep.py": "cfbaaffc69294384b450a69ea97185a8703c073af3d8367c82c714385839d089"
+      },
+      "fixture_sha256": "9f891c40fa150975856f660b21fb7c8c6a86623f2c6b6454984db0dea15c1a7a",
+      "question_sha256": "234c0a7fe324b8ecca61b3450a5f33f7df38da77cbcbff26fc56233bab06bac0",
+      "model_identity": "deepseek-v4-flash#0",
+      "model_config_version": "e3ed8c0f9de4aeed889885737122a54fccf82632423bd9ca9592239d2c3af2b6",
+      "setup_ms": 8392.93,
+      "execution_ms": 12993.83,
+      "succeeded": true,
+      "cleanup_complete": true,
+      "configuration_unchanged": true,
+      "fixture_unchanged": true,
+      "project_file_count": 1,
+      "native_policy_visible": [
+        true,
+        true,
+        true
+      ],
+      "final_text": "基于《现场 安排 v2.md》的实际内容分析如下。\n\n**结论：当前仓库乘车方案赶不上签到，需要调整。**\n\n**依据版本与时间（v2 文件，第 2、4 行）：**\n- 仓库方案：09:05 出发，行车 35 分钟 → 到达时间约 **09:40**\n- 签到要求：活动 10:00 开始，须提前 25 分钟到场 → 最晚须在 **09:35** 前到达\n- 仓库方案到达 09:40，比 09:35 的签到截止晚 **5 分钟**，赶不上。\n\n**调整建议（不改文件，仅分析）：**\n- 仓库方案需把到达时间提前到 09:35 或更早。按 35 分钟行车反推，出发时间应不晚于 **09:00**（09:00 + 35 分钟 = 09:35，刚好踩线；建议再留余量，如 08:55 出发）。\n- 另一可选方案是文件第 3 行提到的办公室车辆：08:40 出发、行车 25 分钟，到达约 09:05，可从容签到，但当前未采用。\n\n需要说明：文件第 5 行归档的 v1 曾记录仓库行车 20 分钟，但已被 v2 取代，不应再作为依据。若按 v1 的 20 分钟算，09:05 出发 09:25 到达本可赶上，但 v2 已把行车时间修正为 35 分钟，故以 v2 为准判断为赶不上。",
+      "model_calls": 3,
+      "tool_events": [
+        {
+          "event": "chat.tool_call",
+          "elapsed_ms": 7934.69,
+          "tool_name": "glob"
+        },
+        {
+          "event": "chat.tool_result",
+          "elapsed_ms": 7947.52
+        },
+        {
+          "event": "chat.tool_call",
+          "elapsed_ms": 9375.85,
+          "tool_name": "read_file"
+        },
+        {
+          "event": "chat.tool_result",
+          "elapsed_ms": 9426.58
+        },
+        {
+          "event": "chat.final",
+          "elapsed_ms": 12989.11
+        }
+      ],
+      "final_chars": 539,
+      "model_observations": [
+        {
+          "event": "formal_model_request",
+          "seq": 1
+        },
+        {
+          "event": "formal_model_first_output",
+          "seq": 1,
+          "elapsed_ms": 492.5298999878578
+        },
+        {
+          "event": "formal_model_result",
+          "seq": 1,
+          "elapsed_ms": 1852.067600004375,
+          "first_output_ms": 492.5298999878578,
+          "chunk_count": 50,
+          "output_chars": 69
+        },
+        {
+          "event": "formal_model_request",
+          "seq": 2
+        },
+        {
+          "event": "formal_model_first_output",
+          "seq": 2,
+          "elapsed_ms": 458.51339999353513
+        },
+        {
+          "event": "formal_model_result",
+          "seq": 2,
+          "elapsed_ms": 1328.479999996489,
+          "first_output_ms": 458.51339999353513,
+          "chunk_count": 84,
+          "output_chars": 61
+        },
+        {
+          "event": "formal_model_request",
+          "seq": 3
+        },
+        {
+          "event": "formal_model_first_output",
+          "seq": 3,
+          "elapsed_ms": 478.92350002075545
+        },
+        {
+          "event": "formal_model_result",
+          "seq": 3,
+          "elapsed_ms": 3486.8616000167094,
+          "first_output_ms": 478.92350002075545,
+          "chunk_count": 355,
+          "output_chars": 539
+        }
+      ],
+      "source_binding_complete": true
+    },
+    {
+      "label": "output_policy",
+      "source_head": "595e176571e5965e65879220f0f952af874a5bfb",
+      "source_dirty": true,
+      "source_files": {
+        "jiuwenswarm/server/runtime/agent_adapter/formal_live_voice.py": "9b6eb8746c2a914d749b843922fa5acfa6908dceeee6e49b073f7d92a8e3c2dd",
+        "jiuwenswarm/server/runtime/agent_adapter/interface_deep.py": "12351505035e7190fd71931d58737bd81b1f8474717396c8edbcea13bd5d05f6"
+      },
+      "fixture_sha256": "9f891c40fa150975856f660b21fb7c8c6a86623f2c6b6454984db0dea15c1a7a",
+      "question_sha256": "234c0a7fe324b8ecca61b3450a5f33f7df38da77cbcbff26fc56233bab06bac0",
+      "model_identity": "deepseek-v4-flash#0",
+      "model_config_version": "e3ed8c0f9de4aeed889885737122a54fccf82632423bd9ca9592239d2c3af2b6",
+      "setup_ms": 14660.58,
+      "execution_ms": 12178.46,
+      "succeeded": true,
+      "cleanup_complete": true,
+      "configuration_unchanged": true,
+      "fixture_unchanged": true,
+      "project_file_count": 1,
+      "native_policy_visible": [
+        true,
+        true,
+        true
+      ],
+      "final_text": "根据《现场 安排 v2.md》的当前方案，仓库乘车赶不上签到，需要调整。\n\n依据 v2 版本（第 2 行）：仓库 09:05 出发、行车 35 分钟，即 09:40 到达。而现场活动 10:00 开始，必须提前 25 分钟到场签到，也就是最晚 09:35 必须到场。09:40 到达比 09:35 的签到截止晚了 5 分钟，所以赶不上。\n\n需要调整的方向：要么把仓库出发时间提前到 09:00 或更早（09:00 出发 35 分钟到 09:35，正好卡点，建议再提前留余量），要么改采用文件里另一套方案——办公室车辆 08:40 出发、行车 25 分钟，09:05 到达，能从容赶上签到。注意 v1 里\"仓库行车 20 分钟\"已被 v2 取代，不能按 20 分钟算。\n\n我未修改文件、也未创建任务。",
+      "model_calls": 3,
+      "tool_events": [
+        {
+          "event": "chat.tool_call",
+          "elapsed_ms": 7608.72,
+          "tool_name": "glob"
+        },
+        {
+          "event": "chat.tool_result",
+          "elapsed_ms": 7623.31
+        },
+        {
+          "event": "chat.tool_call",
+          "elapsed_ms": 9508.29,
+          "tool_name": "read_file"
+        },
+        {
+          "event": "chat.tool_result",
+          "elapsed_ms": 9546.42
+        },
+        {
+          "event": "chat.final",
+          "elapsed_ms": 12171.18
+        }
+      ],
+      "final_chars": 349,
+      "model_observations": [
+        {
+          "event": "formal_model_request",
+          "seq": 1
+        },
+        {
+          "event": "formal_model_first_output",
+          "seq": 1,
+          "elapsed_ms": 536.9424000091385
+        },
+        {
+          "event": "formal_model_result",
+          "seq": 1,
+          "elapsed_ms": 1600.4863000125624,
+          "first_output_ms": 536.9424000091385,
+          "chunk_count": 50,
+          "output_chars": 62
+        },
+        {
+          "event": "formal_model_request",
+          "seq": 2
+        },
+        {
+          "event": "formal_model_first_output",
+          "seq": 2,
+          "elapsed_ms": 528.044000006048
+        },
+        {
+          "event": "formal_model_result",
+          "seq": 2,
+          "elapsed_ms": 1804.896399989957,
+          "first_output_ms": 528.044000006048,
+          "chunk_count": 85,
+          "output_chars": 54
+        },
+        {
+          "event": "formal_model_request",
+          "seq": 3
+        },
+        {
+          "event": "formal_model_first_output",
+          "seq": 3,
+          "elapsed_ms": 442.6781000220217
+        },
+        {
+          "event": "formal_model_result",
+          "seq": 3,
+          "elapsed_ms": 2559.8362000018824,
+          "first_output_ms": 442.6781000220217,
+          "chunk_count": 229,
+          "output_chars": 349
+        }
+      ],
+      "source_binding_complete": true
+    }
+  ]
+}

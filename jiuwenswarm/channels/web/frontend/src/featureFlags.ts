@@ -9,3 +9,40 @@ export const FEATURE_APP_UPDATER_UI = true;
  * false 时从侧边栏与主区移除全部个人上下文入口。
  */
 export const FEATURE_PERSONAL_CONTEXT_UI = true;
+/** 两周 Live Voice 纵向 Demo；关闭时不挂载任何语音 UI。 */
+export const FEATURE_LIVE_VOICE_DEMO = true;
+
+/**
+ * Post-V0 conservative sentence preview. Disabled by default so applying the
+ * development stash cannot silently change the V0 acceptance behaviour.
+ */
+export const FEATURE_LIVE_VOICE_STREAMING_SPEECH = import.meta.env.VITE_FEATURE_LIVE_VOICE_STREAMING_SPEECH === 'true';
+
+/**
+ * Post-V0 restricted AutoHarness task bridge. Disabled by default because its
+ * confirmed commands can create side-effecting background work.
+ */
+
+export const FEATURE_LIVE_VOICE_INTEGRATED_P1 = import.meta.env.VITE_FEATURE_LIVE_VOICE_INTEGRATED_P1 === 'true';
+
+/**
+ * Cumulative P1/P2/P3alpha Web composition shell and diagnostics. Disabled by
+ * default: enabling the shell discloses route facts but does not make missing
+ * formal adapters runnable or grant release/replacement credit.
+ */
+export const FEATURE_LIVE_VOICE_INTEGRATED_WEB = import.meta.env.VITE_FEATURE_LIVE_VOICE_INTEGRATED_WEB === 'true';
+
+/**
+ * Hands-free interruption of an Agent answer that is still being generated.
+ *
+ * Enabled by the controlled Live Voice build profile; ordinary production is off.
+ * Enabling it opens a listening window between turn submission and
+ * first audio, which changes microphone occupancy, echo exposure and capture
+ * cost for every hands-free turn. The server-side fence it drives is bounded to
+ * the conversational round and never reaches a background Task.
+ */
+export const FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION =
+  import.meta.env.VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION === 'true';
+
+/** Destructive formal task control stays separately default-off. */
+export const FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION = import.meta.env.VITE_FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION === 'true';

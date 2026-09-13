@@ -18,6 +18,7 @@ functions, hence this hook.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 from pathlib import Path
@@ -59,6 +60,18 @@ def allow_macos_pytest_temp_sources(monkeypatch):
         "_get_import_local_forbidden_roots",
         staticmethod(_get_test_forbidden_roots),
     )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def event_loop_policy() -> asyncio.AbstractEventLoopPolicy:
+    """Keep pytest-asyncio from creating an unowned policy-level event loop.
+
+    Its Runner snapshots the current loop before each async scope. On Python
+    3.12, the default policy otherwise creates one just for that snapshot.
+    """
+    policy = asyncio.get_event_loop_policy()
+    policy.set_event_loop(None)
+    return policy
 
 
 def _stub_get_config_file() -> Path:

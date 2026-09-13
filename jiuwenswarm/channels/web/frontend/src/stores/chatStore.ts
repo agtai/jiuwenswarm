@@ -6,6 +6,7 @@
  */
 
 import { create } from 'zustand';
+import { coalesceTaskNotifications } from '../features/live-voice/formal/taskNotificationIdentity';
 import { subscribeWithSelector } from 'zustand/middleware';
 import {
   Message,
@@ -34,6 +35,7 @@ import {
   clearPermissionQuestions as clearQueuedPermissionQuestions,
   enqueuePendingQuestions,
 } from './pendingQuestionQueue';
+import { nativeVoiceResponseKey } from '../features/live-voice/formal/nativeGeneratedText';
 
 const TOOL_TIMEOUT_MS = 12_000_000;
 const EVOLUTION_STATUS_END_VISIBLE_MS = 3_000;
@@ -214,7 +216,9 @@ interface ChatState {
   removeRuntime: (sessionId: string) => void;
 
   addMessage: (sessionId: string, message: Message) => void;
+  addMessageIfAbsent: (sessionId: string, message: Message) => void;
   replaceHistoryMessages: (sessionId: string, messages: Message[]) => void;
+  settleNativeVoiceMessages: (sessionId: string, responseKeys: readonly string[]) => void;
   updateMessage: (sessionId: string, id: string, updates: Partial<Message>) => void;
   appendStreamContent: (sessionId: string, content: string, streamKey?: string) => void;
   appendReasoning: (
@@ -232,6 +236,7 @@ interface ChatState {
   finalizeStreamSegment: (sessionId: string, streamKey?: string) => void;
   finalizeTeamLeaderSegment: (sessionId: string) => void;
   clearStreamSplit: (sessionId: string) => void;
+  markAssistantTurnFinal: (sessionId: string) => void;
   collapseTurnFinal: (
     sessionId: string,
     opts: {
@@ -368,6 +373,55 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
     });
   },
 
+  addMessageIfAbsent: (sessionId, message) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      const priorTask = message.taskNotification ? runtime?.messages.find(item =>
+        item.taskNotification?.eventKey === message.taskNotification?.eventKey) : undefined;
+      if (runtime && priorTask) {
+        if (priorTask.taskNotification?.presentation === 'text' || message.taskNotification?.presentation === 'preview') return state;
+        return { runtimes: { ...state.runtimes, [sessionId]: { ...runtime,
+          messages: runtime.messages.map(item => item === priorTask ? { ...message, renderKey: item.renderKey } : item) } } };
+      }
+      const voiceKey = nativeVoiceResponseKey(message);
+      const priorVoice = voiceKey === null ? undefined : runtime?.messages.find(item => nativeVoiceResponseKey(item) === voiceKey);
+      if (runtime && priorVoice) {
+        if (message.nativeVoice && (!priorVoice.nativeVoice || priorVoice.nativeVoice.state === 'interrupted' ||
+            priorVoice.nativeVoice.revision >= message.nativeVoice.revision)) return state;
+        if (!message.nativeVoice && !priorVoice.nativeVoice) return state;
+        return { runtimes: { ...state.runtimes, [sessionId]: { ...runtime,
+          messages: runtime.messages.map(item => item === priorVoice ? {
+            ...message, nativeTurnKey: message.nativeTurnKey ?? item.nativeTurnKey, renderKey: item.renderKey } : item) } } };
+      }
+      if (!runtime || runtime.messages.some(existing => existing.id === message.id)) {
+        return state;
+      }
+      const { messages, messageRenderKeySeq } = assignMessageRenderKeys(runtime, [message]);
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            messages: [...runtime.messages, ...messages],
+            messageRenderKeySeq,
+            ...(message.role === 'user' ? { assistantStreamSplit: false, reasoningSegments: [] } : {}),
+          },
+        },
+      };
+    });
+  },
+
+  settleNativeVoiceMessages: (sessionId, responseKeys) => {
+    const keys = new Set(responseKeys);
+    set(state => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime || !runtime.messages.some(item => item.nativeVoice?.state === 'generating' && keys.has(item.nativeVoice.responseKey))) return state;
+      return { runtimes: { ...state.runtimes, [sessionId]: { ...runtime,
+        messages: runtime.messages.map(item => item.nativeVoice?.state === 'generating' && keys.has(item.nativeVoice.responseKey)
+          ? { ...item, nativeVoice: { ...item.nativeVoice, state: 'interrupted' as const } } : item) } } };
+    });
+  },
+
   replaceHistoryMessages: (sessionId, messages) => {
     set((state) => {
       const runtime = state.runtimes[sessionId];
@@ -375,7 +429,21 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
       if (runtime.evolutionStatusClearTimer) {
         clearTimeout(runtime.evolutionStatusClearTimer);
       }
-      const assigned = assignMessageRenderKeys(runtime, messages);
+      // Reconnect history is heard history. Keep generated/interrupted rows in
+      // this page's session, replacing one only with its exact canonical audio row.
+      const historyVoiceKeys = new Set(messages.map(nativeVoiceResponseKey).filter(key => key !== null));
+      const generated = runtime.messages.filter(item => (item.nativeVoice && !historyVoiceKeys.has(item.nativeVoice.responseKey) ||
+        item.id.startsWith('live-voice-failure:')) &&
+        !messages.some(history => history.id === item.id));
+      const existingTurnKeys = new Map(runtime.messages.filter(item => item.nativeTurnKey).map(item => [item.id, item.nativeTurnKey]));
+      const existingTasks = new Map(runtime.messages.filter(item => item.taskNotification).map(item => [item.id, item.taskNotification]));
+      const restored = messages.map(item => ({ ...item,
+        ...(!item.nativeTurnKey && existingTurnKeys.has(item.id) ? { nativeTurnKey: existingTurnKeys.get(item.id) } : {}),
+        ...(!item.taskNotification && existingTasks.has(item.id) ? { taskNotification: existingTasks.get(item.id) } : {}),
+      }));
+      const merged = generated.length === 0 ? restored : [...restored, ...generated].sort((left, right) =>
+        Date.parse(left.timestamp) - Date.parse(right.timestamp));
+      const assigned = assignMessageRenderKeys(runtime, coalesceTaskNotifications(merged));
       return {
         runtimes: {
           ...state.runtimes,
@@ -680,6 +748,35 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
         runtimes: {
           ...state.runtimes,
           [sessionId]: { ...runtime, assistantStreamSplit: false },
+        },
+      };
+    });
+  },
+
+  markAssistantTurnFinal: (sessionId) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      let turnStart = 0;
+      for (let index = runtime.messages.length - 1; index >= 0; index -= 1) {
+        if (runtime.messages[index].role === 'user') {
+          turnStart = index + 1;
+          break;
+        }
+      }
+      let changed = false;
+      const messages = runtime.messages.map((message, index) => {
+        if (index < turnStart || message.role !== 'assistant' || message.isResponseFinal === true) {
+          return message;
+        }
+        changed = true;
+        return { ...message, isResponseFinal: true };
+      });
+      if (!changed) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, messages },
         },
       };
     });

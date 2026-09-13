@@ -1,0 +1,287 @@
+"""P0 timing is passive, bounded and tied to the producing activation."""
+import asyncio
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from jiuwenswarm.common.live_voice_profiling import _CURRENT
+from jiuwenswarm.common import live_voice_audio_diagnostics as diagnostics
+from jiuwenswarm.server.live_voice import openai_realtime_native_engine as native
+from jiuwenswarm.server.live_voice import openai_realtime_session as transport
+from test_openai_realtime_native_engine import (
+    admitted_business_engine, business_function, provider_event, speech_started, speech_stopped, input_committed,
+)
+from test_openai_realtime_session import (
+    CapturingFactory, ScriptedRealtimeSocket, event, negotiated_events, realtime_config, session_update,
+)
+from test_demo_profiling import row
+from scripts.live_voice import analyze_demo_profile as report
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sink_fails", [False, True])
+async def test_transport_timing_distinguishes_lock_send_and_receive_without_payload(monkeypatch, sink_fails):
+    records = []
+    def observe(name, origin, **fields):
+        if sink_fails:
+            raise RuntimeError("PRIVATE_SINK_FAILURE")
+        records.append({"event": name, **origin, **fields})
+        if fields["milestone"] == "socket_send_started":
+            ticks[0] += 0.2  # Sink work must not be misattributed to transport.
+    monkeypatch.setattr(transport, "profile_snapshot_event", observe)
+    ticks = [10.0]
+    monkeypatch.setattr(transport, "time", SimpleNamespace(perf_counter=lambda: ticks[0]))
+    socket = ScriptedRealtimeSocket(negotiated_events())
+    session = transport.OpenAIRealtimeSession(realtime_config(), socket_factory=CapturingFactory(socket),
+        diagnostic_origin={"session_id": "origin", "activation_id": "a1", "PRIVATE_KEY": "PRIVATE_VALUE"})
+    token = _CURRENT.set({"session_id": "unrelated-session", "work_id": "unrelated-work"})
+    try:
+        await session.open(session_update=session_update())
+        await session._send_lock.acquire()
+        blocked = asyncio.create_task(session.send_event("response.create", {"response": {"instructions": "PRIVATE_PROMPT"}}))
+        await asyncio.sleep(0)
+        assert not any(r.get("status") == "response.create" for r in records)
+        assert session._send_lock._waiters
+        ticks[0] += 0.02
+        session._send_lock.release()
+        sent_id = await blocked
+        socket.push(event("input_audio_buffer.speech_stopped", "endpoint", item_id="i1", audio_end_ms=900))
+        assert (await session.receive_event()).event_id == "endpoint"
+        # Every append retains scalar timing, never its audio payload.
+        await session.send_event("input_audio_buffer.append", {"audio": "PRIVATE_AUDIO"})
+        if sink_fails:
+            assert not records
+        else:
+            assert all(r["session_id"] == "origin" and r["activation_id"] == "a1" for r in records)
+            assert "PRIVATE" not in repr(records) and "unrelated" not in repr(records)
+            sent = [r for r in records if r["source_event_id"] == sent_id]
+            assert [r["milestone"] for r in sent] == ["socket_send_started", "socket_send_completed"]
+            assert sent[0]["lock_wait_ms"] == pytest.approx(20)
+            assert sent[0]["encode_ms"] >= 0 and sent[1]["socket_send_ms"] == 0
+            received = next(r for r in records if r["source_event_id"] == "endpoint")
+            assert received["received_monotonic_ms"] > 0 and received["decode_ms"] >= 0
+            appended = [r for r in records if r["milestone"] == "audio_append_sent"]
+            assert len(appended) == 1 and appended[0]["input_append_seq"] == 0
+    finally:
+        _CURRENT.reset(token)
+        await session.close()
+    assert socket.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_transport_without_origin_stays_silent_and_failed_send_never_claims_completion(monkeypatch):
+    records = []
+    monkeypatch.setattr(transport, "profile_snapshot_event", lambda *args, **fields: records.append(fields))
+    socket = ScriptedRealtimeSocket(negotiated_events(), send_failure_type="response.create")
+    session = transport.OpenAIRealtimeSession(realtime_config(), socket_factory=CapturingFactory(socket))
+    await session.open(session_update=session_update())
+    assert records == []
+    session._diagnostic_origin = {"session_id": "origin"}
+    with pytest.raises(transport.OpenAIRealtimeSessionError, match="send failed"):
+        await session.send_event("response.create", {})
+    assert [r["milestone"] for r in records] == ["socket_send_started", "socket_send_failed"]
+    assert records[-1]["error_type"] == "RuntimeError"
+    await session.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_audio_send_retains_close_codes_without_error_text(monkeypatch):
+    records = []
+    monkeypatch.setattr(transport, "profile_snapshot_event", lambda *args, **fields: records.append(fields))
+    socket = ScriptedRealtimeSocket(negotiated_events())
+    session = transport.OpenAIRealtimeSession(realtime_config(), socket_factory=CapturingFactory(socket),
+        diagnostic_origin={"session_id": "origin"})
+    await session.open(session_update=session_update())
+    class ConnectionClosedError(Exception):
+        rcvd = SimpleNamespace(code=1001, reason="PRIVATE_CLOSE_REASON")
+        sent = SimpleNamespace(code=1011, reason="PRIVATE_SENT_REASON")
+    async def fail_send(_wire):
+        raise ConnectionClosedError("PRIVATE_SOCKET_URL_AND_CREDENTIALS")
+    socket.send = fail_send
+    with pytest.raises(transport.OpenAIRealtimeSessionError) as failure:
+        await session.send_event("input_audio_buffer.append", {"audio": "PRIVATE_PCM"})
+    assert failure.value.reason == "REALTIME_TRANSPORT_SEND_FAILED"
+    failed = records[-1]
+    assert failed["status"] == "input_audio_buffer.append"
+    assert failed["milestone"] == "socket_send_failed"
+    assert failed["error_type"] == "ConnectionClosedError"
+    assert failed["received_close_code"] == 1001 and failed["sent_close_code"] == 1011
+    assert "PRIVATE" not in repr(records)
+    await session.close()
+
+
+@pytest.mark.asyncio
+async def test_every_append_has_original_send_boundaries_and_exact_wire_identity(monkeypatch):
+    records = []
+    monkeypatch.setattr(transport, "profile_snapshot_event", lambda e, origin, **f: records.append({**origin, **f}))
+    socket = ScriptedRealtimeSocket(negotiated_events())
+    session = transport.OpenAIRealtimeSession(realtime_config(), socket_factory=CapturingFactory(socket),
+        diagnostic_origin={"session_id": "frame-origin", "activation_id": "a1"})
+    await session.open(session_update=session_update())
+    try:
+        ids = [await session.send_event("input_audio_buffer.append", {"audio": "PRIVATE_PCM"}) for _ in range(55)]
+        frames = [r for r in records if r["milestone"] == "audio_append_sent"]
+        assert [r["source_event_id"] for r in frames] == ids
+        assert [r["input_append_seq"] for r in frames] == list(range(55))
+        assert all(r["send_lock_started_ms"] <= r["send_lock_acquired_ms"]
+            <= r["socket_send_started_ms"] <= r["socket_send_completed_ms"] for r in frames)
+        socket.send_failure_type = "input_audio_buffer.append"
+        with pytest.raises(transport.OpenAIRealtimeSessionError):
+            await session.send_event("input_audio_buffer.append", {"audio": "PRIVATE_PCM"})
+        assert len([r for r in records if r["milestone"] == "audio_append_sent"]) == 55
+        assert len([r for r in socket.sent if r["type"] == "input_audio_buffer.append"]) == 55
+        assert "PRIVATE" not in repr(records)
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_real_diagnostic_sink_keeps_closed_transport_facts_and_no_socket_text(monkeypatch):
+    records = []
+    await asyncio.to_thread(diagnostics._QUEUE.join)
+    monkeypatch.setattr(diagnostics._LOGGER, "info", lambda template, *args: records.append(template % args))
+    class ConnectionClosedError(OSError):
+        rcvd = SimpleNamespace(code=1001, reason="PRIVATE_CLOSE_REASON")
+        sent = SimpleNamespace(code=1011, reason="PRIVATE_SENT_REASON")
+    failure = ConnectionClosedError(10054, "PRIVATE_SOCKET_URL")
+    session = transport.OpenAIRealtimeSession(realtime_config(), diagnostic_origin={"session_id": "sink-origin"})
+    session._observe_transport("socket_send_failed", "input_audio_buffer.append", "client-event-1",
+                              **transport._transport_failure_fields(failure))
+    await asyncio.to_thread(diagnostics._QUEUE.join)
+    payload = json.loads(records[-1].split(" ", 1)[1])["fields"]
+    assert payload["error_type"] == "ConnectionClosedError"
+    assert payload["received_close_code"] == 1001 and payload["sent_close_code"] == 1011
+    assert payload["socket_errno"] == 10054 and payload["session_id"] == "sink-origin"
+    assert "PRIVATE" not in repr(records)
+
+
+@pytest.mark.asyncio
+async def test_real_sink_keeps_frame_clock_and_heartbeat_scalars(monkeypatch):
+    records = []
+    await asyncio.to_thread(diagnostics._QUEUE.join)
+    monkeypatch.setattr(diagnostics._LOGGER, "info", lambda template, *args: records.append(template % args))
+    fields = {
+        "gateway_accept_started_ms": 100.0, "gateway_enqueue_monotonic_ms": 100.2,
+        "gateway_offer_started_ms": 100.3, "gateway_offer_completed_ms": 101.1,
+        "send_lock_started_ms": 100.4, "send_lock_acquired_ms": 100.5,
+        "socket_send_started_ms": 100.6, "socket_send_completed_ms": 101.0,
+        "input_sample_cursor": 480, "sent_sample_end": 960, "input_append_seq": 1,
+        "socket_rtt_ms": 130.2, "socket_rtt_observed_ms": 90.0, "socket_rtt_age_ms": 11.0,
+    }
+    diagnostics.record_audio_diagnostic("endpoint_test", **fields, audio="PRIVATE_PCM")
+    await asyncio.to_thread(diagnostics._QUEUE.join)
+    payload = json.loads(records[-1].split(" ", 1)[1])["fields"]
+    assert payload == fields and "PRIVATE" not in repr(records)
+
+
+@pytest.mark.asyncio
+async def test_first_argument_delta_is_bounded_per_response_and_has_zero_authority(monkeypatch):
+    records = []
+    monkeypatch.setattr(transport, "profile_snapshot_event", lambda *args, **fields: None)
+    monkeypatch.setattr(native, "profile_snapshot_event", lambda event, snapshot, **fields: records.append({**snapshot, **fields}))
+    engine, socket, _ = await admitted_business_engine()
+    try:
+        for index in range(12):
+            item = f"item{min(index, 9)}"
+            socket.push(provider_event("response.function_call_arguments.delta", f"delta{index}",
+                response_id="p1", item_id=item, delta="PRIVATE_ARGUMENTS", unexpected="PRIVATE_PAYLOAD"))
+            emitted = await engine.next_event()
+            assert emitted.delegate is None and emitted.audio is None and emitted.action is None
+        for index, changes in enumerate(({"response_id": []}, {"response_id": "wrong"}, {"item_id": []}, {"delta": None})):
+            payload = {"response_id": "p1", "item_id": "x", "delta": "PRIVATE", **changes}
+            socket.push(provider_event("response.function_call_arguments.delta", f"bad{index}", **payload))
+            assert (await engine.next_event()).delegate is None
+        first = [r for r in records if r["milestone"] == "arguments_first_delta"]
+        assert len(first) == 8 and len({r["provider_item_id"] for r in first}) == 8
+        assert all(r["provider_response_id"] == "p1" and r["response_id"] == "runtime-response-1" for r in first)
+        assert engine._delegates == {} and engine.snapshot().released_audio_count == 0
+        assert "PRIVATE" not in repr(records)
+        socket.push(business_function("complete", "p1", "call1"))
+        assert (await engine.next_event()).delegate is not None
+        assert any(r["milestone"] == "arguments_completed" and r["provider_call_id"] == "call1" and r["provider_item_id"] for r in records)
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_second_endpoint_joins_input_item_without_borrowing_prior_turn(monkeypatch):
+    records = []
+    monkeypatch.setattr(native, "profile_snapshot_event", lambda event, snapshot, **fields: records.append({**snapshot, **fields}))
+    monkeypatch.setattr(transport, "profile_snapshot_event", lambda *args, **fields: None)
+    engine, socket, _ = await admitted_business_engine()
+    prior_turn = engine._current_turn_id
+    try:
+        socket.push(speech_started("start2", "input2", 600))
+        await engine.next_event()
+        while engine._pending_events:
+            await engine.next_event()
+        socket.push(speech_stopped("end2", "input2", 900))
+        await engine.next_event()
+        endpoint = next(r for r in records if r.get("source_event_id") == "end2")
+        assert endpoint["provider_item_id"] == "input2" and endpoint.get("turn_id") is None
+        socket.push(input_committed("commit2", "input2"))
+        await engine.next_event()
+        committed = next(r for r in records if r.get("source_event_id") == "commit2")
+        assert committed["provider_item_id"] == "input2"
+        assert committed["turn_id"] == engine._current_turn_id != prior_turn
+        assert committed["turn_commit_id"]
+        assert committed["provider_start_ms"] == 600 and committed["provider_end_ms"] == 900
+        assert engine._delegates == {} and engine.snapshot().released_audio_count == 0
+    finally:
+        await engine.close()
+
+
+def test_transport_close_enum_and_cause_are_structured_without_private_reason():
+    from enum import IntEnum
+    class Code(IntEnum):
+        FAILURE = 1011
+    class ConnectionClosedError(Exception):
+        rcvd = None
+        sent = SimpleNamespace(code=Code.FAILURE, reason="keepalive ping timeout")
+        code = 1006
+    failure = ConnectionClosedError("PRIVATE_URL")
+    failure.__cause__ = OSError(10054, "PRIVATE_CAUSE")
+    fields = transport._transport_failure_fields(failure)
+    assert fields["sent_close_code"] == 1011 and type(fields["sent_close_code"]) is int
+    # Windows constructs ConnectionResetError for this WSA error number.
+    assert fields["socket_errno"] == 10054
+    assert fields["transport_cause_type"] in {"OSError", "ConnectionResetError"}
+    assert fields["close_kind"] == "keepalive_timeout"
+    assert "PRIVATE" not in repr(fields)
+
+
+@pytest.mark.asyncio
+async def test_response_request_diagnostics_join_send_and_created_without_audio_or_tool_effects(monkeypatch):
+    records = []
+    monkeypatch.setattr(native, "profile_snapshot_event", lambda event, origin, **fields: records.append({**origin, **fields}))
+    engine, _, _ = await admitted_business_engine()
+    try:
+        sent = next(r for r in records if r.get("milestone") == "response_sent")
+        created = next(r for r in records if r.get("milestone") == "response_created")
+        assert sent["response_request_id"] and sent["response_request_id"] == created["response_request_id"]
+        assert sent["response_kind"] == created["response_kind"] == "direct"
+        assert sent["turn_id"] == created["turn_id"]
+        assert engine._delegates == {} and engine.snapshot().released_audio_count == 0
+    finally:
+        await engine.close()
+
+
+def test_offline_native_timings_never_pair_reused_client_ids_across_activations_or_clocks():
+    def observation(seq, ms, milestone, activation="a1", clock="process-a", **fields):
+        return row("native_transport_timeline", seq, ms, clock=clock, session_id="session", activation_id=activation,
+                   source_event_id="client_event_00000001", status="response.create", milestone=milestone, **fields)
+    rows = [observation(1, 10, "socket_send_started"),
+            observation(2, 100, "socket_send_completed", activation="a2"),
+            observation(3, 11, "socket_send_completed", clock="process-b"),
+            observation(4, 15, "socket_send_completed", socket_send_ms=5),
+            observation(5, 20, "socket_send_started", activation="open")]
+    for seq, ms, milestone in ((6, 30, "arguments_first_delta"), (7, 37, "arguments_completed")):
+        rows.append(row("native_business_timeline", seq, ms, session_id="session", activation_id="a1",
+                        provider_response_id="p1", provider_item_id="i1", milestone=milestone))
+    result = report.build_report(rows)
+    spans = result["spans"]
+    assert len([span for span in spans if span["state"] == "start_missing"]) == 2
+    assert len([span for span in spans if span["state"] == "open_or_truncated"]) == 1
+    assert [span["duration_ms"] for span in spans if span["duration_ms"] is not None] == [5, 7]
+    assert result["coverage"]["Native transport / endpoint"] == 5

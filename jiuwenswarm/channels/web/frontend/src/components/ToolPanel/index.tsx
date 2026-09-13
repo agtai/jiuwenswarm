@@ -11,6 +11,8 @@ import { Info } from 'lucide-react';
 import { useSessionArtifacts, useSessionArtifactsCount } from '../ArtifactsPanel';
 import { useTaskPlanningMetrics } from '../teamArea';
 import { ExpandedPanel } from '../teamArea/ExpandedPanel';
+import { useLiveVoiceTaskStore } from '../../stores/liveVoiceTaskStore';
+import { RecentTasksPanel } from './RecentTasksPanel';
 import { loadTeamHistoryPanelState } from '../../features/teamHistoryPanelRestore';
 import { TaskPlanningPanel } from '../teamArea/TaskPlanningPanel';
 import { TeamMembersPanel } from '../teamArea/TeamMembersPanel';
@@ -260,7 +262,11 @@ export function ToolPanel({
     [teamMembers, teamLeaderMemberIds],
   );
   // 规划/性能模式下复用 TaskPlanningPanel 紧凑态：把 TodoItem 降级为 TeamTask
-  const todos = useTodoStore(s => s.runtimes[activeSessionId ?? '']?.todos ?? []);
+  const todos = useTodoStore((s) => s.runtimes[activeSessionId ?? '']?.todos ?? []);
+  const backgroundEntry = useLiveVoiceTaskStore(s => s.entries[activeSessionId ?? '']);
+  const recentTasks = backgroundEntry && activeSessionId
+    ? <RecentTasksPanel entry={backgroundEntry} todos={[]} sessionId={activeSessionId} projectId={project?.project_id} />
+    : undefined;
   const codeProject = project?.work_mode === 'code' && !project.is_default ? project : null;
   const canReviewCode = Boolean(codeProject && sessionId && sessionId !== 'new');
   const codeGitDiffWatch = useCodeGitDiffWatch({
@@ -494,6 +500,8 @@ export function ToolPanel({
                   statusIconAtEnd={isTeam}
                 />
               ) : (
+                <>
+                {recentTasks}
                 <TaskPlanningPanel
                   variant="expanded"
                   tasks={planningTasks}
@@ -503,6 +511,7 @@ export function ToolPanel({
                   hideAssignee
                   emptyIllustration={emptyPlanningIcon}
                 />
+                </>
               )
             }
           />
@@ -555,6 +564,7 @@ export function ToolPanel({
           expanded={isTeam ? teamPlanningExpanded : planningExpanded}
           dataTestId={isTeam ? 'tool-panel-team-planning' : 'tool-panel-planning'}
         >
+          {!isTeam && recentTasks}
           <TaskPlanningPanel
             variant="compact"
             members={teamMembers}

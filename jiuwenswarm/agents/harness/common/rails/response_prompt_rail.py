@@ -78,7 +78,11 @@ class ResponsePromptRail(DeepAgentRail):
         language = self.system_prompt_builder.language or "cn"
         self.system_prompt_builder.remove_section("response")
         self.system_prompt_builder.add_section(_input_prompt(language))
-        self.system_prompt_builder.add_section(_output_prompt(language))
+        # The validated formal adapter owns spoken output until its stream
+        # settles. Reinstalling written-deliverable rules on every model call
+        # silently undoes that override, including after each file Tool result.
+        if not self.system_prompt_builder.has_section("formal_live_voice_presentation"):
+            self.system_prompt_builder.add_section(_output_prompt(language))
         self._sync_a2ui_prompt_section(
             self._resolve_channel(ctx),
             skip_a2ui=self._should_skip_a2ui(ctx),

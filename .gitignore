@@ -104,3 +104,8 @@ report/index.html
 /sub_agents/
 /context/
 /.plans/
+
+
+
+# JiuwenSwarm runtime file operation logs
+.agent_history/

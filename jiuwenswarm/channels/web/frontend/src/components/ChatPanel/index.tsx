@@ -28,6 +28,18 @@ import { ContextCompressionLines } from './MessageItem';
 import { InputArea, type InputAreaHandle } from './InputArea';
 import ChatOverviewIcon from '../../assets/chat-overview.svg?react';
 import PanelCollapseIcon from '../../assets/panel-collapse.svg?react';
+import {
+  FormalProductLiveVoiceDemoBar,
+  productVoiceInputAvailableAfterReplyFailure,
+  formalProductVoiceActivity,
+  LiveVoiceDemoBar,
+  type LiveVoiceDemoBarProps,
+} from './LiveVoiceDemoBar';
+import {
+  LiveVoiceIntegratedRoutePanel,
+  type ProductLiveVoiceSurfaceControl,
+  type ProductLiveVoiceSurfaceState,
+} from './LiveVoiceIntegratedRoutePanel';
 import lineUpIcon from '../../assets/lineUp.svg';
 import beeFlyingIcon from '../../assets/bee-flying.webp';
 import beeStaticIcon from '../../assets/bee-static.png';
@@ -64,6 +76,12 @@ import {
 import { useDesktopLocalFilePickerReady, useWelcomeBubblePosition } from '../../hooks';
 import { ApplicationPluginTaskRuntimes } from '../../applicationPlugins/ApplicationPluginOutlet';
 import { generateUuidV4 } from '../../utils/uuid';
+import { FEATURE_LIVE_VOICE_DEMO, FEATURE_LIVE_VOICE_INTEGRATED_P1, FEATURE_LIVE_VOICE_INTEGRATED_WEB } from '../../featureFlags';
+import { useLiveVoiceDemo } from '../../features/live-voice/useLiveVoiceDemo';
+import type { BrowserAudioCaptureStreamFactory } from '../../features/live-voice/formal/adapters/browserAudioIOAdapter';
+import { useProductVoiceBrowserOwnership } from './useProductVoiceBrowserOwnership';
+import { useProductVoiceSessionStart, type PrepareProductVoiceSession } from './useProductVoiceSessionStart';
+import { L0OrdinaryChromeBatchPanel } from './L0OrdinaryChromeBatchPanel';
 
 export interface ChatHistoryPagerProps {
   loadedPages: number;
@@ -75,6 +93,7 @@ export interface ChatHistoryPagerProps {
 }
 
 interface ChatPanelProps {
+  onPrepareLiveVoiceSession?: PrepareProductVoiceSession;
   onSendMessage: (content: string, mediaItems?: MediaItem[]) => void;
   onEnsureSession: (initialTitle?: string) => Promise<string | null>;
   onInputIntent?: (sessionId: string) => void;
@@ -97,9 +116,14 @@ interface ChatPanelProps {
     files?: Record<string, unknown>;
   }>;
   onInterrupt: (newInput?: string) => void;
+  isConnected: boolean;
   onCancel: () => void;
   onSwitchMode: (mode: AgentMode) => void;
   isProcessing: boolean;
+  newSessionPromotion?: {
+    targetSessionId: string;
+    sequence: number;
+  } | null;
   onUserAnswer: (
     requestId: string,
     answers: UserAnswer[],
@@ -905,12 +929,15 @@ export const ChatPanel = React.memo(function ChatPanel({
   onSendMessage,
   onEnsureSession,
   onInputIntent,
+  onPrepareLiveVoiceSession,
   onPersistMedia,
   onPersistDocuments,
   onInterrupt,
+  isConnected,
   onCancel,
   onSwitchMode,
   isProcessing,
+  newSessionPromotion = null,
   onUserAnswer,
   onExportShare,
   isExportingShare = false,
@@ -940,10 +967,15 @@ export const ChatPanel = React.memo(function ChatPanel({
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const messages = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.messages ?? []);
   const isThinking = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.isThinking ?? false);
+  const liveVoiceInteractionBlocked = useChatStore((s) => {
+    const runtime = s.runtimes[activeSessionId ?? ''];
+    return Boolean(runtime?.pendingQuestions.length || runtime?.evolutionStatus);
+  });
   const toolExecutionOrder = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.toolExecutionOrder ?? []);
   const contextCompressionRuntime = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionRuntime);
   const contextCompressionSummary = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionSummary);
   const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent');
+  const selectedAgentModelName = useSessionStore((s) => s.getEffectiveModelName(activeSessionId));
   const hasHarnessProgress = useHarnessStore(
     (s) => mode === 'auto_harness' && (s.runtimes[activeSessionId ?? '']?.stageResults.length ?? 0) > 0,
   );
@@ -1499,6 +1531,175 @@ export const ChatPanel = React.memo(function ChatPanel({
     };
   }, [ingestDesktopLocalFiles, markDesktopFileDropZoneActive]);
 
+  const legacyLiveVoiceDemoProps = useLiveVoiceDemo({
+    activeSessionId,
+    messages,
+    isProcessing,
+    isThinking,
+    isConnected,
+    mode,
+    interactionBlocked: liveVoiceInteractionBlocked,
+    newSessionPromotion,
+    onSendMessage: handleSendMessage,
+    onInterrupt,
+  });
+  const formalProductVoiceEnabled = FEATURE_LIVE_VOICE_INTEGRATED_WEB && FEATURE_LIVE_VOICE_INTEGRATED_P1;
+  const productVoiceControlRef = useRef<ProductLiveVoiceSurfaceControl | null>(null);
+  const [productVoiceState, setProductVoiceState] = useState<Readonly<ProductLiveVoiceSurfaceState> | null>(null);
+  const addMessageIfAbsent = useChatStore((state) => state.addMessageIfAbsent);
+  const settleNativeVoiceMessages = useChatStore((state) => state.settleNativeVoiceMessages);
+  const adoptProductVoiceState = useCallback((next: Readonly<ProductLiveVoiceSurfaceState>) => {
+    setProductVoiceState(previous => {
+      if (
+        previous !== null &&
+        previous.available === next.available &&
+        previous.p1_status === next.p1_status &&
+        previous.p1_reason === next.p1_reason &&
+        previous.p1_fault_tail_playing === next.p1_fault_tail_playing &&
+        previous.interruption_degraded_reason === next.interruption_degraded_reason &&
+        previous.input === next.input &&
+        previous.output === next.output &&
+        previous.text_status === next.text_status &&
+        previous.text_reason === next.text_reason &&
+        previous.replacement_recognition_failed === next.replacement_recognition_failed &&
+        previous.confirmation_phase === next.confirmation_phase &&
+        previous.operation_retained === next.operation_retained &&
+        previous.task_progress_task_id === next.task_progress_task_id &&
+        previous.task_progress_state === next.task_progress_state &&
+        previous.task_progress_delivery_mode === next.task_progress_delivery_mode &&
+        previous.task_progress_event === next.task_progress_event &&
+        previous.task_progress_node_ref === next.task_progress_node_ref &&
+        previous.task_unread_delivery === next.task_unread_delivery &&
+        previous.terminal_announcement_state === next.terminal_announcement_state &&
+        previous.recovery_diagnostic === next.recovery_diagnostic &&
+        previous.terminal_notification === next.terminal_notification &&
+        previous.adjustment_notification === next.adjustment_notification &&
+        previous.native_work === next.native_work &&
+        previous.task_experience === next.task_experience
+      ) {
+        return previous;
+      }
+      return next;
+    });
+  }, []);
+  const getActiveProductVoiceSessionId = useCallback(
+    () => useChatStore.getState().activeSessionId,
+    [],
+  );
+  const {
+    active: productVoiceActive,
+    start: startProductVoiceWithBrowserOwnership,
+    stop: stopProductVoiceAndReleaseBrowserOwnership,
+  } = useProductVoiceBrowserOwnership({
+    activeSessionId,
+    controlRef: productVoiceControlRef,
+    getActiveSessionId: getActiveProductVoiceSessionId,
+  });
+  const canPrepareVoiceSession =
+    formalProductVoiceEnabled && isConnected && mode === 'agent' && !liveVoiceInteractionBlocked && Boolean(onPrepareLiveVoiceSession);
+  const voiceSessionStart = useProductVoiceSessionStart({
+    sessionId: activeSessionId,
+    available: Boolean(productVoiceState?.available),
+    canPrepare: canPrepareVoiceSession,
+    prepare: onPrepareLiveVoiceSession,
+    start: startProductVoiceWithBrowserOwnership,
+  });
+  const l0OrdinaryChromeVoiceControl = useMemo(
+    () => formalProductVoiceEnabled
+      ? Object.freeze({
+          start: startProductVoiceWithBrowserOwnership,
+          stop: stopProductVoiceAndReleaseBrowserOwnership,
+          setL0CaptureStreamFactory: (factory: BrowserAudioCaptureStreamFactory | null) => {
+            const control = productVoiceControlRef.current;
+            if (control === null) throw new Error('formal Live Voice surface is unavailable');
+            control.setL0CaptureStreamFactory(factory);
+          },
+        })
+      : null,
+    [
+      formalProductVoiceEnabled,
+      startProductVoiceWithBrowserOwnership,
+      stopProductVoiceAndReleaseBrowserOwnership,
+    ],
+  );
+  useEffect(() => {
+    setProductVoiceState(null);
+  }, [activeSessionId]);
+
+  const { status: formalVoiceVisualState, label_key: formalActivityLabel } = formalProductVoiceActivity(productVoiceState);
+  const inputAvailableAfterReplyFailure = productVoiceInputAvailableAfterReplyFailure(productVoiceState);
+  const recoveryDiagnostic = productVoiceState?.recovery_diagnostic ?? null;
+  const formalStatusLabel = productVoiceState?.replacement_recognition_failed
+    ? t('liveVoice.formal.replacementRecognitionFailed')
+    : recoveryDiagnostic
+    ? t(formalActivityLabel)
+    : productVoiceState?.interruption_degraded_reason
+      ? t('liveVoice.formal.interruptionDegraded', {
+          reason: productVoiceState.interruption_degraded_reason,
+        })
+    : t(formalActivityLabel);
+  const formalVoiceErrorReason =
+    recoveryDiagnostic?.disposition === 'terminal'
+      ? recoveryDiagnostic.reason
+      : productVoiceState?.text_status === 'failed' && productVoiceState.text_reason
+      ? productVoiceState.text_reason
+      : productVoiceState?.p1_reason ?? productVoiceState?.text_reason ?? null;
+  const formalVoiceErrorPhase =
+    recoveryDiagnostic?.disposition === 'terminal'
+      ? recoveryDiagnostic.seam
+      : productVoiceState?.text_status === 'failed' && productVoiceState.text_reason
+        ? 'text'
+        : productVoiceState?.p1_status;
+  const formalLiveVoiceDemoProps: LiveVoiceDemoBarProps = {
+    active: productVoiceActive,
+    available: !voiceSessionStart.pending && (Boolean(productVoiceState?.available) || (activeSessionId === 'new' && canPrepareVoiceSession)),
+    launchPending: voiceSessionStart.pending,
+    launchError: voiceSessionStart.failed ? t(voiceSessionStart.projectRequired ? 'liveVoice.sessionProjectRequired' : 'liveVoice.sessionStartFailed') : '',
+    status: formalVoiceVisualState,
+    interimTranscript: '',
+    committedTranscript: productVoiceState?.input || '',
+    errorMessage:
+      recoveryDiagnostic?.disposition === 'terminal' || formalVoiceVisualState === 'error'
+        ? t(inputAvailableAfterReplyFailure ? 'liveVoice.formal.replyFailedListening' : 'liveVoice.formal.recoveryFailed')
+        : '',
+    errorDetails: formalVoiceErrorReason
+      ? t('liveVoice.formal.recoveryFailedWithReason', { phase: formalVoiceErrorPhase, reason: formalVoiceErrorReason }) : '',
+    statusLabel: formalStatusLabel,
+    handsFree: true,
+    onEnable: () => {
+      void voiceSessionStart.start();
+    },
+    onExit: () => {
+      voiceSessionStart.cancel();
+      void stopProductVoiceAndReleaseBrowserOwnership();
+    },
+    onPrimaryAction: () => {
+      // Hands-free mode has no primary control after the first enable click.
+    },
+    onRetryListening: () => {
+      void startProductVoiceWithBrowserOwnership();
+    },
+    onInterruptAndSpeak: () => {
+      // Formal playout already owns a concurrent successor capture. Stopping
+      // the exact response leaves that capture authoritative for the utterance
+      // the user is about to speak.
+      void productVoiceControlRef.current?.stop();
+    },
+    onStopPlayback: () => {
+      // Stop only the exact foreground response. Live Voice stays enabled and
+      // the formal route continues with its existing successor capture.
+      void productVoiceControlRef.current?.stop();
+    },
+  };
+  const liveVoiceDemoBar = formalProductVoiceEnabled ? (
+    <FormalProductLiveVoiceDemoBar
+      {...formalLiveVoiceDemoProps}
+      surfaceState={productVoiceState}
+    />
+  ) : (
+    <LiveVoiceDemoBar {...legacyLiveVoiceDemoProps} />
+  );
+
   return (
     <div
       ref={panelShellRef}
@@ -1693,6 +1894,7 @@ export const ChatPanel = React.memo(function ChatPanel({
                 <AgentActivityCard isProcessing={isProcessing} onSendTask={handleSendMessage} />
                 <InterruptResultBubble />
                 <InteractionSlot onSubmit={onUserAnswer} />
+                {FEATURE_LIVE_VOICE_DEMO && liveVoiceDemoBar}
                 <InputArea
                   ref={inputAreaRef}
                   onSubmit={handleSendMessage}
@@ -1724,6 +1926,34 @@ export const ChatPanel = React.memo(function ChatPanel({
         </div>
       </div>
 
+      {FEATURE_LIVE_VOICE_INTEGRATED_WEB && (
+        <LiveVoiceIntegratedRoutePanel
+          activeSessionId={activeSessionId}
+          selectedAgentModelName={selectedAgentModelName}
+          isConnected={isConnected}
+          agentRouteAvailable={mode === 'agent' && !liveVoiceInteractionBlocked}
+          productVoiceControlRef={formalProductVoiceEnabled ? productVoiceControlRef : undefined}
+          onProductVoiceStateChange={formalProductVoiceEnabled ? adoptProductVoiceState : undefined}
+          onProductVoiceMessage={
+            formalProductVoiceEnabled
+              ? event => {
+                  if (event.session_id !== activeSessionId) return;
+                  addMessageIfAbsent(event.session_id, { ...event.message });
+                }
+              : undefined
+          }
+          onNativeVoiceDisplayEnded={formalProductVoiceEnabled ? settleNativeVoiceMessages : undefined}
+        />
+      )}
+
+      {formalProductVoiceEnabled && (
+        <L0OrdinaryChromeBatchPanel
+          control={l0OrdinaryChromeVoiceControl}
+          state={productVoiceState}
+          connected={isConnected}
+        />
+      )}
+
       {hasConversation && (
         <div className="chat-compose" data-testid="chat-panel-compose">
           <ActiveTeamGroupEntry isProcessing={isProcessing} teamAreaExpanded={teamAreaExpanded} />
@@ -1738,6 +1968,7 @@ export const ChatPanel = React.memo(function ChatPanel({
               onClearGoal={onClearGoal}
             />
           )}
+          {FEATURE_LIVE_VOICE_DEMO && liveVoiceDemoBar}
           <InputArea
             ref={inputAreaRef}
             onSubmit={handleSendMessage}

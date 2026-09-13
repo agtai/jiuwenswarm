@@ -43,10 +43,67 @@ from jiuwenswarm.common.ws_diagnostics import (
 
 logger = logging.getLogger(__name__)
 
+
+class _MediaSafeTransportLogFilter(logging.Filter):
+    """Keep websocket frame representations out of every configured sink."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno >= logging.INFO
+
+
+_websocket_transport_logger = logging.getLogger(
+    "jiuwenswarm.gateway.web.websocket_transport"
+)
+_websocket_transport_logger.addFilter(_MediaSafeTransportLogFilter())
+
 _WEB_CONNECTION_USER_ID_ATTR = "_web_connection_user_id"
 
-_HANDLER_BEFORE_CALLBACK_METHODS = frozenset({ReqMethod.CHAT_SEND.value})
-_LOCAL_ONLY_METHODS: frozenset[str] = frozenset()
+# The dedicated route accepts only the fixed path and carries its one-use
+# ticket in the first frame. Ticket-shaped historical paths have no route
+# authority, but their suffix remains redacted if a hostile request supplies
+# credential-like bytes there.
+_DEDICATED_MEDIA_ROUTE_PATH = "/ws/live-voice/media"
+_DEDICATED_MEDIA_REDACTION_PREFIX = "/ws/live-voice/media/"
+
+
+def _is_dedicated_media_route(request_path: str) -> bool:
+    return request_path == _DEDICATED_MEDIA_ROUTE_PATH
+
+
+def _is_ticket_like_media_path_for_redaction(request_path: str) -> bool:
+    return request_path.startswith(_DEDICATED_MEDIA_REDACTION_PREFIX)
+
+
+def _redacted_websocket_path(request_path: str) -> str:
+    return (
+        "/ws/live-voice/media/<redacted>"
+        if _is_ticket_like_media_path_for_redaction(request_path)
+        else request_path
+    )
+
+
+_LOCAL_HANDLER_ONLY_METHODS = frozenset(
+    {
+        "live_voice.speech.capabilities",
+        "live_voice.speech.recognize_batch",
+        "live_voice.speech.recognize_streaming_result",
+        "live_voice.speech.synthesize_batch",
+        "live_voice.speech.task_preparation_capabilities",
+        "live_voice.speech.task_preparation_prepare",
+        "live_voice.speech.task_preparation_claim",
+        "live_voice.speech.task_preparation_cancel",
+        "live_voice.speech.cancel",
+        "live_voice.media.activate",
+        "live_voice.media.close",
+        "live_voice.media.playout_receipt",
+    "live_voice.media.playout_stop",
+    "live_voice.media.native_text",
+    }
+)
+_HANDLER_BEFORE_CALLBACK_METHODS = frozenset(
+    {ReqMethod.CHAT_SEND.value, *_LOCAL_HANDLER_ONLY_METHODS}
+)
+_LOCAL_ONLY_METHODS: frozenset[str] = _LOCAL_HANDLER_ONLY_METHODS
 
 _STREAM_COALESCE_EVENT_TYPES = frozenset({"chat.delta", "chat.reasoning"})
 _STREAM_COALESCE_MAX_FRAMES = 32
@@ -90,6 +147,8 @@ _WEB_FULL_PAYLOAD_EVENT_TYPES = frozenset(
         "plan.mode_exited",
         "runtime.accepted",
         "execution.error",
+        "proactive_recommendation",
+        "live_voice.task.progress",
     }
 )
 
@@ -169,6 +228,18 @@ class WebChannel(BaseWsChannel):
         self._trajectory_update_listener = self._on_trajectory_updates
         self._trajectory_pending_updates: dict[tuple[str, str], Any] = {}
         self._trajectory_send_task: asyncio.Task[None] | None = None
+        # Integration-Owner registration for the dedicated Live Voice route.
+        # The package media leaf never mutates this attribute itself.
+        self.live_voice_media_registry: Any = None
+        # Claim reachability and lifecycle ownership are deliberately
+        # separate: an injected service remains claimable but is never closed
+        # by this channel.
+        self.live_voice_speech_service: Any = None
+        self.live_voice_owned_speech_service: Any = None
+        self.live_voice_streaming_speech_owner: Any = None
+        self.live_voice_streaming_synthesis_owner: Any = None
+        self.live_voice_interaction_engine: str = "cascade"
+        self.live_voice_native_runtime_client: Any = None
 
     @staticmethod
     def _coalescible_stream_frame(
@@ -237,9 +308,8 @@ class WebChannel(BaseWsChannel):
                 trailing.append(None)
                 break
             candidate_parsed = self._coalescible_stream_frame(candidate)
-            if (
-                candidate_parsed is None
-                or not self._same_stream_identity(decoded, candidate_parsed[0])
+            if candidate_parsed is None or not self._same_stream_identity(
+                decoded, candidate_parsed[0]
             ):
                 trailing.append(candidate)
                 break
@@ -263,6 +333,41 @@ class WebChannel(BaseWsChannel):
         for ws_list in self._clients_by_key.values():
             result.update(ws_list)
         return result
+
+    async def _compensate_native_activation(
+        self,
+        payload: dict[str, object],
+        *,
+        msg: Message,
+        connection_id: str,
+    ) -> None:
+        native_client = self.live_voice_native_runtime_client
+        abort = getattr(native_client, "abort_activation_response", None)
+        if not callable(abort) or not connection_id:
+            logger.error(
+                "Live Voice Native activation compensation has no exact owner"
+            )
+            return
+        metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
+        request_id = (
+            "native-activation-aborted:"
+            + uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"{msg.id}\0{msg.session_id}\0{connection_id}",
+            ).hex
+        )
+        try:
+            await abort(
+                payload,
+                routed_session_id=msg.session_id,
+                connection_id=connection_id,
+                request_method=str(metadata.get("method") or ""),
+                request_id=request_id,
+            )
+        except Exception:
+            logger.exception(
+                "Live Voice Native activation compensation remains pending"
+            )
 
     # ── 扩展注册 API ──────────────────────────────────────
 
@@ -292,7 +397,8 @@ class WebChannel(BaseWsChannel):
         self._on_message_cb = callback
 
     def wrap_message_callback(
-        self, wrapper: Callable[[Callable[[Message], Any] | None, Message], Any],
+        self,
+        wrapper: Callable[[Callable[[Message], Any] | None, Message], Any],
     ) -> None:
         """包装现有的消息回调。wrapper 接收 (original_callback, msg) 并返回处理结果。"""
         original = self._on_message_cb
@@ -305,14 +411,14 @@ class WebChannel(BaseWsChannel):
     # ── 帧发送 API（公开给处理器使用）─────────────────────
 
     async def send_response(
-            self,
-            ws: Any,
-            req_id: str,
-            *,
-            ok: bool,
-            payload: dict[str, Any] | None = None,
-            error: str | None = None,
-            code: str | None = None,
+        self,
+        ws: Any,
+        req_id: str,
+        *,
+        ok: bool,
+        payload: dict[str, Any] | None = None,
+        error: str | None = None,
+        code: str | None = None,
     ) -> None:
         """向指定客户端发送 ``res`` 帧."""
         frame: dict[str, Any] = {
@@ -341,13 +447,13 @@ class WebChannel(BaseWsChannel):
             raise
 
     async def send_event(
-            self,
-            ws: Any,
-            event: str,
-            payload: dict[str, Any],
-            *,
-            seq: int | None = None,
-            stream_id: str | None = None,
+        self,
+        ws: Any,
+        event: str,
+        payload: dict[str, Any],
+        *,
+        seq: int | None = None,
+        stream_id: str | None = None,
     ) -> None:
         """向指定客户端发送 ``event`` 帧."""
         frame: dict[str, Any] = {"type": "event", "event": event, "payload": payload}
@@ -377,9 +483,8 @@ class WebChannel(BaseWsChannel):
 
     @staticmethod
     def _extract_ws_header_user_id(ws: Any) -> str | None:
-        headers = (
-            getattr(getattr(ws, "request", None), "headers", None)
-            or getattr(ws, "request_headers", None)
+        headers = getattr(getattr(ws, "request", None), "headers", None) or getattr(
+            ws, "request_headers", None
         )
         raw = get_header_value(headers, "X-User-Id")
         if raw is None:
@@ -388,8 +493,12 @@ class WebChannel(BaseWsChannel):
         return text or None
 
     @classmethod
-    def _resolve_connection_user_id(cls, flat_query: dict[str, str], ws: Any) -> str | None:
-        connection_user_id = cls._extract_query_user_id(flat_query) or cls._extract_ws_header_user_id(ws)
+    def _resolve_connection_user_id(
+        cls, flat_query: dict[str, str], ws: Any
+    ) -> str | None:
+        connection_user_id = cls._extract_query_user_id(
+            flat_query
+        ) or cls._extract_ws_header_user_id(ws)
         setattr(ws, _WEB_CONNECTION_USER_ID_ATTR, connection_user_id)
         return connection_user_id
 
@@ -438,8 +547,8 @@ class WebChannel(BaseWsChannel):
         return connection_user_id, routing_key_user_id
 
     async def _invoke_method_handler(
-            self,
-            invocation: _MethodHandlerInvocation,
+        self,
+        invocation: _MethodHandlerInvocation,
     ) -> bool:
         kwargs: dict[str, Any] = {}
         if "user_id" in inspect.signature(invocation.handler).parameters:
@@ -484,24 +593,28 @@ class WebChannel(BaseWsChannel):
             )
             try:
                 await self.send_response(
-                    invocation.ws, invocation.req_id, ok=False,
-                    error=f"handler error: {e}", code="INTERNAL_ERROR",
+                    invocation.ws,
+                    invocation.req_id,
+                    ok=False,
+                    error=f"handler error: {e}",
+                    code="INTERNAL_ERROR",
                 )
             except Exception as send_err:
                 logger.warning(
                     "WebChannel failed to send handler error response ({}): {}",
-                    invocation.method, send_err,
+                    invocation.method,
+                    send_err,
                 )
             return False
 
     async def broadcast_event(
-            self,
-            event: str,
-            payload: dict[str, Any],
-            *,
-            seq: int | None = None,
-            stream_id: str | None = None,
-            exclude_ws: Any = None,
+        self,
+        event: str,
+        payload: dict[str, Any],
+        *,
+        seq: int | None = None,
+        stream_id: str | None = None,
+        exclude_ws: Any = None,
     ) -> None:
         """向所有已连接客户端广播 ``event`` 帧.
 
@@ -669,6 +782,8 @@ class WebChannel(BaseWsChannel):
             ping_interval=20,
             ping_timeout=60,
             max_size=WEB_WS_MAX_MESSAGE_BYTES,
+            subprotocols=["live-voice.media.v1"],
+            logger=_websocket_transport_logger,
         )
         self._running = True
         logger.info(
@@ -684,21 +799,159 @@ class WebChannel(BaseWsChannel):
         self._running = False
         self._unregister_trajectory_listener()
 
+        shutdown_failure: BaseException | None = None
+
+        def retain_failure(error: BaseException, message: str) -> None:
+            nonlocal shutdown_failure
+            if shutdown_failure is None:
+                shutdown_failure = error
+            logger.warning(message)
+
+        streaming_owner = self.live_voice_streaming_synthesis_owner
+        if streaming_owner is not None:
+            try:
+                await streaming_owner.close()
+            except BaseException as error:
+                retain_failure(
+                    error,
+                    "WebChannel live voice streaming TTS owner cleanup failed",
+                )
+            finally:
+                self.live_voice_streaming_synthesis_owner = None
+
+        streaming_speech_owner = self.live_voice_streaming_speech_owner
+        if streaming_speech_owner is not None:
+            try:
+                await streaming_speech_owner.close()
+            except BaseException as error:
+                retain_failure(
+                    error,
+                    "WebChannel live voice streaming STT owner cleanup failed",
+                )
+            else:
+                self.live_voice_streaming_speech_owner = None
+
+        speech_service = self.live_voice_owned_speech_service
+        if speech_service is not None:
+            try:
+                await speech_service.close()
+            except BaseException as error:
+                retain_failure(
+                    error,
+                    "WebChannel live voice batch Speech owner cleanup failed",
+                )
+            else:
+                self.live_voice_owned_speech_service = None
+                if self.live_voice_speech_service is speech_service:
+                    self.live_voice_speech_service = None
+        elif self.live_voice_speech_service is not None:
+            # Drop only the channel's claim reference. The injected service's
+            # external owner retains its lifetime authority.
+            self.live_voice_speech_service = None
+
+        media_registry = self.live_voice_media_registry
+        if media_registry is not None:
+            close_streaming_observability = getattr(
+                media_registry, "close_streaming_observability", None
+            )
+            if callable(close_streaming_observability):
+                try:
+                    close_streaming_observability()
+                except BaseException as error:
+                    retain_failure(
+                        error,
+                        "WebChannel live voice streaming STT diagnostic cleanup failed",
+                    )
+            close_diagnostics = getattr(
+                media_registry, "close_streaming_diagnostics", None
+            )
+            try:
+                cleanup_complete = (
+                    close_diagnostics() if callable(close_diagnostics) else True
+                )
+            except BaseException as error:
+                retain_failure(
+                    error,
+                    "WebChannel live voice streaming TTS diagnostic cleanup failed",
+                )
+            else:
+                if cleanup_complete is not True:
+                    logger.warning(
+                        "WebChannel live voice streaming TTS diagnostic cleanup "
+                        "incomplete"
+                    )
+
         all_clients = list(self.clients)
-        close_tasks = [client.close(code=1001, reason="server shutdown") for client in all_clients]
+        close_tasks: list[Awaitable[object]] = []
+        for client in all_clients:
+            try:
+                close_result = client.close(code=1001, reason="server shutdown")
+                if not inspect.isawaitable(close_result):
+                    raise TypeError("WebSocket close returned no awaitable")
+                close_tasks.append(close_result)
+            except BaseException as error:
+                retain_failure(error, "WebChannel client cleanup failed")
         if close_tasks:
-            await asyncio.gather(*close_tasks, return_exceptions=True)
+            try:
+                close_results = await asyncio.gather(
+                    *close_tasks, return_exceptions=True
+                )
+            except BaseException as error:
+                retain_failure(error, "WebChannel client cleanup failed")
+            else:
+                for close_result in close_results:
+                    if isinstance(close_result, BaseException):
+                        retain_failure(
+                            close_result,
+                            "WebChannel client cleanup failed",
+                        )
+        if media_registry is not None:
+            close_media_leaf_cleanup = getattr(
+                media_registry, "close_media_leaf_cleanup", None
+            )
+            if callable(close_media_leaf_cleanup):
+                try:
+                    media_cleanup_complete = await close_media_leaf_cleanup()
+                except BaseException as error:
+                    retain_failure(
+                        error,
+                        "WebChannel live voice media task cleanup failed",
+                    )
+                else:
+                    if media_cleanup_complete is not True:
+                        retain_failure(
+                            RuntimeError("live voice media task cleanup is incomplete"),
+                            "WebChannel live voice media task cleanup incomplete",
+                        )
         self._clients_by_key.clear()
 
         if self._uvicorn_server is not None:
             self._uvicorn_server.should_exit = True
             self._uvicorn_server = None
-        if self._server is not None:
-            self._server.close()
-            await self._server.wait_closed()
-            self._server = None
+        server = self._server
+        if server is not None:
+            server_close_complete = True
+            try:
+                server.close()
+            except BaseException as error:
+                server_close_complete = False
+                retain_failure(error, "WebChannel server close failed")
+            try:
+                await server.wait_closed()
+            except BaseException as error:
+                server_close_complete = False
+                retain_failure(error, "WebChannel server wait-closed failed")
+            if server_close_complete:
+                self._server = None
         # 兜底清理未走正常断连路径的 writer 协程（正常断连已由 unregister_ws 清理）
-        await self._shutdown_all_writers()
+        try:
+            await self._shutdown_all_writers()
+        except BaseException as error:
+            retain_failure(error, "WebChannel writer cleanup failed")
+
+        if shutdown_failure is not None:
+            logger.warning("WebChannel cleanup incomplete")
+            raise shutdown_failure
         logger.info("WebChannel 已停止")
 
     def _unregister_trajectory_listener(self) -> None:
@@ -797,11 +1050,23 @@ class WebChannel(BaseWsChannel):
         """在握手阶段执行 Origin 校验，兼容 legacy/new websockets APIs。"""
         path, request_headers = extract_handshake_request(args)
         origin = get_header_value(request_headers, "Origin")
+        parsed_path = urlparse(path)
+        handshake_path = parsed_path.path or path
+        is_dedicated_media_path = _is_dedicated_media_route(handshake_path)
+        logged_path = _redacted_websocket_path(handshake_path)
+        if is_dedicated_media_path and (
+            origin is None or not is_allowed_browser_origin(origin)
+        ):
+            logger.warning(
+                "WebChannel dedicated media handshake rejected path=%s reason=origin_not_allowed",
+                logged_path,
+            )
+            return forbidden_origin_response(args)
         enable_origin_check = is_origin_check_enabled()
         if not enable_origin_check:
             logger.info(
                 "WebChannel 握手检查 path=%s origin=%s enable_origin_check=%s allowed=%s",
-                path,
+                logged_path,
                 origin,
                 enable_origin_check,
                 True,
@@ -811,7 +1076,7 @@ class WebChannel(BaseWsChannel):
         allowed = is_allowed_browser_origin(origin)
         logger.info(
             "WebChannel 握手检查 path=%s origin=%s enable_origin_check=%s allowed=%s",
-            path,
+            logged_path,
             origin,
             enable_origin_check,
             allowed,
@@ -821,7 +1086,7 @@ class WebChannel(BaseWsChannel):
 
         logger.warning(
             "WebChannel 握手拒绝 path=%s origin=%s reason=origin_not_allowed",
-            path,
+            logged_path,
             origin,
         )
         return forbidden_origin_response(args)
@@ -882,7 +1147,11 @@ class WebChannel(BaseWsChannel):
                 return cls._attach_automation_metadata(payload, msg)
 
             content = str(msg.payload.get("content", "") or "")
-            if not content and not getattr(msg, "ok", True) and msg.payload.get("error"):
+            if (
+                not content
+                and not getattr(msg, "ok", True)
+                and msg.payload.get("error")
+            ):
                 content = str(msg.payload.get("error", ""))
             payload = {
                 "session_id": msg.session_id,
@@ -940,12 +1209,18 @@ class WebChannel(BaseWsChannel):
         """
         _pl = getattr(msg, "payload", None) or {}
         _et = _pl.get("event_type", "") if isinstance(_pl, dict) else ""
-        _has_fanout = bool((getattr(msg, "metadata", None) or {}).get("fan_out_targets"))
+        _has_fanout = bool(
+            (getattr(msg, "metadata", None) or {}).get("fan_out_targets")
+        )
         logger.debug(
             "[WebChannel] send() called: id=%s event_type=%s payload_et=%s has_fanout=%s"
             " has_routing_target=%s client_count=%s",
-            getattr(msg, "id", ""), getattr(msg, "event_type", None), _et,
-            _has_fanout, routing_target is not None, len(self.clients),
+            getattr(msg, "id", ""),
+            getattr(msg, "event_type", None),
+            _et,
+            _has_fanout,
+            routing_target is not None,
+            len(self.clients),
         )
         # Maintain the session busy state before any routing branch can return.
         self._track_session_busy(msg)
@@ -985,7 +1260,8 @@ class WebChannel(BaseWsChannel):
                 self._enqueue_send(w, frame)
             logger.debug(
                 "[WebChannel] cron push broadcast to %d client(s) id=%s run_id=%s",
-                len(clients), getattr(msg, "id", ""),
+                len(clients),
+                getattr(msg, "id", ""),
                 (msg.payload.get("cron") or {}).get("run_id", ""),
             )
             return
@@ -1006,7 +1282,8 @@ class WebChannel(BaseWsChannel):
                 self._enqueue_send(w, frame)
             logger.debug(
                 "[WebChannel] proactive_notification broadcast to %d client(s) id=%s",
-                len(clients), getattr(msg, "id", ""),
+                len(clients),
+                getattr(msg, "id", ""),
             )
             return
 
@@ -1027,20 +1304,28 @@ class WebChannel(BaseWsChannel):
             if not msg.ok:
                 # Prefer explicit error; fall back to message (e.g. command.goal
                 # unary failures put the human-readable text in payload.message).
-                error_text = res_payload.get("error") or res_payload.get("message")
+                error_value = res_payload.get("error")
+                error_detail = error_value if isinstance(error_value, dict) else {}
+                error_text = (
+                    error_detail.get("message")
+                    if error_detail
+                    else error_value or res_payload.get("message")
+                )
                 if isinstance(error_text, str) and error_text:
                     frame["error"] = error_text
-                code_text = res_payload.get("code")
+                code_text = error_detail.get("code") or res_payload.get("code")
                 if isinstance(code_text, str) and code_text:
                     frame["code"] = code_text
 
             ws_set: set[Any] = set()
             metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
             request_ws_id = str(metadata.get("ws_id") or "").strip()
+            exact_request_ws: Any | None = None
             if request_ws_id:
                 ws = self._ws_by_id.get(request_ws_id)
                 if ws is not None and not getattr(ws, "closed", False):
                     ws_set.add(ws)
+                    exact_request_ws = ws
 
             if not ws_set and routing_target is not None:
                 delivery = routing_target.delivery
@@ -1064,7 +1349,18 @@ class WebChannel(BaseWsChannel):
                             if not getattr(w, "closed", False):
                                 ws_set.add(w)
 
+            media_registry = self.live_voice_media_registry
+            private_native_descriptor = (
+                isinstance(res_payload.get("result"), dict)
+                and "_native_gateway" in res_payload["result"]
+            )
             if not ws_set:
+                if private_native_descriptor:
+                    await self._compensate_native_activation(
+                        res_payload,
+                        msg=msg,
+                        connection_id=request_ws_id,
+                    )
                 logger.debug(
                     "[WebChannel] response route miss: ws_id=%s session_id=%s id=%s",
                     request_ws_id,
@@ -1072,6 +1368,119 @@ class WebChannel(BaseWsChannel):
                     getattr(msg, "id", ""),
                 )
                 return
+
+            # Media/Speech authority is minted only from the exact response
+            # returned to the still-live physical request socket.  Session or
+            # routing-key fallbacks are delivery conveniences, never authority.
+            if private_native_descriptor and (
+                exact_request_ws is None or ws_set != {exact_request_ws}
+            ):
+                await self._compensate_native_activation(
+                    res_payload,
+                    msg=msg,
+                    connection_id=request_ws_id,
+                )
+                logger.error(
+                    "Live Voice Native activation response lacked exact socket authority"
+                )
+                return
+            if exact_request_ws is not None and ws_set == {exact_request_ws}:
+                native_client = self.live_voice_native_runtime_client
+                private_activation_payload = res_payload
+                try:
+                    if native_client is not None:
+                        res_payload = native_client.observe_activation_response(
+                            res_payload,
+                            routed_session_id=msg.session_id,
+                            connection_id=request_ws_id,
+                            request_method=str(metadata.get("method") or ""),
+                        )
+                    elif private_native_descriptor:
+                        raise RuntimeError(
+                            "Native activation has no Gateway capability owner"
+                        )
+                except Exception:
+                    await self._compensate_native_activation(
+                        private_activation_payload,
+                        msg=msg,
+                        connection_id=request_ws_id,
+                    )
+                    res_payload = {
+                        "request_id": res_payload.get("request_id", msg.id),
+                        "ok": False,
+                        "result": None,
+                        "error": {
+                            "code": "UNAVAILABLE",
+                            "reason": "NATIVE_GATEWAY_ACTIVATION_INVALID",
+                            "message": "Native activation is unavailable",
+                        },
+                    }
+                    logger.exception(
+                        "Live Voice Native capability observer failed closed"
+                    )
+                frame["payload"] = res_payload
+                if res_payload.get("ok") is False:
+                    frame["ok"] = False
+                    native_error = res_payload.get("error")
+                    if isinstance(native_error, dict):
+                        if isinstance(native_error.get("message"), str):
+                            frame["error"] = native_error["message"]
+                        if isinstance(native_error.get("code"), str):
+                            frame["code"] = native_error["code"]
+                if media_registry is not None and frame["ok"] is True:
+                    try:
+                        media_registry.observe_agent_response(
+                            res_payload,
+                            routed_session_id=msg.session_id,
+                            user_id=msg.user_id,
+                            connection_id=request_ws_id,
+                            request_method=str(metadata.get("method") or ""),
+                        )
+                    except Exception:
+                        activation_for = getattr(native_client, "activation_for", None)
+                        abort_media = getattr(
+                            media_registry,
+                            "abort_native_activation",
+                            None,
+                        )
+                        if callable(activation_for) and callable(abort_media):
+                            retained_activation = activation_for(
+                                session_id=msg.session_id,
+                                interaction_id=(
+                                    private_activation_payload.get("result", {}).get(
+                                        "interaction_id"
+                                    )
+                                    if isinstance(
+                                        private_activation_payload.get("result"), dict
+                                    )
+                                    else ""
+                                ),
+                                connection_id=request_ws_id,
+                            )
+                            if retained_activation is not None:
+                                abort_media(retained_activation)
+                        await self._compensate_native_activation(
+                            private_activation_payload,
+                            msg=msg,
+                            connection_id=request_ws_id,
+                        )
+                        res_payload = {
+                            "request_id": res_payload.get("request_id", msg.id),
+                            "ok": False,
+                            "result": None,
+                            "error": {
+                                "code": "UNAVAILABLE",
+                                "reason": "NATIVE_GATEWAY_ACTIVATION_INVALID",
+                                "message": "Native activation is unavailable",
+                            },
+                        }
+                        frame["payload"] = res_payload
+                        frame["ok"] = False
+                        frame["error"] = "Native activation is unavailable"
+                        frame["code"] = "UNAVAILABLE"
+                        logger.exception(
+                            "Live Voice media authority observer failed closed"
+                        )
             await self._broadcast_to(frame, ws_set)
             return
 
@@ -1110,7 +1519,8 @@ class WebChannel(BaseWsChannel):
             logger.debug(
                 "[WebChannel] V2 routing miss: looked up %d routing_keys + ws_id=%s,"
                 " ws_set empty — falling back to session_id=%s",
-                len(routing_keys), getattr(delivery, "ws_id", "") if delivery else "",
+                len(routing_keys),
+                getattr(delivery, "ws_id", "") if delivery else "",
                 getattr(msg, "session_id", ""),
             )
 
@@ -1143,7 +1553,9 @@ class WebChannel(BaseWsChannel):
         if not ws_set:
             logger.debug(
                 "[WebChannel] session_id=%s has no connected ws, dropping msg id=%s ws_id=%s",
-                msg.session_id, getattr(msg, "id", ""), request_ws_id,
+                msg.session_id,
+                getattr(msg, "id", ""),
+                request_ws_id,
             )
             return
         all_clients = ws_set
@@ -1163,13 +1575,19 @@ class WebChannel(BaseWsChannel):
         if routing_target is not None:
             logger.info(
                 "[WebChannel] frame: id=%s event=%s intent=%s",
-                getattr(msg, "id", ""), event_name, routing_target.intent,
+                getattr(msg, "id", ""),
+                event_name,
+                routing_target.intent,
             )
         if getattr(msg, "agent_ref", None):
-            payload["agent_ref"] = msg.agent_ref if isinstance(msg.agent_ref, dict) else {
-                "mode": getattr(msg.agent_ref, "mode", ""),
-                "id": getattr(msg.agent_ref, "id", ""),
-            }
+            payload["agent_ref"] = (
+                msg.agent_ref
+                if isinstance(msg.agent_ref, dict)
+                else {
+                    "mode": getattr(msg.agent_ref, "mode", ""),
+                    "id": getattr(msg.agent_ref, "id", ""),
+                }
+            )
 
         frame_data: dict[str, Any] = {
             "type": "event",
@@ -1182,13 +1600,26 @@ class WebChannel(BaseWsChannel):
         # (busy 映射已在 send() 入口 _track_session_busy 统一维护,此处仅补发
         #  合成的 processing_status 事件让前端同步状态)
         if event_name == "chat.interrupt_result":
-            intent = payload.get("intent", "cancel") if isinstance(payload, dict) else "cancel"
+            intent = (
+                payload.get("intent", "cancel")
+                if isinstance(payload, dict)
+                else "cancel"
+            )
             is_processing = intent in ("pause", "supplement", "resume")
-            await self._broadcast_to({
-                "type": "event",
-                "event": "chat.processing_status",
-                "payload": {"session_id": msg.session_id, "is_processing": is_processing},
-            }, all_clients)
+            # 同步更新 busy 映射
+            if msg.session_id:
+                self._session_busy[msg.session_id] = is_processing
+            await self._broadcast_to(
+                {
+                    "type": "event",
+                    "event": "chat.processing_status",
+                    "payload": {
+                        "session_id": msg.session_id,
+                        "is_processing": is_processing,
+                    },
+                },
+                all_clients,
+            )
 
     def _track_session_busy(self, msg: Message) -> None:
         """在所有路由分支之前维护 session busy 映射(供 /ws/git 写操作查询)。
@@ -1237,7 +1668,11 @@ class WebChannel(BaseWsChannel):
         return ChannelMetadata(
             channel_id=self.channel_id,
             source="websocket",
-            extra={"host": self.config.host, "port": self.config.port, "path": self.config.path},
+            extra={
+                "host": self.config.host,
+                "port": self.config.port,
+                "path": self.config.path,
+            },
         )
 
     # ── 内部实现 ──────────────────────────────────────────
@@ -1262,12 +1697,30 @@ class WebChannel(BaseWsChannel):
             await self._handle_git_ws_connection(ws, _flat_query, remote)
             return
 
+        if _is_dedicated_media_route(request_path):
+            registry = self.live_voice_media_registry
+            if registry is None:
+                await ws.close(code=1008, reason="live-voice media route unavailable")
+                return
+            from jiuwenswarm.gateway.live_voice.dedicated_media_registration import (
+                handle_registered_media_socket,
+            )
+
+            await handle_registered_media_socket(registry, ws, request_path)
+            return
+
         if request_path != self.config.path:
-            await ws.close(code=1008, reason=f"unsupported path: {request_path}")
+            await ws.close(
+                code=1008,
+                reason=f"unsupported path: {_redacted_websocket_path(request_path)}",
+            )
             return
 
         connection_user_id, _user_id = self._resolve_ws_identity(
-            ws, _flat_query, remote, route_type="ws",
+            ws,
+            _flat_query,
+            remote,
+            route_type="ws",
         )
 
         # ── V2: 从 query 提取身份字段，构造默认 RoutingKey ──
@@ -1360,7 +1813,11 @@ class WebChannel(BaseWsChannel):
             logger.info(
                 "WebChannel 连接清理完成: %s",
                 format_ws_diagnostics(
-                    {"remote": remote, "path": request_path, "clients": len(self._clients_by_key)},
+                    {
+                        "remote": remote,
+                        "path": request_path,
+                        "clients": len(self._clients_by_key),
+                    },
                     describe_ws_peer(ws),
                 ),
             )
@@ -1407,10 +1864,14 @@ class WebChannel(BaseWsChannel):
         from jiuwenswarm.gateway.channel_manager.web.git_ws_handler import (
             GitDiffWebSocketHandler,
         )
+
         handler = GitDiffWebSocketHandler(self, registry)
 
         connection_user_id, _user_id = self._resolve_ws_identity(
-            ws, flat_query, remote, route_type="git",
+            ws,
+            flat_query,
+            remote,
+            route_type="git",
         )
         _app_id = flat_query.get("app_id", "default")
         # session_id 为传输层占位,不是聊天会话(设计文档 §5.3.7)
@@ -1459,22 +1920,29 @@ class WebChannel(BaseWsChannel):
                 registry.cleanup_ws(ws)
             except Exception as exc:  # noqa: BLE001
                 logger.debug(
-                    "[WebChannel] /ws/git cleanup_ws failed: %s", exc,
+                    "[WebChannel] /ws/git cleanup_ws failed: %s",
+                    exc,
                 )
             logger.info(
                 "[WebChannel] /ws/git 连接清理完成: remote=%s",
                 remote,
             )
 
-    async def _handle_raw_message(self, ws: Any, raw: str, query: dict[str, list[str]]) -> None:
+    async def _handle_raw_message(
+        self, ws: Any, raw: str, query: dict[str, list[str]]
+    ) -> None:
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:
-            await self.send_response(ws, "", ok=False, error="invalid json", code="BAD_REQUEST")
+            await self.send_response(
+                ws, "", ok=False, error="invalid json", code="BAD_REQUEST"
+            )
             return
 
         if not isinstance(data, dict):
-            await self.send_response(ws, "", ok=False, error="invalid request", code="BAD_REQUEST")
+            await self.send_response(
+                ws, "", ok=False, error="invalid request", code="BAD_REQUEST"
+            )
             return
 
         req_type = data.get("type")
@@ -1482,7 +1950,11 @@ class WebChannel(BaseWsChannel):
         method = data.get("method")
         params = data.get("params")
 
-        if req_type != "req" or not isinstance(req_id, str) or not isinstance(method, str):
+        if (
+            req_type != "req"
+            or not isinstance(req_id, str)
+            or not isinstance(method, str)
+        ):
             await self.send_response(
                 ws,
                 req_id if isinstance(req_id, str) else "",
@@ -1501,10 +1973,12 @@ class WebChannel(BaseWsChannel):
         # 仅合成一个临时 id 供后续 Message 构造使用，但【不】参与 register_ws，
         # 保留 ws 上一次的真实 RoutingKey，避免把 ws 从其所属 team session 摘除。
         _explicit_session_id = params.get("session_id")
-        has_explicit_session = (
-            isinstance(_explicit_session_id, str) and bool(_explicit_session_id)
+        has_explicit_session = isinstance(_explicit_session_id, str) and bool(
+            _explicit_session_id
         )
-        session_id = _explicit_session_id if has_explicit_session else self._make_session_id()
+        session_id = (
+            _explicit_session_id if has_explicit_session else self._make_session_id()
+        )
 
         # 追踪 ws → 真实 session_id，用于断连清理/日志。
         # 与 register_ws 一致：仅显式 session 入集；临时 id 只供 Message 构造，避免膨胀。
@@ -1531,7 +2005,9 @@ class WebChannel(BaseWsChannel):
         req_user_id = self._connection_user_id(ws)
         if has_explicit_session:
             _rk = RoutingKey(
-                user_id=self._routing_key_user_id(req_user_id, getattr(ws, "remote_address", None)),
+                user_id=self._routing_key_user_id(
+                    req_user_id, getattr(ws, "remote_address", None)
+                ),
                 channel_id=self.channel_id,
                 app_id=_app_id,
                 agent_ref=AgentRef(mode=_mode, id=_agent_id),
@@ -1587,10 +2063,17 @@ class WebChannel(BaseWsChannel):
         if method in _HANDLER_BEFORE_CALLBACK_METHODS and handler is not None:
             handler_already_called = await self._invoke_method_handler(
                 _MethodHandlerInvocation(
-                    ws, method, req_id, params, session_id, handler,
+                    ws,
+                    method,
+                    req_id,
+                    params,
+                    session_id,
+                    handler,
                 ),
             )
             if not handler_already_called:
+                return
+            if method in _LOCAL_HANDLER_ONLY_METHODS:
                 return
 
         handled_by_callback = False
@@ -1611,13 +2094,21 @@ class WebChannel(BaseWsChannel):
         if handler is not None:
             await self._invoke_method_handler(
                 _MethodHandlerInvocation(
-                    ws, method, req_id, params, session_id, handler,
+                    ws,
+                    method,
+                    req_id,
+                    params,
+                    session_id,
+                    handler,
                 ),
             )
         else:
             await self.send_response(
-                ws, req_id, ok=False,
-                error=f"unknown method: {method}", code="METHOD_NOT_FOUND",
+                ws,
+                req_id,
+                ok=False,
+                error=f"unknown method: {method}",
+                code="METHOD_NOT_FOUND",
             )
 
     @staticmethod
@@ -1712,7 +2203,10 @@ class WebChannel(BaseWsChannel):
             if "session_id" not in payload and getattr(msg, "session_id", None):
                 payload["session_id"] = msg.session_id
         elif getattr(msg, "payload", None) is not None:
-            payload = {"session_id": getattr(msg, "session_id", None), "content": str(msg.payload)}
+            payload = {
+                "session_id": getattr(msg, "session_id", None),
+                "content": str(msg.payload),
+            }
         else:
             payload = {"session_id": getattr(msg, "session_id", None), "content": ""}
 
@@ -1720,10 +2214,14 @@ class WebChannel(BaseWsChannel):
 
         agent_ref = getattr(msg, "agent_ref", None)
         if agent_ref:
-            payload["agent_ref"] = agent_ref if isinstance(agent_ref, dict) else {
-                "mode": getattr(agent_ref, "mode", ""),
-                "id": getattr(agent_ref, "id", ""),
-            }
+            payload["agent_ref"] = (
+                agent_ref
+                if isinstance(agent_ref, dict)
+                else {
+                    "mode": getattr(agent_ref, "mode", ""),
+                    "id": getattr(agent_ref, "id", ""),
+                }
+            )
 
         frame: dict[str, Any] = {
             "type": "event",

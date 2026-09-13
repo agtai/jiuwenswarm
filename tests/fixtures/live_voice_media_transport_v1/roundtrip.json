@@ -1,0 +1,39 @@
+{
+  "contract_version": "live-voice.media.v1",
+  "transport_kind": "websocket_binary",
+  "wire_codec": "pcm_f32le",
+  "binding": {
+    "lease_id": "lease-fixture-01",
+    "authority_evidence_id": "authority-fixture-01",
+    "connection_id": "connection-fixture-01",
+    "connection_epoch": 4,
+    "session_id": "session-fixture-01",
+    "media_session_id": "media-session-fixture-01",
+    "interaction_id": "interaction-fixture-01",
+    "track_id": "track-fixture-01",
+    "correlation_id": "correlation-fixture-01",
+    "direction": "uplink",
+    "generation": {
+      "kind": "capture",
+      "id": "capture-fixture-01",
+      "value": 9
+    },
+    "frame_format": {
+      "sample_rate_hz": 8000,
+      "samples_per_channel": 160,
+      "encoding": "pcm_f32",
+      "byte_order": "little",
+      "channel_count": 1,
+      "frame_duration_ms": 20
+    },
+    "playout": null
+  },
+  "frame": {
+    "seq": 0,
+    "sample_cursor": 0,
+    "sample_prefix": [0.0, 0.25, -0.5, 1.0],
+    "trailing_zero_samples": 156
+  },
+  "expected_binary_bytes": 692,
+  "expected_sha256": "57c6ce42ca97c7d00659d90c338b55bb3fd59385f7bbbde99569af75915609a3"
+}

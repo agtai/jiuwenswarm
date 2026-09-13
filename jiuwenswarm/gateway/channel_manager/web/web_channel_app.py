@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 
 _FORBIDDEN_ORIGIN_BODY = "Forbidden: Origin not allowed\n"
 _GIT_WS_PATH = "/ws/git"
+_MEDIA_WS_PATH = "/ws/live-voice/media"
+_MEDIA_SUBPROTOCOL = "live-voice.media.v1"
 
 
 def normalize_web_ws_path(path: str | None) -> str:
@@ -63,13 +65,16 @@ def build_web_channel_app(channel: WebChannel) -> FastAPI:
     mount_application_plugin_http_routes(app, plugin_registry)
 
     main_path = normalize_web_ws_path(channel.config.path)
+    if main_path == _MEDIA_WS_PATH:
+        raise ValueError("WebChannel main path conflicts with live-voice media route")
 
     async def websocket_endpoint(websocket: WebSocket) -> None:
         await _serve_channel_websocket(channel, websocket)
 
     # Honor WEB_PATH / --web-path (same as legacy handle_connection path check).
     app.add_api_websocket_route(main_path, websocket_endpoint)
-    reserved_paths = {main_path, _GIT_WS_PATH}
+    app.add_api_websocket_route(_MEDIA_WS_PATH, websocket_endpoint)
+    reserved_paths = {main_path, _GIT_WS_PATH, _MEDIA_WS_PATH}
     for plugin_id, route in iter_websocket_routes(plugin_registry):
         path = normalize_web_ws_path(route.path)
         if path in reserved_paths:
@@ -131,8 +136,12 @@ async def _serve_channel_websocket(channel: WebChannel, websocket: WebSocket) ->
     if await _reject_disallowed_origin(websocket):
         return
 
+    media = websocket.url.path == _MEDIA_WS_PATH
+    if media and _MEDIA_SUBPROTOCOL not in websocket.scope.get("subprotocols", []):
+        await websocket.close(code=1008, reason="invalid live-voice media route")
+        return
     adapter = StarletteWsAdapter(websocket)
-    await adapter.accept()
+    await adapter.accept(subprotocol=_MEDIA_SUBPROTOCOL if media else None)
     try:
         await channel.handle_connection(adapter, path=adapter.path)
     except Exception:  # noqa: BLE001 — connection-level isolation
@@ -149,7 +158,9 @@ async def _reject_disallowed_origin(websocket: WebSocket) -> bool:
     """Return True when the handshake was rejected (HTTP 403)."""
     enable_origin_check = is_origin_check_enabled()
     origin = get_header_value(websocket.headers, "Origin")
-    if not enable_origin_check:
+    # Media always requires a browser Origin, matching the legacy handshake.
+    media = websocket.url.path == _MEDIA_WS_PATH
+    if not enable_origin_check and not media:
         logger.info(
             "WebChannel 握手检查 path=%s origin=%s enable_origin_check=%s allowed=%s",
             websocket.url.path,
@@ -159,7 +170,7 @@ async def _reject_disallowed_origin(websocket: WebSocket) -> bool:
         )
         return False
 
-    allowed = is_allowed_browser_origin(origin)
+    allowed = is_allowed_browser_origin(origin) and (not media or origin is not None)
     logger.info(
         "WebChannel 握手检查 path=%s origin=%s enable_origin_check=%s allowed=%s",
         websocket.url.path,

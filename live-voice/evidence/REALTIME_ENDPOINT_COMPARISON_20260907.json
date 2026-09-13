@@ -1,0 +1,272 @@
+[
+  {
+    "case": "clear_end",
+    "eagerness": "auto",
+    "model": "gpt-realtime-2",
+    "pcm_sha256": "54ee9cefa7ca97a4538d301090df243fc45e2fa6ec665531dc7e56fe2a991e5c",
+    "duration_ms": 4750.0,
+    "final_segment_start_ms": 0,
+    "business_effects": 0,
+    "negotiated": true,
+    "max_send_lateness_ms": 16.34,
+    "events": [
+      {
+        "type": "input_audio_buffer.speech_started",
+        "received_ms": 303.01,
+        "audio_start_ms": 0
+      },
+      {
+        "type": "input_audio_buffer.speech_stopped",
+        "received_ms": 6190.27,
+        "audio_end_ms": 5160
+      },
+      {
+        "type": "input_audio_buffer.committed",
+        "received_ms": 6190.4
+      }
+    ],
+    "automatic_responses": 0,
+    "commits": 1,
+    "premature_stops": 0,
+    "last_endpoint_after_pcm_end_ms": 1440.27,
+    "closed": true
+  },
+  {
+    "case": "clear_end",
+    "eagerness": "high",
+    "model": "gpt-realtime-2",
+    "pcm_sha256": "54ee9cefa7ca97a4538d301090df243fc45e2fa6ec665531dc7e56fe2a991e5c",
+    "duration_ms": 4750.0,
+    "final_segment_start_ms": 0,
+    "business_effects": 0,
+    "negotiated": true,
+    "max_send_lateness_ms": 15.65,
+    "events": [
+      {
+        "type": "input_audio_buffer.speech_started",
+        "received_ms": 295.11,
+        "audio_start_ms": 0
+      },
+      {
+        "type": "input_audio_buffer.speech_stopped",
+        "received_ms": 5682.26,
+        "audio_end_ms": 5380
+      },
+      {
+        "type": "input_audio_buffer.committed",
+        "received_ms": 5682.39
+      }
+    ],
+    "automatic_responses": 0,
+    "commits": 1,
+    "premature_stops": 0,
+    "last_endpoint_after_pcm_end_ms": 932.26,
+    "closed": true
+  },
+  {
+    "case": "mid_sentence_pause",
+    "eagerness": "auto",
+    "model": "gpt-realtime-2",
+    "pcm_sha256": "49629992ef3eb3f79bc6c3d962bb5b806ba90319b71bd87ea2c9beefc17555a9",
+    "duration_ms": 7850.0,
+    "final_segment_start_ms": 3900.0,
+    "business_effects": 0,
+    "negotiated": true,
+    "max_send_lateness_ms": 19.46,
+    "events": [
+      {
+        "type": "input_audio_buffer.speech_started",
+        "received_ms": 402.56,
+        "audio_start_ms": 0
+      },
+      {
+        "type": "input_audio_buffer.speech_stopped",
+        "received_ms": 8088.45,
+        "audio_end_ms": 7940
+      },
+      {
+        "type": "input_audio_buffer.committed",
+        "received_ms": 8088.52
+      }
+    ],
+    "automatic_responses": 0,
+    "commits": 1,
+    "premature_stops": 0,
+    "last_endpoint_after_pcm_end_ms": 238.45,
+    "closed": true
+  },
+  {
+    "case": "mid_sentence_pause",
+    "eagerness": "high",
+    "model": "gpt-realtime-2",
+    "pcm_sha256": "49629992ef3eb3f79bc6c3d962bb5b806ba90319b71bd87ea2c9beefc17555a9",
+    "duration_ms": 7850.0,
+    "final_segment_start_ms": 3900.0,
+    "business_effects": 0,
+    "negotiated": true,
+    "max_send_lateness_ms": 19.07,
+    "events": [
+      {
+        "type": "input_audio_buffer.speech_started",
+        "received_ms": 401.79,
+        "audio_start_ms": 0
+      },
+      {
+        "type": "input_audio_buffer.speech_stopped",
+        "received_ms": 8071.56,
+        "audio_end_ms": 7920
+      },
+      {
+        "type": "input_audio_buffer.committed",
+        "received_ms": 8071.76
+      }
+    ],
+    "automatic_responses": 0,
+    "commits": 1,
+    "premature_stops": 0,
+    "last_endpoint_after_pcm_end_ms": 221.56,
+    "closed": true
+  },
+  {
+    "case": "hesitation_pause",
+    "eagerness": "auto",
+    "model": "gpt-realtime-2",
+    "pcm_sha256": "5bad83e6c66cc53a2e7392b999f83a14dbd086a9b47ed0d5cbd7601ed07f16c8",
+    "duration_ms": 8450.0,
+    "final_segment_start_ms": 4500.0,
+    "business_effects": 0,
+    "negotiated": true,
+    "max_send_lateness_ms": 20.3,
+    "events": [
+      {
+        "type": "input_audio_buffer.speech_started",
+        "received_ms": 400.73,
+        "audio_start_ms": 0
+      },
+      {
+        "type": "input_audio_buffer.speech_stopped",
+        "received_ms": 8581.74,
+        "audio_end_ms": 8440
+      },
+      {
+        "type": "input_audio_buffer.committed",
+        "received_ms": 8581.84
+      }
+    ],
+    "automatic_responses": 0,
+    "commits": 1,
+    "premature_stops": 0,
+    "last_endpoint_after_pcm_end_ms": 131.74,
+    "closed": true
+  },
+  {
+    "case": "hesitation_pause",
+    "eagerness": "high",
+    "model": "gpt-realtime-2",
+    "pcm_sha256": "5bad83e6c66cc53a2e7392b999f83a14dbd086a9b47ed0d5cbd7601ed07f16c8",
+    "duration_ms": 8450.0,
+    "final_segment_start_ms": 4500.0,
+    "business_effects": 0,
+    "negotiated": true,
+    "max_send_lateness_ms": 16.64,
+    "events": [
+      {
+        "type": "input_audio_buffer.speech_started",
+        "received_ms": 392.25,
+        "audio_start_ms": 0
+      },
+      {
+        "type": "input_audio_buffer.speech_stopped",
+        "received_ms": 8572.89,
+        "audio_end_ms": 8420
+      },
+      {
+        "type": "input_audio_buffer.committed",
+        "received_ms": 8574.45
+      }
+    ],
+    "automatic_responses": 0,
+    "commits": 1,
+    "premature_stops": 0,
+    "last_endpoint_after_pcm_end_ms": 122.89,
+    "closed": true
+  },
+  {
+    "case": "late_supplement",
+    "eagerness": "auto",
+    "model": "gpt-realtime-2",
+    "pcm_sha256": "8cbf79d48a73d2db5d5d46ab4087bd62d7fa20587e520ad0e64c8550b29f808d",
+    "duration_ms": 8700.0,
+    "final_segment_start_ms": 5550.0,
+    "business_effects": 0,
+    "negotiated": true,
+    "max_send_lateness_ms": 25.43,
+    "events": [
+      {
+        "type": "input_audio_buffer.speech_started",
+        "received_ms": 303.06,
+        "audio_start_ms": 0
+      },
+      {
+        "type": "input_audio_buffer.speech_stopped",
+        "received_ms": 9022.12,
+        "audio_end_ms": 8880
+      },
+      {
+        "type": "input_audio_buffer.committed",
+        "received_ms": 9022.73
+      }
+    ],
+    "automatic_responses": 0,
+    "commits": 1,
+    "premature_stops": 0,
+    "last_endpoint_after_pcm_end_ms": 322.12,
+    "closed": true
+  },
+  {
+    "case": "late_supplement",
+    "eagerness": "high",
+    "model": "gpt-realtime-2",
+    "pcm_sha256": "8cbf79d48a73d2db5d5d46ab4087bd62d7fa20587e520ad0e64c8550b29f808d",
+    "duration_ms": 8700.0,
+    "final_segment_start_ms": 5550.0,
+    "business_effects": 0,
+    "negotiated": true,
+    "max_send_lateness_ms": 17.18,
+    "events": [
+      {
+        "type": "input_audio_buffer.speech_started",
+        "received_ms": 298.04,
+        "audio_start_ms": 0
+      },
+      {
+        "type": "input_audio_buffer.speech_stopped",
+        "received_ms": 5693.68,
+        "audio_end_ms": 5220
+      },
+      {
+        "type": "input_audio_buffer.committed",
+        "received_ms": 5693.76
+      },
+      {
+        "type": "input_audio_buffer.speech_started",
+        "received_ms": 5734.78,
+        "audio_start_ms": 5068
+      },
+      {
+        "type": "input_audio_buffer.speech_stopped",
+        "received_ms": 9095.58,
+        "audio_end_ms": 8960
+      },
+      {
+        "type": "input_audio_buffer.committed",
+        "received_ms": 9095.8
+      }
+    ],
+    "automatic_responses": 0,
+    "commits": 2,
+    "premature_stops": 1,
+    "last_endpoint_after_pcm_end_ms": 395.58,
+    "closed": true
+  }
+]

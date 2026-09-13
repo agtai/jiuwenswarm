@@ -22,6 +22,7 @@ class StarletteWsAdapter:
         self._closed = False
         self._close_code = 1006
         self._close_reason = ""
+        self.subprotocol: str | None = None
         # Match websockets: path includes query string when present.
         path = websocket.url.path or ""
         query = websocket.url.query or ""
@@ -63,6 +64,7 @@ class StarletteWsAdapter:
 
     async def accept(self, **kwargs: Any) -> None:
         await self._ws.accept(**kwargs)
+        self.subprotocol = kwargs.get("subprotocol")
 
     async def send(self, data: str | bytes) -> None:
         if self.closed:

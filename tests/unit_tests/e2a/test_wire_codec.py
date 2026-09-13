@@ -5,11 +5,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import asdict
 
 import pytest
 from openjiuwen.core.session.stream import OutputSchema
 
+from jiuwenswarm.common.e2a import wire_codec
 from jiuwenswarm.common.e2a.constants import E2A_WIRE_LEGACY_AGENT_RESPONSE_KEY
 from jiuwenswarm.common.e2a.gateway_normalize import (
     e2a_response_from_agent_chunk,
@@ -54,6 +56,93 @@ def test_roundtrip_unary_error() -> None:
     back = parse_agent_server_wire_unary(wire)
     assert back.ok is False
     assert back.payload == orig.payload
+
+
+@pytest.mark.parametrize("channel", ["web", "live_voice_native_gateway"])
+def test_unary_error_log_exposes_only_stable_code_and_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    channel: str,
+) -> None:
+    records: list[str] = []
+    monkeypatch.setattr(
+        wire_codec.logger,
+        "info",
+        lambda message, *args: records.append(message % args),
+    )
+    secret = "sensitive user message and auth token"
+    orig = AgentResponse(
+        request_id="diagnostic-error",
+        channel_id=channel,
+        ok=False,
+        payload={
+            "request_id": "diagnostic-error",
+            "ok": False,
+            "result": None,
+            "error": {
+                "code": "CONFLICT",
+                "reason": "RESPONSE_ALREADY_TERMINAL",
+                "message": secret,
+            },
+            "auth_token": secret,
+        },
+    )
+
+    encode_agent_response_for_wire(orig, response_id="diagnostic-error")
+
+    diagnostic = next(
+        record for record in records if "response_kind=e2a.error" in record
+    )
+    assert "error_code=CONFLICT" in diagnostic
+    assert "error_reason=RESPONSE_ALREADY_TERMINAL" in diagnostic
+    assert secret not in diagnostic
+    assert "auth_token" not in diagnostic
+
+
+@pytest.mark.parametrize("channel, level", [
+    ("web", logging.INFO), ("live_voice_native_gateway", logging.DEBUG),
+])
+def test_unary_success_transport_log_level_preserves_wire(monkeypatch, channel, level):
+    records = []
+    monkeypatch.setattr(wire_codec.logger, "log", lambda severity, template, *args: records.append((severity, template % args)))
+    response = AgentResponse(request_id="native-log-check", channel_id=channel,
+                             payload={"accepted": True, "content": "PRIVATE_PCM_SENTINEL"})
+    wire = encode_agent_response_for_wire(response, response_id=response.request_id)
+    assert parse_agent_server_wire_unary(wire).payload == response.payload
+    assert len(records) == 1 and records[0][0] == level
+    assert "PRIVATE_PCM_SENTINEL" not in records[0][1]
+
+
+def test_unary_error_log_redacts_unstable_error_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    records: list[str] = []
+    monkeypatch.setattr(
+        wire_codec.logger,
+        "info",
+        lambda message, *args: records.append(message % args),
+    )
+    secret = "unsafe reason with user content"
+    orig = AgentResponse(
+        request_id="unstable-diagnostic-error",
+        channel_id="web",
+        ok=False,
+        payload={
+            "error": {
+                "code": secret,
+                "reason": secret,
+                "message": secret,
+            }
+        },
+    )
+
+    encode_agent_response_for_wire(orig, response_id="unstable-diagnostic-error")
+
+    diagnostic = next(
+        record for record in records if "response_kind=e2a.error" in record
+    )
+    assert "error_code=-" in diagnostic
+    assert "error_reason=-" in diagnostic
+    assert secret not in diagnostic
 
 
 def test_encode_unary_with_nested_output_schema_is_json_serializable() -> None:

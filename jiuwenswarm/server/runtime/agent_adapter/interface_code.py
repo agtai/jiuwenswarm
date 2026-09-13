@@ -26,8 +26,10 @@ from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.harness.factory import apply_deep_agent_parts
+from openjiuwen.core.sys_operation.cwd import init_cwd
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.rails import (
+    ModelAnomalyDetectionRail,
     AgentModeRail,
     CodingMemoryRail as _BaseCodingMemoryRail,
     SysOperationRail,
@@ -133,6 +135,69 @@ class _CodingMemoryToolWorkspace:
         if node_name in {"memory", "coding_memory"}:
             return self._coding_memory_dir
         return None
+BACKGROUND_PROJECT_RESULT_INSTRUCTIONS = (
+    "For this bounded background project task, validate the saved result against "
+    "the original requirements before reporting completion. Preserve every "
+    "unrevised requirement and distinguish mandatory constraints from preferences. "
+    "Resolve the planning time and timezone from the task and its source materials "
+    "before comparing options. When they explicitly specify a scenario/reference "
+    "time or say not to use the machine clock, use that reference; runtime and "
+    "message timestamps do not replace it. Distinguish a data snapshot from a "
+    "planning reference when the materials do not equate them. "
+    "For every recommended option, check all applicable deadlines, resource "
+    "availability and dependencies using the full durations and mandatory buffers "
+    "in the source materials. A small violation is still a violation. Do not "
+    "classify an option as feasible by dropping a buffer or assuming an exception, "
+    "extension, approval or change to an arrangement the user asked to preserve. "
+    "Meeting the highest-priority goal does not waive other unchanged requirements. "
+    "An option violating any such requirement is not a fully feasible solution: "
+    "label it conditional or infeasible consistently in the comparison table, "
+    "summary and recommendation. Do not recommend it as feasible and relegate "
+    "the violation to a risk note, or assume an unavailable dependency has no "
+    "effect on subsequent steps. "
+    "Unknown prerequisites are unverified, and alternatives depending on them must "
+    "be clearly conditional, separate from options that satisfy the requirements. "
+    "If no option meets all mandatory constraints, save that conclusion and the "
+    "specific conflicts; identify which decision or new evidence would be needed "
+    "without making it or claiming success for an infeasible plan. "
+    "If the requested edit section is absent from the named source, or making "
+    "that edit requires changing a condition the user explicitly preserved, "
+    "identify the exact conflict and finish with the unmet requirement. This "
+    "background run cannot ask the user interactively. Do not repeatedly reread "
+    "unchanged files looking for a substitute source, silently switch to another "
+    "version, or claim the requested edit was completed. "
+    "For satisfiable work, reuse source contents already returned in this task's "
+    "context. Once the needed facts are available, write the requested artifact; "
+    "rereading identical source windows does not add evidence or make a long "
+    "report more complete. Read again only for a missing window, a changed file, "
+    "or verification of the output you actually wrote. Build longer documents "
+    "in bounded sections if necessary, retaining the requested path and all "
+    "constraints; do not replace writing with another planning/read cycle. "
+    "After checking the saved output, finish if the requirements are satisfied. "
+    "If a check finds a specific discrepancy, fix that discrepancy and recheck "
+    "the changed part. Repeatedly checking the same unchanged output window "
+    "cannot establish anything new; read a missing remainder instead if needed. "
+    "Use an authorized calculation tool for time offsets and cost totals when "
+    "provided; otherwise cross-check the arithmetic in reverse. Verify the saved "
+    "values against the source durations, units and deadlines. A proposed or "
+    "recommended action has not been performed: even inside a client-facing draft, "
+    "do not claim a booking, rebooking, payment, refund or sent message happened "
+    "unless the materials or an authorized execution receipt establish it. Write "
+    "planned or conditional wording when the action is only proposed. "
+    "Use the exact requested output paths. In prose, quotation marks, backticks "
+    "and book-title marks normally delimit a path and are not filename characters; "
+    "retain them only when the user explicitly requests them as literal characters "
+    "in the filename. Check the actual filenames and contents before finishing. "
+    "Before writing an output, check whether that exact path already exists. "
+    "If the exact output already exists and the request requires preserving "
+    "that file or all existing files, without explicitly authorizing an edit "
+    "of that existing target, those requirements conflict: report it and leave "
+    "the existing file untouched. Do not replace it, silently choose a different "
+    "filename, or treat a newly created Task or a new report path alone as "
+    "permission to overwrite it. An explicit edit of an existing target may "
+    "still proceed while preserving the other files and unchanged requirements. "
+    "This guidance grants no additional tool, file or external-action authority."
+)
 
 
 class CodingMemoryRail(_BaseCodingMemoryRail):
@@ -496,6 +561,22 @@ _CODE_PLAN_ALLOWED_TOOLS: list[str] = [
     "symphony_refresh_graph",
     "symphony_compose_graph",
 ]
+_BACKGROUND_PROJECT_FILE_TOOLS = frozenset(
+    {"read_file", "grep", "list_files", "ls", "glob", "write_file", "edit_file", "declare_file_effect_plan"}
+)
+
+
+def _restrict_background_project_abilities(
+    instance: Any,
+) -> None:
+    """Leave only project file tools on one dedicated task adapter."""
+    manager = getattr(instance, "ability_manager", None)
+    if manager is None:
+        return
+    for existing in list(manager.list() or []):
+        name = str(getattr(existing, "name", "") or "")
+        if name not in _BACKGROUND_PROJECT_FILE_TOOLS:
+            manager.remove(name)
 
 
 class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
@@ -555,6 +636,12 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         self._custom_code_spec_active: bool = False
         self._session_instance_spec: DeepAgentSpec | None = None
         self._session_instance_build_context: BuildContext | None = None
+        # Root-adapter-only ownership fence for the short interval between a
+        # fresh-session check and completion of the dedicated child profile.
+        # There is no await between checking and adding an entry, so a second
+        # coroutine for the same Session fails closed before it can acquire or
+        # mutate the partially prepared child.
+        self._background_project_session_reservations: set[str] = set()
 
     # ─── Language override ────────────────────────
 
@@ -916,6 +1003,13 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 build_context=self._code_build_context,
             )
         self._instance = self._code_agent_spec.build(self._code_build_context)
+        # DeepAgentSpec currently has no factory-default anomaly-rail switch.
+        # Retain our configured rail, but remove the implicit SDK default before
+        # initialization when the product configuration disabled this capability.
+        if spec is None and self._model_anomaly_detection_rail is None:
+            for rail in list(self._instance.configured_rails()):
+                if isinstance(rail, ModelAnomalyDetectionRail):
+                    await self._instance.unregister_rail(rail)
         if spec is not None:
             built_model = getattr(self._instance.deep_config, "model", None)
             if built_model is not None:
@@ -963,15 +1057,14 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             None,
             lambda: asyncio.run(self._instance.ensure_initialized()),
         )
-        # 修正 .agent_history 写入路径：openjiuwen 文件工具默认将
-        # .agent_history 写到 Workspace.root_path（即项目目录），
-        # 这里覆写为 agent 系统 workspace，避免污染用户项目目录。
-        for rail in getattr(self._instance, '_registered_rails', []):
-            for tool in getattr(rail, 'tools', []) or []:
-                if hasattr(tool, '_workspace_path'):
-                    setattr(tool, '_workspace_path', self._agent_workspace_dir)
+        # Current agent-core owns file-operation history under its host-level
+        # ``get_agent_history_root()``. Do not patch private tool attributes;
+        # formal governance resolves the same public root independently.
         initial_workspace = self._project_dir or self._agent_workspace_dir
-        self._seed_runtime_cwd(initial_workspace, workspace=initial_workspace)
+        self._seed_code_runtime_cwd(
+            self._RuntimeConfig(project_dir=initial_workspace, cwd=initial_workspace, workspace=initial_workspace),
+            project_workspace=initial_workspace, task_cwd=initial_workspace,
+        )
 
         setattr(self._instance, "_jiuwenswarm_adapter_mode", "code")
         setattr(
@@ -1248,6 +1341,11 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 model,
             )
             parts = new_spec.resolve_parts(new_context)
+            if self._model_anomaly_detection_rail is None:
+                parts.rails = [
+                    rail for rail in parts.rails
+                    if not isinstance(rail, ModelAnomalyDetectionRail)
+                ]
             candidate_rails = list(parts.rails)
             parts.config.tool_owner_id = new_context.tool_owner_id
             # DeepAgentSpec necessarily materializes its serializable ModelSpec;
@@ -1450,6 +1548,11 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
             _RailBuildInfo("_security_rail", self._build_security_rail),
             _RailBuildInfo("_heartbeat_rail", self._build_heartbeat_rail),
+            _RailBuildInfo(
+                "_model_anomaly_detection_rail",
+                self._build_model_anomaly_detection_rail,
+                {"config_base": config_base},
+            ),
             _RailBuildInfo("_lsp_rail", self._build_lsp_rail_via_config),
             _RailBuildInfo("_project_memory_rail", self._build_project_memory_rail),
             *self._permission_interrupt_rail_infos(config_base),
@@ -1629,6 +1732,11 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         通过 self._coding_memory_rail 缓存避免重复构建。
         受 modes.code.memory.enabled 开关控制，关闭时返回 None。
         """
+        # Dedicated project tasks carry their requirements explicitly and set
+        # enable_memory=False. Also fence configuration rebuilds, not just mode
+        # updates, so they cannot reintroduce application conversation memory.
+        if getattr(self, "_is_dedicated_background_project_adapter", False):
+            return None
         config_base = self._active_code_config()
         # 检查 memory 开关
         if not is_memory_enabled("code", config_base):
@@ -2029,8 +2137,17 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                     label, mode,
                 )
 
-        # code 模式保留 SubagentRail；若缺失则补充注册
-        if self._subagent_rail is None:
+        dedicated_background_project = bool(
+            getattr(self, "_is_dedicated_background_project_adapter", False)
+        )
+        if dedicated_background_project:
+            await self._disable_background_project_non_file_rails()
+
+        # Ordinary code mode retains SubagentRail.  A dedicated formal project
+        # task is file-tool-only, and its ability filter removes ``task_tool``;
+        # rebuilding SubagentRail there is both unusable and can synchronously
+        # stall the AgentServer control/audio loop during the first request.
+        if not dedicated_background_project and self._subagent_rail is None:
             self._subagent_rail = self._build_subagent_rail(get_config())
             if self._subagent_rail is not None:
                 await self._instance.register_rail(self._subagent_rail)
@@ -2049,8 +2166,9 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                     mode,
                 )
 
-        # code 模式保留 CodingMemoryRail；若缺失则补充注册
-        if self._coding_memory_rail is None:
+        # Ordinary Code retains coding memory. Dedicated tasks have an explicit
+        # no-memory contract, including repeated runtime/mode updates.
+        if not dedicated_background_project and self._coding_memory_rail is None:
             coding_memory_rail = self._build_coding_memory_rail()
             if coding_memory_rail is not None:
                 # _build_coding_memory_rail 已缓存到 self._coding_memory_rail
@@ -2105,6 +2223,113 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
     # ─── Runtime config ──────────────────────────
 
+    async def prepare_background_project_session(self, session_id: str) -> None:
+        """Create one fresh child adapter reserved for a bounded project task."""
+        if self._is_session_scoped_adapter:
+            raise RuntimeError(
+                "EXECUTION_TARGET_NOT_BOUND: background tasks require a root Code Agent adapter"
+            )
+        sid = self._session_adapter_key(session_id)
+        reservations = getattr(
+            self,
+            "_background_project_session_reservations",
+            None,
+        )
+        if reservations is None:
+            reservations = set()
+            self._background_project_session_reservations = reservations
+        if self._get_cached_session_adapter(sid) is not None or sid in reservations:
+            raise RuntimeError(
+                "EXECUTION_TARGET_NOT_BOUND: background task session was already used"
+            )
+        reservations.add(sid)
+        child: JiuWenSwarmDeepAdapter | None = None
+        try:
+            child = await self._get_or_create_session_adapter(sid)
+            child._is_dedicated_background_project_adapter = True
+            await child._disable_background_project_non_file_rails()
+        except BaseException:  # noqa: BLE001 -- exact child remains owned until cleanup
+            expected_child = (
+                child if child is not None else self._get_cached_session_adapter(sid)
+            )
+            if expected_child is None:
+                raise
+            cleanup_task = asyncio.create_task(
+                self._cleanup_failed_background_project_session(sid, expected_child),
+                name=f"jiuwenswarm-code-background-prepare-cleanup-{sid}",
+            )
+            cleanup_task.add_done_callback(self._consume_formal_cleanup_result)
+            try:
+                await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError:
+                # The retained task continues to own cleanup.  The cached
+                # child keeps retries fenced until that task proves quiescence.
+                raise
+            except BaseException as cleanup_error:  # noqa: BLE001 -- stable strict seam
+                raise RuntimeError("PROJECT_AGENT_CLEANUP_PENDING") from cleanup_error
+            raise
+        finally:
+            reservations.discard(sid)
+
+    async def _cleanup_failed_background_project_session(
+        self,
+        session_id: str,
+        expected_child: JiuWenSwarmDeepAdapter,
+    ) -> None:
+        """Strictly discard only the child whose dedicated setup failed."""
+
+        sid = self._session_adapter_key(session_id)
+        lock = self._session_adapter_locks.setdefault(sid, asyncio.Lock())
+        remove_lock_after_release = False
+        async with lock:
+            child = self._session_adapters.get(sid)
+            if child is None:
+                remove_lock_after_release = True
+            elif child is not expected_child:
+                # A different owner can appear only after another cleanup path
+                # retired the failed child.  Never let this late task tear down
+                # that replacement.
+                return
+            else:
+                await child.cleanup_formal_project_task_agent()
+                if child.has_session_runtime():
+                    raise RuntimeError("PROJECT_AGENT_CLEANUP_PENDING")
+                self._drop_session_adapter_cache_entry(sid, remove_lock=False)
+                remove_lock_after_release = True
+        if remove_lock_after_release and self._is_session_lock_idle(sid, lock):
+            self._session_adapter_locks.pop(sid, None)
+
+    async def _disable_background_project_non_file_rails(self) -> None:
+        """Remove rails whose capabilities are forbidden by the formal profile.
+
+        The dedicated background project adapter exposes only bounded project
+        file tools and disables conversation memory. Retaining LSP/subagent or
+        coding-memory rails can still initialize unused capabilities or read
+        application memory even after their tools are filtered out. Project
+        instruction loading remains available through ProjectMemoryRail.
+        """
+
+        instance = getattr(self, "_instance", None)
+        for attr, label in (
+            ("_lsp_rail", "LspRail"),
+            ("_subagent_rail", "SubagentRail"),
+            ("_coding_memory_rail", "CodingMemoryRail"),
+            ("_personal_context_rail", "PersonalContextRail"),
+        ):
+            rail = getattr(self, attr, None)
+            if rail is None:
+                continue
+            if instance is None:
+                raise RuntimeError(
+                    "EXECUTION_TARGET_NOT_BOUND: background task Agent is unavailable"
+                )
+            await instance.unregister_rail(rail)
+            setattr(self, attr, None)
+            logger.info(
+                "[JiuwenSwarmCodeAdapter] %s unregistered for bounded background project task",
+                label,
+            )
+
     async def _update_runtime_config(self, runtime_config: "JiuWenSwarmDeepAdapter._RuntimeConfig") -> None:
         """Code 模式 runtime config: ProjectMemoryRail 语言同步 + rail 模式切换."""
         if self._instance is None:
@@ -2129,7 +2354,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             # project or automatically allocated projectless task workspace.
             deep_config.cwd = task_cwd
             deep_config.project_root = str(runtime_paths.project_root)
-        self._seed_runtime_cwd(task_cwd, workspace=project_workspace)
+        self._seed_code_runtime_cwd(runtime_config, project_workspace=project_workspace, task_cwd=task_cwd)
         resolved_language = self._resolve_runtime_language()
         resolved_channel = str(runtime_config.channel_id or
                                self._resolve_prompt_channel(runtime_config.session_id) or "web").strip() or "web"
@@ -2258,6 +2483,47 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 self._instance.ability_manager.add(tool.card)
         except ImportError:
             pass
+
+        if getattr(self, "_is_dedicated_background_project_adapter", False):
+            _restrict_background_project_abilities(self._instance)
+            self._configure_background_project_result_prompt()
+
+    def _configure_background_project_result_prompt(self) -> None:
+        """Add result guidance only after the dedicated task boundary is known."""
+        if not getattr(self, "_is_dedicated_background_project_adapter", False):
+            return
+        from openjiuwen.harness.prompts import PromptSection
+
+        builder = getattr(self._instance, "system_prompt_builder", None)
+        if builder is None:
+            raise RuntimeError("BACKGROUND_PROJECT_RESULT_PROMPT_UNAVAILABLE")
+        builder.add_section(PromptSection(
+            name="background_project_result_requirements",
+            content={"cn": BACKGROUND_PROJECT_RESULT_INSTRUCTIONS,
+                     "en": BACKGROUND_PROJECT_RESULT_INSTRUCTIONS},
+            priority=66,
+        ))
+
+    def _seed_code_runtime_cwd(
+        self,
+        runtime_config: "JiuWenSwarmDeepAdapter._RuntimeConfig",
+        *,
+        project_workspace: str,
+        task_cwd: str,
+    ) -> None:
+        """Separate clean formal support files from the project cwd."""
+
+        if not self._uses_application_runtime_support():
+            self._seed_runtime_cwd(task_cwd, workspace=project_workspace)
+            return
+        project_root = str(
+            runtime_config.project_dir or self._project_dir or task_cwd
+        )
+        init_cwd(
+            task_cwd,
+            project_root=project_root,
+            workspace=self._agent_workspace_dir,
+        )
 
     # ─── Tools 构建 ──────────────────────────
 

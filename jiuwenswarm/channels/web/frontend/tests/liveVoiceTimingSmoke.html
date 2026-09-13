@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh">
+  <meta charset="utf-8" />
+  <title>Live Voice timing diagnostic smoke</title>
+  <h1>Live Voice · 浏览器计时验证</h1>
+  <p>真实 Web Audio、静音输出。此页不访问麦克风、Provider、Agent 或任务，不代表物理验收。</p>
+  <button id="run">运行静音计时验证</button>
+  <pre id="result">尚未运行</pre>
+  <script type="module">
+    import { BrowserAudioIOAdapter } from '../src/features/live-voice/formal/adapters/browserAudioIOAdapter.ts';
+    import { audioDiagnosticSnapshot } from '../src/features/live-voice/formal/audioDiagnostics.ts';
+
+    document.getElementById('run').onclick = async () => {
+      const result = document.getElementById('result');
+      let adapter;
+      try {
+        const context = new AudioContext();
+        const mute = context.createGain();
+        mute.gain.value = 0;
+        mute.connect(context.destination);
+        const wrapped = new Proxy(context, {
+          get(target, key) {
+            if (key === 'destination') return mute;
+            const value = Reflect.get(target, key, target);
+            return typeof value === 'function' ? value.bind(target) : value;
+          },
+          set(target, key, value) {
+            return Reflect.set(target, key, value, target);
+          },
+        });
+        adapter = new BrowserAudioIOAdapter({
+          enabled: true,
+          environment: {
+            isSecureContext,
+            document,
+            mediaDevices: navigator.mediaDevices,
+            permissions: navigator.permissions,
+            createAudioContext: () => wrapped,
+            createAudioWorkletNode: null,
+            createId: () => crypto.randomUUID(),
+            outputDeviceSelection: false,
+          },
+        });
+        await adapter.unlockPlayout();
+        // Warm the device clock before observing a future scheduled source.
+        await new Promise(resolve => setTimeout(resolve, 200));
+        const response = { interaction_id: 'timing-smoke-' + crypto.randomUUID(), response_id: 'timing-smoke-response', response_generation: 1 };
+        adapter.beginPlayout(response);
+        const rate = context.sampleRate;
+        const samples = new Float32Array(Math.round(rate * 0.4));
+        for (let i = Math.round(rate * 0.1); i < samples.length; i++) samples[i] = 0.1 * Math.sin((2 * Math.PI * 440 * i) / rate);
+        const accepted = adapter.enqueuePlayout({
+          response,
+          unit_id: 'timing-smoke-unit',
+          seq: 0,
+          sample_rate_hz: rate,
+          channel_count: 1,
+          samples,
+          provider: { provider_id: 'timing-smoke', implementation_class: 'formal', fallback_from: null },
+        });
+        await new Promise(resolve => setTimeout(resolve, 600));
+        const records = audioDiagnosticSnapshot().filter(row => row.fields.interaction_id === response.interaction_id);
+        const signal = records.find(row => row.event === 'playout_signal_scheduled');
+        const poll = records.find(row => row.event === 'playout_clock_reached_start');
+        const passed =
+          accepted &&
+          signal?.fields.signal_offset_ms >= 95 &&
+          signal?.fields.signal_offset_ms <= 105 &&
+          signal?.fields.output_time_method === 'get_output_timestamp_estimate' &&
+          typeof signal.fields.output_estimate_ms === 'number' &&
+          poll !== undefined;
+        result.textContent = JSON.stringify(
+          {
+            passed,
+            acoustic_measured: false,
+            output_muted: true,
+            records: records.filter(row => ['playout_signal_scheduled', 'playout_clock_reached_start'].includes(row.event)),
+          },
+          null,
+          2,
+        );
+      } catch (error) {
+        result.textContent = 'FAILED: ' + String(error);
+      } finally {
+        await adapter?.close();
+      }
+    };
+  </script>
+</html>

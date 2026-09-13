@@ -8,6 +8,10 @@ interface ImportMetaEnv {
   readonly VITE_GITCODE_OAUTH_CLIENT_ID?: string;
   readonly VITE_GITCODE_OAUTH_CLIENT_SECRET?: string;
   readonly VITE_GITHUB_OAUTH_CLIENT_ID?: string;
+  readonly VITE_FEATURE_LIVE_VOICE_STREAMING_SPEECH?: string;
+  readonly VITE_FEATURE_LIVE_VOICE_INTEGRATED_P1?: string;
+  readonly VITE_FEATURE_LIVE_VOICE_INTEGRATED_WEB?: string;
+  readonly VITE_FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION?: string;
 }
 
 interface ImportMeta {

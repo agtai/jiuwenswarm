@@ -863,6 +863,33 @@ _FORWARD_REQ_METHODS = frozenset({
     "schedule.logs",
     "schedule.cancel",
     "schedule.delete",
+    # Formal P3-alpha task route. Authentication and every authority fact are
+    # resolved by AgentServer; Gateway only forwards the opaque request.
+    "live_voice.task.create",
+    "live_voice.task.get",
+    "live_voice.task.list",
+    "live_voice.task.status",
+    "live_voice.task.cancel",
+    "live_voice.task.events",
+    "live_voice.task.result",
+    # Default-off AgentServer product-composition lifecycle routes. Gateway
+    # forwards opaque credentials and comparison claims; it owns no authority.
+    "live_voice.composition.p2.activate",
+    "live_voice.composition.p2.close",
+    "live_voice.composition.p2.submit",
+    "live_voice.composition.unified.submit",
+    "live_voice.composition.p2.notification.next",
+    "live_voice.composition.p2.presentation.ack",
+    "live_voice.composition.p2.presentation.failed",
+    "live_voice.composition.p2.barge_in",
+    "live_voice.composition.p2.interrupt_generation",
+    "live_voice.composition.p3.confirmation.issue",
+    "live_voice.composition.p3.intent",
+    "live_voice.composition.p3.intent.status",
+    "live_voice.composition.p3.mutate",
+    "live_voice.composition.p3.progress.activate",
+    "live_voice.composition.p3.progress.close",
+    "live_voice.composition.p3.progress.ack",
     "issue.watch_once",
     "issue.state.list",
     "issue.matrix",
@@ -1020,6 +1047,45 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "external_cli.detect",
     "external_cli.codex_install_status",
     "proactive.feedback",
+    # Schedule and issue task management are handled exclusively by AgentServer.
+    # Keep them out of the local-handler fallback so the forwarded Agent response
+    # remains the single response for the request id.
+    "schedule.check_config",
+    "schedule.update_config",
+    "schedule.create",
+    "schedule.run",
+    "schedule.list",
+    "schedule.status",
+    "schedule.logs",
+    "schedule.cancel",
+    "schedule.delete",
+    "live_voice.task.create",
+    "live_voice.task.get",
+    "live_voice.task.list",
+    "live_voice.task.status",
+    "live_voice.task.cancel",
+    "live_voice.task.events",
+    "live_voice.task.result",
+    "live_voice.composition.p2.activate",
+    "live_voice.composition.p2.close",
+    "live_voice.composition.p2.submit",
+    "live_voice.composition.unified.submit",
+    "live_voice.composition.p2.notification.next",
+    "live_voice.composition.p2.presentation.ack",
+    "live_voice.composition.p2.presentation.failed",
+    "live_voice.composition.p2.barge_in",
+    "live_voice.composition.p2.interrupt_generation",
+    "live_voice.composition.p3.confirmation.issue",
+    "live_voice.composition.p3.intent",
+    "live_voice.composition.p3.intent.status",
+    "live_voice.composition.p3.mutate",
+    "live_voice.composition.p3.progress.activate",
+    "live_voice.composition.p3.progress.close",
+    "live_voice.composition.p3.progress.ack",
+    "issue.watch_once",
+    "issue.state.list",
+    "issue.matrix",
+    "issue.delete",
 })
 
 # 配置信息：config.get 返回、config.set 可修改的键（前端 param 名 -> 环境变量名）
@@ -2506,6 +2572,7 @@ class WebHandlersBindParams:
     cron_controller: Any = None
     heartbeat_controller: Any = None
     updater_service: UpdaterService | None = None
+    speech_service: Any = None
 
 
 _CONTAINER_FILE_API_METHODS = (
@@ -2850,6 +2917,193 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     heartbeat_controller = bind.heartbeat_controller
     updater_service = bind.updater_service
 
+    from jiuwenswarm.gateway.live_voice.dedicated_media_registration import (
+        DedicatedMediaProductRegistry,
+        register_dedicated_media_rpc_handlers,
+    )
+    from jiuwenswarm.gateway.live_voice.speech_rpc import register_speech_rpc_handlers
+    from jiuwenswarm.gateway.live_voice.streaming_speech_route import (
+        StreamingRecognitionRouteOwner,
+    )
+    from jiuwenswarm.gateway.live_voice.streaming_synthesis_route import (
+        StreamingSynthesisRouteOwner,
+    )
+    from jiuwenswarm.server.live_voice.batch_speech import (
+        FormalBatchSpeechService,
+        SPEECH_API_BASE_ENV,
+        SPEECH_API_KEY_ENV,
+        create_environment_batch_speech_provider,
+    )
+    from jiuwenswarm.server.live_voice.openai_streaming_speech import (
+        STREAMING_SPEECH_FLAG,
+        select_environment_streaming_speech,
+    )
+    from jiuwenswarm.server.live_voice.observability import (
+        LiveVoiceObservabilityCollector,
+    )
+    from jiuwenswarm.server.live_voice.native_interaction_config import (
+        InteractionEngineKind,
+        NativeInteractionConfigurationError,
+        select_interaction_engine_environment,
+    )
+    from jiuwenswarm.gateway.live_voice.native_interaction_runtime_client import (
+        GatewayNativeInteractionRuntimeClient,
+    )
+    from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
+        OpenAIRealtimeNativeInteractionEngine,
+    )
+    from jiuwenswarm.server.live_voice.openai_realtime_session import (
+        OpenAIRealtimeSessionConfig,
+    )
+
+    native_runtime_client = None
+    native_engine_factory = None
+    selected_native_model = None
+    try:
+        interaction_selection = select_interaction_engine_environment(os.environ)
+        selected_interaction_engine = interaction_selection.kind.value
+        selected_native_model = interaction_selection.native_model
+    except NativeInteractionConfigurationError as exc:
+        selected_interaction_engine = "unavailable"
+        logger.error(
+            "Live Voice interaction Engine selection unavailable: reason=%s",
+            exc.reason,
+        )
+    if (
+        selected_interaction_engine
+        == InteractionEngineKind.OPENAI_REALTIME_NATIVE.value
+    ):
+        resolved_native_agent_client = (
+            agent_client.get("value")
+            if isinstance(agent_client, dict)
+            else agent_client
+        )
+        try:
+            api_key = str(os.getenv(SPEECH_API_KEY_ENV) or "").strip()
+            api_base = str(os.getenv(SPEECH_API_BASE_ENV) or "").strip()
+            if not api_key or not isinstance(selected_native_model, str):
+                raise ValueError("Native Realtime Provider configuration unavailable")
+            native_session_config = OpenAIRealtimeSessionConfig(
+                api_key=api_key,
+                model=selected_native_model,
+                api_base=api_base or "https://api.openai.com/v1",
+            )
+            native_runtime_client = GatewayNativeInteractionRuntimeClient(
+                resolved_native_agent_client,
+                native_model=selected_native_model,
+            )
+
+            def native_engine_factory(binding):
+                return OpenAIRealtimeNativeInteractionEngine(
+                    native_session_config,
+                    binding=binding,
+                    vad_eagerness=interaction_selection.native_vad_eagerness,
+                    max_output_tokens=interaction_selection.native_max_output_tokens,
+                    audio_speed=interaction_selection.native_audio_speed,
+                    reasoning_effort=interaction_selection.native_reasoning_effort,
+                    endpoint_mode=interaction_selection.native_endpoint_mode,
+                )
+
+        except Exception:
+            selected_interaction_engine = "unavailable"
+            native_runtime_client = None
+            native_engine_factory = None
+            logger.error("Live Voice Native Runtime client is unavailable")
+    channel.live_voice_interaction_engine = selected_interaction_engine
+    channel.live_voice_native_runtime_client = native_runtime_client
+    media_registry = DedicatedMediaProductRegistry.from_environment(
+        native_runtime_client=native_runtime_client,
+        native_engine_factory=native_engine_factory,
+    )
+    speech_service = bind.speech_service
+    media_registry_owns_speech_authority = speech_service is None
+    if speech_service is None:
+        speech_service = FormalBatchSpeechService(
+            create_environment_batch_speech_provider(),
+            authorization_resolver=(media_registry if media_registry.enabled else None),
+        )
+    capability = speech_service.capability_payload()
+    provider = capability.get("provider") if isinstance(capability, dict) else None
+    batch_available = bool(
+        media_registry_owns_speech_authority
+        and isinstance(provider, dict)
+        and provider.get("available") is True
+    )
+    media_registry.set_provider_available(batch_available)
+    streaming_recognition_owner = (
+        StreamingRecognitionRouteOwner(
+            lambda: select_environment_streaming_speech(
+                batch_available=batch_available
+            )
+        )
+        if media_registry_owns_speech_authority
+        else None
+    )
+    if streaming_recognition_owner is not None:
+        media_registry.configure_streaming_recognition(
+            streaming_recognition_owner,
+            receipt_issuer=speech_service.issue_streaming_voice_commit_receipt,
+        )
+    streaming_synthesis_owner = None
+    if (
+        media_registry.enabled
+        and media_registry_owns_speech_authority
+        and str(os.getenv(STREAMING_SPEECH_FLAG) or "").strip().lower()
+        in {"1", "true", "yes", "on"}
+    ):
+        async def select_streaming_speech():
+            return await select_environment_streaming_speech(
+                batch_available=batch_available
+            )
+
+        streaming_synthesis_owner = StreamingSynthesisRouteOwner(
+            select_streaming_speech
+        )
+        media_registry.configure_streaming_synthesis(
+            streaming_synthesis_owner,
+            observability=LiveVoiceObservabilityCollector(),
+        )
+    channel.live_voice_media_registry = media_registry
+    # The formal P1->P2 receipt claim must reach either an owned or injected
+    # Speech service.  Lifecycle ownership is tracked separately so channel
+    # shutdown never closes an injected service.
+    channel.live_voice_speech_service = speech_service
+    channel.live_voice_owned_speech_service = (
+        speech_service if media_registry_owns_speech_authority else None
+    )
+    channel.live_voice_streaming_speech_owner = streaming_recognition_owner
+    channel.live_voice_streaming_synthesis_owner = streaming_synthesis_owner
+
+    async def override_speech_operation(
+        operation_name, params, context, session_id
+    ):
+        return await media_registry.try_streaming_synthesis(
+            operation_name,
+            params,
+            context,
+            session_id,
+            batch_service=speech_service,
+        )
+
+    register_speech_rpc_handlers(
+        channel,
+        service=speech_service,
+        context_factory=(
+            media_registry.context_for if media_registry_owns_speech_authority else None
+        ),
+        result_transform=(
+            media_registry.prepare_synthesis_downlink
+            if media_registry_owns_speech_authority
+            else None
+        ),
+        operation_override=(
+            override_speech_operation
+            if streaming_synthesis_owner is not None
+            else None
+        ),
+    )
+    register_dedicated_media_rpc_handlers(channel, registry=media_registry)
+
     from jiuwenswarm.common.schema.message import Message, EventType
 
     def _resolve(ref, key="value"):
@@ -2965,6 +3219,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         ws_id = str(getattr(ws, "_jiuwen_ws_id", "") or "").strip()
         if callable(cleanup) and ws_id:
             await cleanup(channel.channel_id, ws_id)
+        native_client = getattr(channel, "live_voice_native_runtime_client", None)
+        forget_connection = getattr(native_client, "forget_connection", None)
+        if callable(forget_connection) and ws_id:
+            forget_connection(ws_id)
 
     register_disconnect = getattr(channel, "on_disconnect", None)
     if callable(register_disconnect):
@@ -3685,7 +3943,14 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 "[config.validate_model] skip budget floor from reasoning plan",
                 exc_info=True,
             )
-        llm = Model(model_config=model_request_config, model_client_config=model_client_config)
+        from jiuwenswarm.common.openai_responses_client import openai_responses_client_config
+
+        llm = Model(
+            model_config=model_request_config,
+            model_client_config=openai_responses_client_config(
+                model_client_config, model_name=model_request_config.model_name,
+            ),
+        )
 
         async def test_invoke(max_tokens: int):
             return await llm.invoke(
