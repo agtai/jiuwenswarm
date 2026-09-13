@@ -3389,9 +3389,11 @@ async def test_native_turn_commit_becomes_exact_media_end_of_turn() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("browser_sample_rate", [24_000, 48_000])
 @pytest.mark.parametrize("completed_download", [False, True, "close_during_cancel"])
+@pytest.mark.parametrize("audio_during_host_reply", [False, True])
 async def test_native_playback_stop_admits_later_item_before_provider_cancel(
     browser_sample_rate: int,
     completed_download: bool | str,
+    audio_during_host_reply: bool,
 ) -> None:
     activation_handle = _native_activation()
     client = _FakeNativeRuntimeClient(activation_handle)
@@ -3462,6 +3464,28 @@ async def test_native_playback_stop_admits_later_item_before_provider_cancel(
             outcome=MediaPlaybackStopOutcome.LOCAL_FENCE_ESTABLISHED,
             confirmed_through_seq=1,
     )
+    if audio_during_host_reply:
+        original_ack = client.presentation_ack
+        original_propose = client.propose
+        session = next(iter(registry._native_sessions.values()))
+        late_audio = next(event for event in client.proposals if event.audio is not None)
+
+        async def reject_stale_audio(**kwargs):
+            raise NativeRuntimeClientError("NATIVE_AUDIO_RESPONSE_STALE", "Host already applied stop")
+
+        async def delay_stop_reply(**kwargs):
+            result = await original_ack(**kwargs)
+            before = (len(registry._records), len(client.proposals), tuple(shared_actions))
+            client.propose = reject_stale_audio
+            try:
+                await registry._deliver_native_audio(session, late_audio)
+            finally:
+                client.propose = original_propose
+            assert before == (len(registry._records), len(client.proposals), tuple(shared_actions))
+            assert not session.closed and not engine.closed
+            return result
+
+        client.presentation_ack = delay_stop_reply
     if completed_download:
         source = downlink.downlink_stream_source
         assert source is not None

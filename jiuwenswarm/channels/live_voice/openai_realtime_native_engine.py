@@ -2468,6 +2468,9 @@ class OpenAIRealtimeNativeInteractionEngine:
                 "NATIVE_CANCEL_CURSOR_AHEAD",
                 "cancel cursor cannot exceed received Provider audio",
             )
+        # The validated played cursor proves a local stop. Publish that fence
+        # before either Provider write can race an error or more output.
+        await self.fence_response(ref)
         self._state = NativeProviderState.CANCELLING
         try:
             cancel_id = (

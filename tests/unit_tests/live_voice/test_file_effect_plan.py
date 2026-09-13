@@ -309,6 +309,7 @@ async def test_real_facade_sdk_tool_registration_and_pre_write_boundary(tmp_path
     ctx = AgentCallbackContext(agent=root, context=context, extra={rail._SID_KEY: "exact-session"})
     before_write_history = []
     cleanups = []
+    stream_closed = []
 
     class Adapter:
         _is_session_scoped_adapter = False
@@ -319,6 +320,7 @@ async def test_real_facade_sdk_tool_registration_and_pre_write_boundary(tmp_path
         def _get_cached_session_adapter(self, session_id):
             return self if session_id == "exact-session" else None
         async def cleanup_session_adapter(self, session_id):
+            assert stream_closed == ["same-context"]
             assert rail.background_file_checkpoint is None and rail.background_model_checkpoint is None
             cleanups.append(session_id)
         async def process_message_stream_impl(self, request, inputs):
@@ -342,8 +344,16 @@ async def test_real_facade_sdk_tool_registration_and_pre_write_boundary(tmp_path
             result = await root._execute_tool_call(ctx, [write], None, context)
             if case == "ok":
                 assert result[0][0].success
-            yield AgentResponseChunk(request.request_id, request.channel_id,
-                payload={"event_type": "chat.final", "content": "done"}, is_complete=True)
+            from contextvars import ContextVar
+            marker = ContextVar("owned-stream-test")
+            token = marker.set("stream")
+            try:
+                yield AgentResponseChunk(request.request_id, request.channel_id,
+                    payload={"event_type": "chat.final", "content": "done"}, is_complete=True)
+            finally:
+                marker.reset(token)
+                assert rail.background_file_checkpoint is not None
+                stream_closed.append("same-context")
 
     facade = object.__new__(JiuWenSwarm)
     facade._adapter = Adapter()

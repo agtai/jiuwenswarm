@@ -3395,7 +3395,8 @@ async def test_invalid_delegate_has_zero_delegate_effect(
 
 
 @pytest.mark.asyncio
-async def test_cancel_response_sends_exact_cancel_then_truncate_once() -> None:
+@pytest.mark.parametrize("completion_race", [None, "before_done", "after_done"])
+async def test_cancel_response_sends_exact_cancel_then_truncate_once(completion_race) -> None:
     engine, socket, _ = active_engine(
         speech_started("event-3", "user-item-1", 0),
         speech_stopped("event-4", "user-item-1", 20),
@@ -3434,6 +3435,16 @@ async def test_cancel_response_sends_exact_cancel_then_truncate_once() -> None:
         "content_index": 0,
         "audio_end_ms": 10,
     }
+    if completion_race is not None:
+        if completion_race == "after_done":
+            socket.push(response_done("cursor-done", "provider-response-1"))
+            assert await engine.next_event() == NativeEngineEvent()
+        sent_before_error = tuple(socket.sent)
+        socket.push(cancel_not_active("cursor-cancel-race", ids[0]))
+        assert await engine.next_event() == NativeEngineEvent()
+        assert tuple(socket.sent) == sent_before_error
+        assert engine._responses["provider-response-1"].done == (completion_race == "after_done")
+        assert not engine._responses["provider-response-1"].presentation_acknowledged
     socket.push(
         provider_event(
             "conversation.item.truncated",

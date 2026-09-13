@@ -3661,6 +3661,9 @@ class DedicatedMediaProductRegistry:
                 "MEDIA_NATIVE_RUNTIME_UNAVAILABLE",
                 "Native Runtime presentation authority disappeared",
             )
+        # Browser playback is already fenced. Retain that exact local fact
+        # before Host can reject in-flight audio while its stop reply travels.
+        self._retain_native_barge_fence(session, record.downlink_response)
         result = await presentation_ack(
             binding=session.activation.binding,
             capability=session.activation.capability,
@@ -3683,7 +3686,6 @@ class DedicatedMediaProductRegistry:
             )
         if result.get("applied") is False:
             return False
-        self._retain_native_barge_fence(session, record.downlink_response)
         await source.aclose()
         if cursor is None:
             await session.engine.stop_foreground(record.downlink_response)

@@ -2310,6 +2310,17 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         """
 
         instance = getattr(self, "_instance", None)
+        # This profile has a small, fixed file-tool allow-list. Discovery would
+        # hide its declaration tool and advertise meta tools removed below.
+        from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
+
+        find_rails = getattr(instance, "find_rails_by_type", None)
+        if callable(find_rails):
+            for rail in find_rails((ProgressiveToolRail,)):
+                await instance.unregister_rail(rail)
+            builder = getattr(instance, "system_prompt_builder", None)
+            if builder is not None:
+                builder.remove_section("progressive_tool_rules")
         for attr, label in (
             ("_lsp_rail", "LspRail"),
             ("_subagent_rail", "SubagentRail"),

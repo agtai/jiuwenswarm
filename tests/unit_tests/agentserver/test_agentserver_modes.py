@@ -1425,6 +1425,45 @@ def test_ordinary_code_still_rebuilds_coding_memory():
     assert registered == [rebuilt]
 
 
+def test_background_profile_detaches_progressive_discovery_but_keeps_file_plan_tool():
+    from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+    from openjiuwen.harness.deep_agent import DeepAgent
+    from openjiuwen.harness.prompts import PromptSection, SystemPromptBuilder
+    from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
+    from openjiuwen.harness.schema.config import DeepAgentConfig
+    from jiuwenswarm.server.runtime.agent_adapter.background_task_checkpoint import file_effect_plan_tool
+    from jiuwenswarm.server.runtime.agent_adapter.interface_code import JiuwenSwarmCodeAdapter
+
+    async def scenario():
+        agent = DeepAgent(AgentCard(id="background-tool-profile-test", name="test"))
+        agent._deep_config = DeepAgentConfig()
+        agent.system_prompt_builder = SystemPromptBuilder(language="en")
+        rail = ProgressiveToolRail(agent._deep_config)
+        await agent.register_rail(rail)
+        tool = file_effect_plan_tool()
+        agent.ability_manager.add_ability(tool.card, tool)
+        agent.system_prompt_builder.add_section(PromptSection(
+            name="progressive_tool_rules", content={"en": "Use tool_search"}))
+        adapter = JiuwenSwarmCodeAdapter.__new__(JiuwenSwarmCodeAdapter)
+        adapter._instance = agent
+        try:
+            assert agent.is_registered_rail(rail)
+            assert agent.ability_manager.get("tool_search") is not None
+            await adapter._disable_background_project_non_file_rails()
+            assert not agent.find_rails_by_type((ProgressiveToolRail,))
+            assert agent.system_prompt_builder.get_section("progressive_tool_rules") is None
+            assert agent.ability_manager.get("tool_search") is None
+            assert agent.ability_manager.get("tool_call") is None
+            assert agent.ability_manager.get("declare_file_effect_plan") is tool.card
+            assert "declare_file_effect_plan" in {t.name for t in await agent.ability_manager.list_tool_info()}
+            await adapter._disable_background_project_non_file_rails()
+        finally:
+            await agent.unregister_rail(rail)
+            agent.ability_manager.remove_ability("declare_file_effect_plan")
+
+    asyncio.run(scenario())
+
+
 def test_background_memory_detaches_real_core_rail_and_prompt(tmp_path):
     from openjiuwen.core.single_agent.schema.agent_card import AgentCard
     from openjiuwen.harness.deep_agent import DeepAgent

@@ -4005,6 +4005,12 @@
   mix-blend-mode: multiply;
 }
 
+/* The bee's transparent image bounds overlap the welcome voice controls. */
+.chat-welcome__composer > .live-voice-demo {
+  position: relative;
+  z-index: 10;
+}
+
 .chat-welcome__heading {
   font-size: 32px;
   font-weight: 600;

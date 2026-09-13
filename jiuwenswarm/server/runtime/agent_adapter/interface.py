@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import aclosing
 import json
 from dataclasses import replace
 import inspect
@@ -1508,13 +1509,14 @@ class JiuWenSwarm:
                     checkpoint_rail.background_file_checkpoint = file_checkpoint_callback
                     plan_tool = file_effect_plan_tool()
                     instance.ability_manager.add_ability(plan_tool.card, plan_tool)
-            async for chunk in adapter.process_message_stream_impl(
+            async with aclosing(adapter.process_message_stream_impl(
                 background_request,
                 inputs,
-            ):
-                if checkpoint is not None:
-                    checkpoint.raise_if_failed()
-                yield chunk
+            )) as stream:
+                async for chunk in stream:
+                    if checkpoint is not None:
+                        checkpoint.raise_if_failed()
+                    yield chunk
             if checkpoint is not None:
                 checkpoint.raise_if_failed()
         except Exception:
