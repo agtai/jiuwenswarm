@@ -22,7 +22,7 @@ from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
     PresentedAgentAnalysis,
 )
 
-from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import FormalTaskViolation
+from openjiuwen.core.application.tasks.formal_task_models import FormalTaskViolation
 from jiuwenswarm.server.runtime.formal_tasks.task_semantics import TaskSemanticDecision
 from jiuwenswarm.server.runtime.formal_tasks.unified_committed_input import (
     SEMANTIC_PROPOSAL_TTL_SECONDS,

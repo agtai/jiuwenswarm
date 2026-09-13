@@ -14,6 +14,8 @@ from dataclasses import dataclass
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import canonical_json_bytes
 from jiuwenswarm.common.schema.native_interaction_contract import NativeInputTranscript, NativeTurnCommit
+from openjiuwen.core.application.tasks.source import TaskSourceEvidence, register_source_codec
+from openjiuwen.core.application.tasks.source import TaskSourceError as NativeTaskSourceError
 
 NATIVE_TASK_SOURCE_VERSION = "live-voice.native-task-source.v1"
 MAX_SOURCE_CONTEXT_ITEMS = 16
@@ -21,14 +23,8 @@ MAX_SOURCE_BYTES = 262144
 SOURCE_OPERATIONS = frozenset({"task.create", "task.create_successor", "task.adjust"})
 
 
-class NativeTaskSourceError(ValueError):
-    def __init__(self, reason="NATIVE_TASK_SOURCE_INVALID"):
-        super().__init__(reason)
-        self.reason = reason
-
-
 @dataclass(frozen=True, slots=True)
-class NativeTaskSource:
+class NativeTaskSource(TaskSourceEvidence):
     source_identity: str
     operation: str
     instruction_sha256: str
@@ -38,6 +34,10 @@ class NativeTaskSource:
     omitted_preceding: int = 0
     target_id: str | None = None
     expected_revision: int | None = None
+
+    @property
+    def scope(self):
+        return self.anchor.binding.scope
 
     def __post_init__(self):
         if (type(self.source_identity) is not str
@@ -175,3 +175,5 @@ def require_payload_source(command):
         if command.command_type != "task.create" and source.target_id != command.target_ref.id:
             raise NativeTaskSourceError("NATIVE_TASK_SOURCE_TARGET_MISMATCH")
     return source
+
+register_source_codec(NATIVE_TASK_SOURCE_VERSION, NativeTaskSource)

@@ -45,7 +45,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     canonical_json_bytes,
 )
 
-from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
+from openjiuwen.core.application.tasks.formal_task_models import (
     FormalTaskViolation,
     PersistentTaskEvent,
     TaskAuthorizationGrant,
@@ -66,12 +66,12 @@ from jiuwenswarm.server.runtime.presentation.progress_notification_arbiter impor
     _mint_verified_consumer_projection,
     _mint_verified_no_projection_advance,
 )
-from jiuwenswarm.server.runtime.formal_tasks.task_event_subscription import (
+from openjiuwen.core.application.tasks.task_event_subscription import (
     TaskEventSubscription,
     TaskEventSubscriptionSnapshot,
     TaskEventSubscriptionState,
 )
-from jiuwenswarm.server.runtime.formal_tasks.task_store import SqliteTaskStore
+from openjiuwen.core.application.tasks.task_store import SqliteTaskStore
 
 _EVENTS_CAPABILITY = frozenset({"task.events"})
 logger = logging.getLogger(__name__)

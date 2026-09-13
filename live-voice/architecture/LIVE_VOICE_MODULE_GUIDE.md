@@ -1,5 +1,7 @@
 # Live Voice：面向架构师与产品经理的模块介绍
 
+> 2026-09-13 Task 迁移更新：持久化 Task 内核现由 AgentCore 提供，AgentServer 负责装配和项目适配，Work 保持原实现。详见[迁移记录](../reviews/AGENTCORE_TASK_MIGRATION_20260913.md)。下文来源基线描述保留历史含义。
+
 > 代码核对基线：`hx/0912_livevoice`，`5cb5303dd15d72a6b472406f89dfbf3db5e29eff`，2026-09-13。
 > 本文是实现导读，不是新的设计决策、部署说明或产品验收结论。当前完成边界以 [STATUS](../STATUS.md) 为准，重构依据见[共享 Runtime 集成记录](../reviews/SHARED_RUNTIME_INTEGRATION_20260913.md)。
 
@@ -267,8 +269,8 @@ Realtime 业务提议 → 来源与权限校验 → Host Work → 共享 Agent �
 | ⑤ 业务路由 | [Router](../../jiuwenswarm/channels/live_voice/native_business_router.py)、[Registry](../../jiuwenswarm/channels/live_voice/product_composition_registry.py)、[Gateway Host 客户端](../../jiuwenswarm/gateway/live_voice/native_interaction_runtime_client.py) | `_executor` 仍创建适配对象，池和最终清理由 Host 持有 |
 | ⑥ Work 管理 | [HostWorkService](../../jiuwenswarm/server/runtime/work/service.py)、[NativeWorkRuntime](../../jiuwenswarm/server/runtime/work/native_work_runtime.py)、[Work 日志](../../jiuwenswarm/server/runtime/work/native_work_journal.py) | `execute_native_work` 实际在 [AgentConversationRuntime](../../jiuwenswarm/channels/live_voice/agent_conversation_runtime.py) 中，不在 `native_work_runtime` 文件里 |
 | ⑦ 共享 Agent | [RuntimeFormalAgentFacade](../../jiuwenswarm/server/runtime/agent_adapter/runtime_formal.py)、[AgentRuntime](../../jiuwenswarm/runtime/service.py)、[既有 Agent adapter](../../jiuwenswarm/server/runtime/agent_adapter/interface_deep.py) | 复用 `stream_owned` 与既有 Runtime 机制；没有照搬来源分支的 `SessionExecutionService` |
-| ⑧ 正式 Task | [PersistentTaskCore](../../jiuwenswarm/server/runtime/formal_tasks/persistent_task_core.py)、[Task Store](../../jiuwenswarm/server/runtime/formal_tasks/task_store.py)、[调整队列](../../jiuwenswarm/server/runtime/formal_tasks/task_adjustment_queue.py) | `execute` 处理命令，`drain_outbox_once` 参与持久化执行投递 |
-| ⑨ 项目执行 | [项目执行器](../../jiuwenswarm/server/runtime/formal_tasks/project_code_executor.py)、[文件副作用计划](../../jiuwenswarm/server/runtime/formal_tasks/file_effect_plan.py)、[恢复事实](../../jiuwenswarm/server/runtime/durability/durability_recovery_facts.py) | 保留项目专用 Agent 执行通道，不能概括为所有任务都走普通聊天 |
+| ⑧ 正式 Task | [PersistentTaskCore](../../../agent-core/openjiuwen/core/application/tasks/persistent_task_core.py)、[Task Store](../../../agent-core/openjiuwen/core/application/tasks/task_store.py)、[调整队列](../../../agent-core/openjiuwen/core/application/tasks/task_adjustment_queue.py) | `execute` 处理命令，`drain_outbox_once` 参与持久化执行投递 |
+| ⑨ 项目执行 | [项目执行器](../../jiuwenswarm/server/runtime/formal_tasks/project_code_executor.py)、[文件副作用计划](../../../agent-core/openjiuwen/core/application/tasks/file_effect_plan.py)、[恢复事实](../../../agent-core/openjiuwen/core/application/tasks/durability/durability_recovery_facts.py) | 保留项目专用 Agent 执行通道，不能概括为所有任务都走普通聊天 |
 
 基线中还保留了语音组合与执行适配代码。因此“通用服务归入 Host”不意味着 `channels/live_voice` 只剩纯 ASR/TTS，也不意味着已经拆成多个独立部署服务。
 

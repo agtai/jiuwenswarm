@@ -31,7 +31,7 @@ from jiuwenswarm.server.runtime.presentation.progress_notification_arbiter impor
     SpeechDisposition,
     SpeechPolicy,
 )
-from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import PersistentTaskEvent
+from openjiuwen.core.application.tasks.formal_task_models import PersistentTaskEvent
 
 
 def scope(

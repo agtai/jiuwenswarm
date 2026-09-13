@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 import pytest
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import ResponseRef
-from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import FormalTaskViolation
+from openjiuwen.core.application.tasks.formal_task_models import FormalTaskViolation
 from jiuwenswarm.channels.live_voice.semantic_continuity import SemanticContinuity
 from jiuwenswarm.server.runtime.formal_tasks.task_semantics import TaskSemanticResolver
 from jiuwenswarm.server.runtime.formal_tasks.unified_committed_input import (

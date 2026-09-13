@@ -26,7 +26,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ResultEnvelope,
 )
 
-from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import FormalTaskViolation, TaskAuthorizationGrant, utc_now
+from openjiuwen.core.application.tasks.formal_task_models import FormalTaskViolation, TaskAuthorizationGrant, utc_now
 from jiuwenswarm.server.runtime.authority.product_authority import (
     AuthorityResourceBinding,
     AuthorityRouteContext,
@@ -35,7 +35,7 @@ from jiuwenswarm.server.runtime.authority.product_authority import (
     ProductAuthorityUnavailable,
 )
 from jiuwenswarm.server.runtime.presentation.progress_notification_arbiter import ProgressNotificationArbiter
-from jiuwenswarm.server.runtime.formal_tasks.task_event_subscription import TaskEventSubscription
+from openjiuwen.core.application.tasks.task_event_subscription import TaskEventSubscription
 from jiuwenswarm.server.runtime.presentation.task_progress_return import (
     DeferredVoiceOwnership,
     ForegroundSupplier,

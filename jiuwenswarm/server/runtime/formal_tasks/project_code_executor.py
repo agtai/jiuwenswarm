@@ -55,13 +55,13 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 from jiuwenswarm.common.utils import get_agent_workspace_dir
 from jiuwenswarm.server.runtime.agent_adapter.background_task_checkpoint import background_task_checkpoint
 
-from jiuwenswarm.server.runtime.durability.durability_checkpoint import D1Checkpoint
-from jiuwenswarm.server.runtime.durability.durability_authority import (
+from openjiuwen.core.application.tasks.durability.durability_checkpoint import D1Checkpoint
+from openjiuwen.core.application.tasks.durability.durability_authority import (
     DurabilityMutationAuthorization,
     _durability_authorization_payload_digest,
     _mint_durability_mutation_authorization,
 )
-from jiuwenswarm.server.runtime.durability.durability_effects import (
+from openjiuwen.core.application.tasks.durability.durability_effects import (
     EffectDispatchReceipt,
     EffectContinuationAuthorization,
     EffectObservationKind,
@@ -73,21 +73,21 @@ from jiuwenswarm.server.runtime.durability.durability_effects import (
     ExternalEffectSettlement,
     effect_fact_bytes,
 )
-from jiuwenswarm.server.runtime.durability.durability_identity import DurabilityProfileBinding
-from jiuwenswarm.server.runtime.durability.durability_readers import (
+from openjiuwen.core.application.tasks.durability.durability_identity import DurabilityProfileBinding
+from openjiuwen.core.application.tasks.durability.durability_readers import (
     DurabilityReadBinding,
     VerifiedCheckpointPrefix,
     VerifiedEffectPrefix,
 )
-from jiuwenswarm.server.runtime.durability.durability_recovery_facts import ExecutorRecoveryFacts
-from jiuwenswarm.server.runtime.formal_tasks.executor_capabilities import (
+from openjiuwen.core.application.tasks.durability.durability_recovery_facts import ExecutorRecoveryFacts
+from openjiuwen.core.application.tasks.executor_capabilities import (
     EXECUTOR_CAPABILITY_PROFILE_SCHEMA_VERSION,
     ExecutorCapabilityProfile,
     ExecutorSelection,
     TaskExecutionRequirements,
     select_executor,
 )
-from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
+from openjiuwen.core.application.tasks.formal_task_models import (
     ExecutorDeliveryResult,
     ExecutorObservation,
     ExecutorResolution,
@@ -108,7 +108,7 @@ from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
     TaskResultArtifact,
     utc_now,
 )
-from jiuwenswarm.server.runtime.formal_tasks.task_store import SqliteTaskStore
+from openjiuwen.core.application.tasks.task_store import SqliteTaskStore
 
 logger = logging.getLogger(__name__)
 
@@ -836,7 +836,7 @@ def _decode_d2_checkpoint_state(payload: bytes) -> dict[str, object]:
         if len(artifacts) != len(raw_artifacts):
             raise ValueError
         if "file_effect_plan" in value:
-            from jiuwenswarm.server.runtime.formal_tasks.file_effect_plan import FileEffectPlan
+            from openjiuwen.core.application.tasks.file_effect_plan import FileEffectPlan
             value["file_effect_plan"] = FileEffectPlan.from_dict(value["file_effect_plan"])
     except (TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise FormalTaskViolation(
@@ -848,7 +848,7 @@ def _decode_d2_checkpoint_state(payload: bytes) -> dict[str, object]:
 
 
 def _checkpoint_file_plan(checkpoint, state, *, task_id, scope, spec, effects):
-    from jiuwenswarm.server.runtime.formal_tasks.file_effect_plan import file_plan_source_digest
+    from openjiuwen.core.application.tasks.file_effect_plan import file_plan_source_digest
     plan = state.get("file_effect_plan")
     if (checkpoint.state_schema_id != _D2_CHECKPOINT_STATE_SCHEMA
             or checkpoint.state_schema_version != (1 if plan is None else 2)):
@@ -5449,7 +5449,7 @@ class DirectProjectCodeExecutorAdapter:
             continued = self._durability_store is not None and await asyncio.to_thread(
                 self._durability_store.adjustment_queue.owns_successor, item.task_id, item.scope)
             if item.spec.native_source is not None or continued:
-                from jiuwenswarm.server.runtime.formal_tasks.file_effect_plan import FileEffectPlanSession
+                from openjiuwen.core.application.tasks.file_effect_plan import FileEffectPlanSession
                 file_plan = FileEffectPlanSession(item=item, target=target_root, worktree=created_worktree,
                     baseline_digest=record.before_tree,
                     validate_target=partial(_require_attempt_target_unchanged, target_root,

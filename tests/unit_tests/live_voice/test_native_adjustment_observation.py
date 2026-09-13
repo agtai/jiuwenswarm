@@ -6,7 +6,7 @@ from dataclasses import replace
 
 import pytest
 
-from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import TerminalOutcome
+from openjiuwen.core.application.tasks.formal_task_models import TerminalOutcome
 from tests.unit_tests.live_voice.test_native_business_registry import make_registry, call, context
 from jiuwenswarm.gateway.live_voice.native_interaction_runtime_client import NativeRuntimeClientError
 from tests.unit_tests.live_voice.test_p3_authenticated_composition import _observations

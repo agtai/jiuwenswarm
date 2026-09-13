@@ -345,7 +345,7 @@ async def test_project_rebound_while_agent_resource_waits_has_zero_work_or_agent
 @pytest.mark.asyncio
 async def test_native_completed_adjust_preserves_speech_and_exposes_final_saved_truth(tmp_path, monkeypatch):
     from jiuwenswarm.common.schema.live_voice_contract_v2 import TerminalOutcome
-    from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import TaskResultArtifact
+    from openjiuwen.core.application.tasks.formal_task_models import TaskResultArtifact
     import hashlib
     spoken = "第一晚牛肉火锅，第二晚烧烤；不得修改原件.md。"
     env = await make_registry(tmp_path, monkeypatch, input_text=spoken)
@@ -380,7 +380,7 @@ async def test_native_completed_adjust_preserves_speech_and_exposes_final_saved_
         assert fact["adjustment_state"] == "applied"
         child = store.get_task(fact["followup_adjustment"]["continuation_task_id"], env.binding.scope)
         assert child.spec.instruction == spoken  # The bounded command stays compact.
-        from jiuwenswarm.server.runtime.formal_tasks.task_adjustment_queue import TaskAdjustmentQueue
+        from openjiuwen.core.application.tasks.task_adjustment_queue import TaskAdjustmentQueue
         expanded = TaskAdjustmentQueue(store).execution_instruction(dispatch_items[-1])
         assert spoken in expanded and "retained_speech" in expanded
         assert child.spec.context == task.spec.context

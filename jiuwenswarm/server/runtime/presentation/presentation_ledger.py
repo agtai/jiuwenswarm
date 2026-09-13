@@ -21,7 +21,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ScopeRef,
 )
 
-from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
+from openjiuwen.core.application.tasks.formal_task_models import (
     PersistentTaskEvent,
     TaskAuthorizationGrant,
     TaskResultRecord,

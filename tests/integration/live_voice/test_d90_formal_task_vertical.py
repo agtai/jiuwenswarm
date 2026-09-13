@@ -25,12 +25,12 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     TurnCommitLedger,
     WorkProgressEventV2,
 )
-from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
+from openjiuwen.core.application.tasks.formal_task_models import (
     FormalTaskViolation,
     ResolvedTaskContext,
     TaskAuthorizationGrant,
 )
-from jiuwenswarm.server.runtime.formal_tasks.persistent_task_core import (
+from openjiuwen.core.application.tasks.persistent_task_core import (
     PersistentTaskCore,
     project_task_event,
 )
@@ -56,7 +56,7 @@ from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
     DirectProjectCodeExecutorAdapter,
     ProjectExecutionBinding,
 )
-from jiuwenswarm.server.runtime.formal_tasks.task_store import SqliteTaskStore
+from openjiuwen.core.application.tasks.task_store import SqliteTaskStore
 from jiuwenswarm.server.runtime.formal_tasks.voice_task_policy import (
     FormalTaskInvocation,
     FormalTaskPolicyAdapter,
@@ -640,7 +640,7 @@ async def test_s6_joint_slow_conversation_detached_task_and_exact_cancel_domains
     # Selected admission compares its durable deadline with the Store claim
     # clock.  Keep this deterministic joint scenario on one frozen instant.
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.formal_tasks.task_store.utc_now",
+        "openjiuwen.core.application.tasks.task_store.utc_now",
         lambda: NOW,
     )
     product_clock = {"now": NOW}

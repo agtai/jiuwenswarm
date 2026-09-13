@@ -239,7 +239,7 @@ async def test_explicit_local_successor_preserves_predecessor_and_creates_once(s
         "name": "Equipment report", "instruction": "Save the original equipment report.",
     }))["task_id"]
     s.harness.executor.dispatch_outcome = TerminalOutcome.COMPLETED
-    from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import TaskResultArtifact
+    from openjiuwen.core.application.tasks.formal_task_models import TaskResultArtifact
     dispatch = s.harness.executor.dispatch
     async def completed_dispatch(item):
         delivery = await dispatch(item)
@@ -396,7 +396,7 @@ async def test_local_delegation_requires_current_supported_executor(semantic_run
     s = semantic_runtime
     s.program = lambda data: {**model_output(data, operation="task.create", arguments={
         "name": "Report", "instruction": "Save report.md."}), "requested_work": "local_artifacts"}
-    from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import FormalTaskViolation
+    from openjiuwen.core.application.tasks.formal_task_models import FormalTaskViolation
     from jiuwenswarm.common.schema.live_voice_contract_v2 import ErrorCode
     def deny(_resolution):
         raise FormalTaskViolation("LOCAL_ARTIFACT_DELEGATION_CAPABILITY_REQUIRED", "not supported", ErrorCode.PERMISSION_DENIED)
@@ -766,8 +766,8 @@ async def test_confirmed_core_outcome_keeps_unknown_distinct_from_rejection(
     semantic_runtime, monkeypatch, cause
 ):
     from jiuwenswarm.common.schema.live_voice_contract_v2 import ErrorCode
-    from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import FormalTaskViolation
-    from jiuwenswarm.server.runtime.formal_tasks.persistent_task_core import _failure
+    from openjiuwen.core.application.tasks.formal_task_models import FormalTaskViolation
+    from openjiuwen.core.application.tasks.persistent_task_core import _failure
 
     s = semantic_runtime
     params = {
@@ -930,7 +930,7 @@ async def test_task_answers_use_current_facts_and_complete_results_without_tools
     }))["task_id"]
     text = "材料。" * 10_000 + "TAIL_FACT: replacement is unnecessary."
     if query == "complete-result" or query.endswith("-advanced"):
-        from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import TerminalOutcome, TaskResultArtifact
+        from openjiuwen.core.application.tasks.formal_task_models import TerminalOutcome, TaskResultArtifact
         s.harness.executor.dispatch_outcome = TerminalOutcome.COMPLETED
         dispatch = s.harness.executor.dispatch
 
@@ -1052,7 +1052,7 @@ async def test_direct_adjustment_and_queries_give_one_toolless_agent_current_app
         return receipt['task_control_snapshot']
     if settled_before_receipt != "pending":
         if settled_before_receipt == "rejected":
-            from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import TaskAdjustmentState
+            from openjiuwen.core.application.tasks.formal_task_models import TaskAdjustmentState
             adjust = s.harness.executor.adjust
             async def reject(item):
                 result = await adjust(item)
@@ -1103,8 +1103,8 @@ async def test_direct_adjustment_and_queries_give_one_toolless_agent_current_app
 @pytest.mark.parametrize("cause", ["CONFLICT", "TIMEOUT", "INTERNAL"])
 async def test_failed_adjustment_presentation_distinguishes_rejection_from_unknown(semantic_runtime, monkeypatch, cause):
     from jiuwenswarm.common.schema.live_voice_contract_v2 import ErrorCode
-    from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import FormalTaskViolation
-    from jiuwenswarm.server.runtime.formal_tasks.persistent_task_core import _failure
+    from openjiuwen.core.application.tasks.formal_task_models import FormalTaskViolation
+    from openjiuwen.core.application.tasks.persistent_task_core import _failure
     s = semantic_runtime
     task_id = (await control_with_confirmation(s, "failure-create", "task.create", {
         "name": "设备核查", "instruction": "核查设备，不采购。",
@@ -1963,7 +1963,7 @@ async def test_native_exact_task_reads_use_authoritative_receipt_without_busines
         )
     )["task_id"]
     if state == "terminal":
-        from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
+        from openjiuwen.core.application.tasks.formal_task_models import (
             TerminalOutcome,
             TaskResultArtifact,
         )

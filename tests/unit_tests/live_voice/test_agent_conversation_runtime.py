@@ -67,7 +67,7 @@ from jiuwenswarm.server.runtime.presentation.presentation_ledger import (
     PresentationSurface,
     PresentationUnit,
 )
-from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import PersistentTaskEvent
+from openjiuwen.core.application.tasks.formal_task_models import PersistentTaskEvent
 from jiuwenswarm.server.runtime.presentation.progress_notification_arbiter import (
     ForegroundFact,
     ForegroundSnapshot,

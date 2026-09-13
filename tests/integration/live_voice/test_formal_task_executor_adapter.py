@@ -19,12 +19,12 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     OriginRef,
     ScopeRef,
 )
-from jiuwenswarm.server.runtime.formal_tasks.executor_capabilities import (
+from openjiuwen.core.application.tasks.executor_capabilities import (
     TASK_EXECUTION_REQUIREMENTS_SCHEMA_VERSION,
     TaskExecutionRequirements,
     select_executor,
 )
-from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
+from openjiuwen.core.application.tasks.formal_task_models import (
     FormalTaskSpec,
     FormalTaskViolation,
     OutboxKind,

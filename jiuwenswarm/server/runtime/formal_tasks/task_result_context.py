@@ -17,7 +17,7 @@ from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
     FormalContextEntry,
     FormalContextSnapshot,
 )
-from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
+from openjiuwen.core.application.tasks.formal_task_models import (
     FormalTaskViolation,
     PersistentTaskRecord,
     TaskResultArtifact,

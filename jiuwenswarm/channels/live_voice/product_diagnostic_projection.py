@@ -10,8 +10,8 @@ from __future__ import annotations
 import hashlib
 from dataclasses import replace
 from jiuwenswarm.common.schema.live_voice_contract_v2 import CONTRACT_VERSION, ResponseRef, ScopeRef, canonical_json_bytes
-from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import OutboxKind, PersistentTaskEvent, utc_now
-from jiuwenswarm.server.runtime.formal_tasks.task_store import TaskDurabilityDiagnosticSnapshot
+from openjiuwen.core.application.tasks.formal_task_models import OutboxKind, PersistentTaskEvent, utc_now
+from openjiuwen.core.application.tasks.task_store import TaskDurabilityDiagnosticSnapshot
 from jiuwenswarm.server.runtime.formal_tasks.task_observability import (observation_from_task_event)
 from jiuwenswarm.common.telemetry.observability import (OBSERVABILITY_SCHEMA_VERSION, LiveVoiceMetric, LiveVoiceObservation, create_observation)
 from jiuwenswarm.channels.live_voice.product_p2_interaction_adapter import P2LeaseState

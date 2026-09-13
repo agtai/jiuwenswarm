@@ -21,7 +21,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ScopeRef,
     TerminalOutcome,
 )
-from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
+from openjiuwen.core.application.tasks.formal_task_models import (
     ExecutorObservation,
     ExecutorResolution,
     FormalAttemptState,
@@ -33,7 +33,7 @@ from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
     TaskRetryProductRequestFingerprint,
     TaskRetryAuthoritySnapshot,
 )
-from jiuwenswarm.server.runtime.durability.durability_recovery_facts import (
+from openjiuwen.core.application.tasks.durability.durability_recovery_facts import (
     ExecutorRecoveryFacts,
 )
 from jiuwenswarm.server.runtime.presentation.progress_notification_arbiter import (
@@ -42,7 +42,7 @@ from jiuwenswarm.server.runtime.presentation.progress_notification_arbiter impor
     ProgressNotificationArbiter,
     SpeechPolicy,
 )
-from jiuwenswarm.server.runtime.formal_tasks.task_event_subscription import (
+from openjiuwen.core.application.tasks.task_event_subscription import (
     TaskEventSubscription,
 )
 from jiuwenswarm.server.runtime.presentation.task_progress_return import (
@@ -61,7 +61,7 @@ from jiuwenswarm.server.runtime.presentation.task_progress_return import (
     _evidence_id,
     project_task_progress_event,
 )
-from jiuwenswarm.server.runtime.formal_tasks.task_store import SqliteTaskStore
+from openjiuwen.core.application.tasks.task_store import SqliteTaskStore
 
 NOW = "2026-08-06T10:00:00Z"
 EXPIRY = "2026-08-06T11:00:00Z"

@@ -86,6 +86,15 @@ support has been discussed, not implemented.
 
 ### Continuation boundary
 
+
+**Current migration (2026-09-13):** move reusable persistent Task authority and
+durability contracts to the matching AgentCore `hx/0912_livevoice` branch;
+JiuwenSwarm consumes that SDK and retains project/application/voice adapters.
+Work implementation and UI policy remain unchanged. The
+[migration record](reviews/AGENTCORE_TASK_MIGRATION_20260913.md) owns compatibility,
+capability mapping, verification and the two local commits. Existing databases,
+model configuration and running services are not changed by this source migration.
+
 **Current repair (2026-09-13):** restore Native notification sequencing after
 Gateway authority expiry and serialize browser refresh with notification polling.
 The [repair record](reviews/NOTIFICATION_SEQUENCE_RECOVERY_20260913.md) owns the

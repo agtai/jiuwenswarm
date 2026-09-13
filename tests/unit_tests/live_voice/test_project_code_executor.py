@@ -33,7 +33,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     TerminalOutcome,
 )
 from jiuwenswarm.common.utils import get_agent_workspace_dir
-from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
+from openjiuwen.core.application.tasks.formal_task_models import (
     ExecutorDeliveryResult,
     ExecutorObservation,
     ExecutorResolution,
@@ -52,7 +52,7 @@ from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
     TaskAdjustmentSettlement,
     TaskAdjustmentState,
 )
-from jiuwenswarm.server.runtime.formal_tasks.executor_capabilities import (
+from openjiuwen.core.application.tasks.executor_capabilities import (
     TASK_EXECUTION_REQUIREMENTS_SCHEMA_VERSION,
     ExecutorCapabilityProfile,
     TaskExecutionRequirements,
@@ -72,7 +72,7 @@ from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
     PROJECT_CODE_PIPELINE,
     ProjectExecutionBinding,
 )
-from jiuwenswarm.server.runtime.formal_tasks.task_store import SqliteTaskStore
+from openjiuwen.core.application.tasks.task_store import SqliteTaskStore
 from jiuwenswarm.server.runtime.agent_adapter import interface as agent_interface
 from jiuwenswarm.server.runtime.agent_manager import AgentManager
 from scripts.live_voice.w2_rehearsal.w2_d069_runtime_diagnostic import (
@@ -1991,7 +1991,7 @@ async def test_direct_result_relocates_exact_artifact_paths_before_checkout_clea
 
 
 def test_result_path_relocation_preserves_unrelated_paths_and_literal_text(tmp_path: Path) -> None:
-    from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import TaskResultArtifact
+    from openjiuwen.core.application.tasks.formal_task_models import TaskResultArtifact
 
     source, target = tmp_path / "checkout", tmp_path / "retained project"
     artifact = TaskResultArtifact("nested/《result.md》", "a" * 64)
@@ -2012,7 +2012,7 @@ async def test_real_direct_core_adjustment_does_not_block_other_running_cancel(
     lose_settlement: bool,
 ) -> None:
     """Real Direct/Core/files; controlled Agent streams, not Provider evidence."""
-    from jiuwenswarm.server.runtime.formal_tasks.persistent_task_core import PersistentTaskCore
+    from openjiuwen.core.application.tasks.persistent_task_core import PersistentTaskCore
     from tests.unit_tests.live_voice.test_persistent_task_core import (
         NOW,
         _adjust,
@@ -5836,7 +5836,7 @@ async def test_missing_journal_stays_fail_closed_without_every_exact_fact(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("lose_settlement", [False, True])
 async def test_model_boundary_waits_for_admitted_adjustments_before_next_model(tmp_path, lose_settlement):
-    from jiuwenswarm.server.runtime.formal_tasks.persistent_task_core import PersistentTaskCore
+    from openjiuwen.core.application.tasks.persistent_task_core import PersistentTaskCore
     from jiuwenswarm.server.runtime.agent_adapter.background_task_checkpoint import current_background_task_checkpoint
     from tests.unit_tests.live_voice.test_persistent_task_core import NOW, _adjust, _create
 

@@ -70,7 +70,7 @@ from jiuwenswarm.channels.live_voice.formal_history_writer import (
     native_assistant_history_record,
     native_user_history_record,
 )
-from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
+from openjiuwen.core.application.tasks.formal_task_models import (
     FormalTaskState,
     FormalTaskViolation,
     PersistentTaskEvent,
@@ -81,7 +81,7 @@ from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
     TerminalOutcome,
     utc_now,
 )
-from jiuwenswarm.server.runtime.formal_tasks.task_store import TaskDurabilityDiagnosticSnapshot
+from openjiuwen.core.application.tasks.task_store import TaskDurabilityDiagnosticSnapshot
 from jiuwenswarm.channels.live_voice.interaction_engine import INTERACTION_ACTION_OPERATIONS, InteractionEnginePort
 from jiuwenswarm.channels.live_voice.native_interaction_carrier import (
     NATIVE_NOTIFICATION_WAKE_VERSION, notification_wake_response,

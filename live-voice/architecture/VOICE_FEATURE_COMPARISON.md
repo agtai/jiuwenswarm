@@ -1,5 +1,7 @@
 # 以 LiveVoice 流程为主线的三方模块对比
 
+> 2026-09-13 Task 迁移更新：持久化 Task 内核现由 AgentCore 提供，AgentServer 负责装配和项目适配，Work 保持原实现。详见[迁移记录](../reviews/AGENTCORE_TASK_MIGRATION_20260913.md)。下文来源基线描述保留历史含义。
+
 > 2026-09-13，基于实际代码的职责与调用分析。本文件不改变已接受设计，不代表部署或真实音视频验收；产品完成边界见 [STATUS](../STATUS.md)。
 >
 > 本文三个对象：**LiveVoice Native 主链、Hermes Voice、PR #2813 + #5301 合起来的多模态全双工插件**。后者简称“多模态插件”，不再拆成两套产品比较。
@@ -52,9 +54,9 @@
 
 | 展示分组 | 内部职责 | 为什么这样分，哪些区别要保留 |
 |---|---|---|
-| 会话与呈现协调 | M4 轮次准入、旧响应失效、打断协调、通知播报、播放账本与语音历史准入 | 可合并介绍；它判断哪些内容有效、哪些已被报告播放。Native Engine 负责执行 Provider 控制，Host 负责自己的会话与呈现准入，二者协作 |
-| 业务路由与工作管理 | M5 路由/事实查询；M6 Work；M8 正式 Task | 可放在同一大组，但必须画出 Work/Task 分支。Router 校验并分流，Work 管当前入口的分析/查询，Task 管正式交付及执行尝试；不能合称一套相同生命周期 |
-| Agent 与项目执行 | M7 共享 Agent 执行入口及 AgentCore 依赖；M9 项目执行器 | 可合并为执行层。Agent 使用模型和工具执行；项目执行器在正式任务路径上增加项目基线、文件影响和恢复责任。Work 不必经过项目执行器 |
+| 语音会话与业务协调 | M4＋M5：轮次、播放状态、业务分流与已有事实查询 | 一个展示模块，内部保留语音时序与业务准入两类责任 |
+| 工作管理 | M6 Work＋M8 正式 Task | 一个展示组，当前代码仍保留两条路径；Task 内核迁入 AgentCore，Work 本次不动 |
+| Agent 与项目执行 | M7＋M9：共享 Agent 与项目执行适配 | 一个展示模块，项目路径增加基线、文件影响和恢复责任；普通 Work 不必经过项目执行器 |
 
 历史、Work 日志、Task Store 等按拥有者归入这三组，不再各画一个业务模块。它们保存不同事实，不能合并成一个“聊天历史”概念。`ProductCompositionRegistry` 负责装配、入口和生命周期协调，首次介绍纳入 Host 即可，不必另列一个与 Work/Task 并列的模块。
 
@@ -64,36 +66,27 @@
 
 ```mermaid
 flowchart TB
-  B["浏览器端：操作与展示、采集与播放、回执（M1 + M2 客户端）"]
-  G["Gateway 接入层：控制转发、连接与媒体路由"]
-  E["Realtime 语音能力：Native Engine + 云端模型（M3）"]
-  subgraph Host["AgentServer / Host"]
-    S["语音会话与播放状态管理（M4）"]
-    subgraph Business["业务路由与工作管理"]
-      R["业务分流与状态 / 结果查询（M5）"]
-      W["Work：分析 / 查询（M6）"]
-      T["Task：正式交付生命周期（M8）"]
+  B["浏览器端（M1＋M2）"]
+  G["Gateway 接入与媒体路由"]
+  E["Realtime 语音能力：NativeEngine＋云端模型（M3）"]
+  subgraph Host["AgentServer：JiuwenSwarm 业务后端 / Host"]
+    C["语音会话与业务协调（M4＋M5）"]
+    subgraph Management["工作管理：当前仍是两条路径"]
+      W["Work（M6）：现有 Host 实现"]
+      T["Task（M8）：装配 AgentCore 持久化任务内核"]
     end
-    subgraph Execution["Agent 与项目执行"]
-      X["项目执行器（M9）"]
-      A["共享 Agent 执行 / AgentCore 能力（M7）"]
-    end
+    X["Agent 与项目执行（M7＋M9）<br/>共享 Agent 能力；项目路径增加文件保护"]
   end
-  B <-->|控制、媒体、文字与状态| G
-  G <-->|音频与传输交付| E
-  E <-->|会话准入、呈现与取消控制| S
-  E -->|业务调用，经准入| R
-  R -->|已有事实| S
-  R -->|分析 / 查询| W
-  R -->|正式交付| T
-  W <-->|执行与输出| A
-  T <-->|执行命令与事实| X
-  X <-->|Agent 执行与输出| A
-  W -->|回执、进度与结果| S
-  T -->|回执、进度与结果| S
-  S -->|结果回填与播报协调| E
-  G <-->|激活、播放回执、状态及历史等| S
+  B <-->|控制、音频与状态| G
+  G <-->|音频| E
+  G <-->|激活、播放回执与状态| C
+  E <-->|会话事件、业务调用与结果回填| C
+  C <-->|查询、分析与结果| W
+  C <-->|正式工作与结果| T
+  W <-->|Agent 执行| X
+  T <-->|项目执行与事实| X
 ```
+
 
 这是职责分组图：四个顶层部分为浏览器端、Gateway 接入层、Realtime 语音能力、AgentServer。**Realtime 在展示图中只占一个模块框；内部 Native Engine 运行在 Gateway，模型运行在云端。AgentCore 是执行依赖，不是另一个必经网络服务。** 实际部署仍是浏览器、Gateway、AgentServer 与外部模型服务。图中 Work 与 Task 是分支，普通实时对话不必进入业务执行。
 
@@ -382,7 +375,7 @@ Hermes 所查 Voice 流程接普通 turn，未见等价独立 Task/Attempt/Outbo
 
 这是**无同等独立层**，不是“另两者不能完成任务”。LiveVoice 也不能因此宣称所有任务都能自动恢复或所有异常已验收。
 
-源码：[PersistentTaskCore](../../jiuwenswarm/server/runtime/formal_tasks/persistent_task_core.py)；插件 TaskFullDuplexRuntime/video_search；Hermes prompt_turn.py。
+源码：[PersistentTaskCore](../../../agent-core/openjiuwen/core/application/tasks/persistent_task_core.py)；插件 TaskFullDuplexRuntime/video_search；Hermes prompt_turn.py。
 
 ### M9 项目执行器：文件工具共有，副作用协议不同
 
@@ -394,7 +387,7 @@ Hermes 和插件都能通过普通 Agent 文件/执行工具读取或修改文�
 
 取消任何语音或 Agent 响应都不等于回滚已经写入的文件，恢复应依据具体副作用记录。
 
-源码：[项目执行器](../../jiuwenswarm/server/runtime/formal_tasks/project_code_executor.py)、[文件影响计划](../../jiuwenswarm/server/runtime/formal_tasks/file_effect_plan.py)；另两者见 M7。
+源码：[项目执行器](../../jiuwenswarm/server/runtime/formal_tasks/project_code_executor.py)、[文件影响计划](../../../agent-core/openjiuwen/core/application/tasks/file_effect_plan.py)；另两者见 M7。
 
 ## 5. 返回链路横向对齐：由谁变成声音，何时保存
 

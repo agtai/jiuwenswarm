@@ -19,13 +19,13 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ScopeRef,
     TerminalOutcome,
 )
-from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import TaskResultArtifact
-from jiuwenswarm.server.runtime.formal_tasks.persistent_task_core import PersistentTaskCore
+from openjiuwen.core.application.tasks.formal_task_models import TaskResultArtifact
+from openjiuwen.core.application.tasks.persistent_task_core import PersistentTaskCore
 from jiuwenswarm.server.runtime.presentation.presentation_ledger import (
     PresentationAck,
     PresentationSurface,
 )
-from jiuwenswarm.server.runtime.formal_tasks.task_store import SqliteTaskStore
+from openjiuwen.core.application.tasks.task_store import SqliteTaskStore
 from tests.unit_tests.live_voice.presentation_ack_oracle_harness import (
     DeliveryAttempt,
     PresentationAttemptHarness,

@@ -29,7 +29,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     canonical_json_bytes,
 )
 
-from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import FormalTaskViolation
+from openjiuwen.core.application.tasks.formal_task_models import FormalTaskViolation
 from jiuwenswarm.server.runtime.agent_adapter.p3_model_resolution import P3ModelResolver
 from jiuwenswarm.server.runtime.formal_tasks.production_task_intent import (
     TaskAuthorityRead,

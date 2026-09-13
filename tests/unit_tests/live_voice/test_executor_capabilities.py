@@ -12,7 +12,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ErrorCode,
     MAX_SAFE_INTEGER,
 )
-from jiuwenswarm.server.runtime.formal_tasks.executor_capabilities import (
+from openjiuwen.core.application.tasks.executor_capabilities import (
     EXECUTOR_CAPABILITY_PROFILE_SCHEMA_VERSION,
     TASK_EXECUTION_REQUIREMENTS_SCHEMA_VERSION,
     ExecutorCapabilityProfile,
@@ -20,7 +20,7 @@ from jiuwenswarm.server.runtime.formal_tasks.executor_capabilities import (
     TaskExecutionRequirements,
     select_executor,
 )
-from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import FormalTaskViolation
+from openjiuwen.core.application.tasks.formal_task_models import FormalTaskViolation
 
 
 def _profile(**overrides: object) -> ExecutorCapabilityProfile:
