@@ -176,4 +176,9 @@ def require_payload_source(command):
             raise NativeTaskSourceError("NATIVE_TASK_SOURCE_TARGET_MISMATCH")
     return source
 
-register_source_codec(NATIVE_TASK_SOURCE_VERSION, NativeTaskSource)
+def register_native_task_source_codec():
+    """Register Host speech evidence before the SDK restores persisted tasks."""
+    register_source_codec(NATIVE_TASK_SOURCE_VERSION, NativeTaskSource)
+
+
+register_native_task_source_codec()

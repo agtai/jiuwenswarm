@@ -5336,6 +5336,10 @@ def create_p3_composition_from_environment(
             model_resolver=model_resolver,
             principal=principal,
         )
+        # Store construction validates persisted evidence before any route runs.
+        from jiuwenswarm.common.schema.native_task_source import register_native_task_source_codec
+
+        register_native_task_source_codec()
         store = SqliteTaskStore(database_path)
         managed_baselines = DirectProjectManagedBaselineReader(
             database_path,

@@ -2,6 +2,8 @@
 import asyncio
 import hashlib
 import json
+import subprocess
+import sys
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -164,6 +166,33 @@ async def test_actual_registry_sqlite_and_executor_request_retain_d_after_model_
         assert replay.ok and store.counts() == before
         assert store.get_task(task.task_id, env.binding.scope).spec.native_source == retained
         assert env.manager.agent.executions == []
+        # A fresh service must register its Host evidence codec before restoring
+        # persisted SDK tasks; test imports in this process hide that ordering.
+        cold_start = subprocess.run(
+            [sys.executable, "-X", "utf8", "-c", """
+import sys
+from pathlib import Path
+import os
+os.environ.update({
+    "JIUWENSWARM_LIVE_VOICE_P3_ENABLED": "1",
+    "JIUWENSWARM_LIVE_VOICE_P3_AUTH_TOKEN": "cold-start-test-token-01234567890123456789",
+    "JIUWENSWARM_LIVE_VOICE_P3_PRINCIPAL_ID": "user-1",
+    "JIUWENSWARM_LIVE_VOICE_P3_PROJECT_IDS": "project-1",
+    "JIUWENSWARM_LIVE_VOICE_P3_AUTH_EXPIRES_AT": "2100-01-01T00:00:00Z",
+    "JIUWENSWARM_LIVE_VOICE_P3_EXECUTOR_PROFILE": "live-voice.direct-project-code.d2.v2",
+})
+from jiuwenswarm.server.runtime.formal_tasks import p3_authenticated_composition as p3
+from openjiuwen.core.application.tasks import source
+assert not source._CODECS
+p3._resolve_database_path = lambda _: Path(sys.argv[1])
+composition = p3.create_p3_composition_from_environment(
+    agent_manager=object(), model_resolver=object())
+assert composition is not None
+assert composition._core.store.counts() == __import__('json').loads(sys.argv[2])
+""", str(env.harness.database), json.dumps(store.counts())],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert cold_start.returncode == 0, cold_start.stderr
     finally:
         await env.registry.stop()
         await env.harness.composition.stop()
