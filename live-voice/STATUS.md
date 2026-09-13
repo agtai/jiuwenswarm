@@ -103,7 +103,11 @@ not one management state machine; their cancellation, transaction and result
 semantics differ. Work now directly uses HostWorkAgentExecutor and the existing
 Harness, removing its Voice ConversationRuntime/Bridge allocation; SQLite result
 recovery, replay suppression and cancellation cleanup checks cover this seam.
-The broader Host/Voice registry and unified-route joint acceptance remain open.
+Current unified-input joint tests cover real SQLite Task creation/confirmation,
+replay/conflict, project rejection, Voice close followed by completion, and
+running cancellation while the original dialogue completes normally. These use
+controlled model/authority/lower-Agent dependencies. The broader Host/Voice
+registry audit and remaining old joint adjustment/barge-in oracles remain open.
 Module diagrams retain M4+M5 and M7+M9; accounting separates actual deletion,
 retained/migrated code and native-file additions. Earlier ownership extraction
 is recorded in [the preceding packet](reviews/TASK_WORK_UNIFICATION_20260913.md),

@@ -54,8 +54,8 @@ acceptance is outside this code seam; no new audio performance claim is made.
 
 PARTIAL / IN PROGRESS. Bounded native callback integration and duplicate removal
 are implemented; Task/Work management is not mechanically unified with
-Controller/Team, and removing the full Voice runtime from Work execution remains
-unproved. This record is not full product-candidate closure. User session `web_1a09c8505b1_6bce26af6cd4` did not verify running cancel;
+Controller/Team. Work's Voice runtime wrapper was removed and verified in the
+09-14 continuation below. This record is not full product-candidate closure. User session `web_1a09c8505b1_6bce26af6cd4` did not verify running cancel;
 weather Work produced city clarification, not a successful weather lookup.
 
 ## Rejected checkpoint replacement (no production change retained)
@@ -214,6 +214,16 @@ identity configuration was persisted and no existing history was rewritten.
 
 ## Work producer continuation (2026-09-14, Tier 2 lifecycle seam)
 
+Follow-on acceptance scope: reconstruct the retired P2 joint scenario through
+current unified committed-input admission. Own only the joint integration test
+and audit documentation, with real Host session runtime, authenticated Task
+composition, SQLite Core/Store and temporary project files. Controlled semantic
+model/lower Agent remain test dependencies. Verify dialogue alongside accepted
+Task, exact request replay, wrong scope with zero extra effects, and Voice close
+without cancelling the Task. This is Tier 2 lifecycle evidence; no production
+protocol, authorization policy or audio timing change. Broader old scenario
+oracles remain open until each is replaced with evidence on the current route.
+
 Starting from the paired commits above, remove the Work-only construction of a
 complete AgentConversationRuntime and AgentBridgeRuntime. Reuse the existing
 Host JiuWenSwarmRoundHarness reservation, actual runner/cleanup and exact cancel;
@@ -263,3 +273,44 @@ was rejected because old build/lib retained deleted task_core.py; staging the
 current tracked source without build caches removed it. The clean wheel has no
 extra production Python file and its new Host executor/Harness and SDK imports
 resolve inside the temporary target. No environment package or deployment change.
+
+## Current unified-input joint evidence (2026-09-14)
+
+`tests/integration/live_voice/test_unified_host_task_joint.py` exercises
+handle_unified_submit → semantic model port → authenticated P3 composition →
+PersistentTaskCore/SQLite → direct project executor, alongside a real Host
+AgentRuntime/RuntimeFormalAgentFacade dialogue. This replaces the relevant
+oracles, not the method name, from the retired P2 scenario. Unified input returns
+round_accepted and renders the real receipt; it does not expose the old separate
+intent response shape. Current explicit semantic cancellation supplies consent
+to the existing durable origin-bound claim (registry line 12671 boundary), so
+the test does not fabricate an obsolete second cancellation utterance.
+
+Both completion/cancellation cases pass. Each verifies an actually RUNNING Task,
+exact confirmation replay, content-conflicting replay (UNIFIED_INPUT_ID_CONFLICT),
+and foreign-project unified submission (PROJECT_MISMATCH). Rejected operations
+leave the complete SQLite logical dump, model/lower-Agent call counts and project
+artifact effects unchanged. Voice close leaves accepted Task execution alive;
+its completed RESULT-joint.md and pre-existing README bytes match. Explicit Task
+cancellation yields CANCELLED without a result file, while the original dialogue
+is released and finishes normally without cancellation. Every owner is closed
+in nested teardown, including the Host and direct executor.
+
+The test synchronizes through composition.reconcile_once, the existing Host
+reconciliation lock. An early fixture called Core.reconcile concurrently with
+the composition and raced claim/receipt bookkeeping; it was corrected to use
+the actual owner. The old Agent-manager fixture lacked get_agent_nowait and the
+foreground hooks required by today's Runtime; the controlled manager now
+implements those ports. Neither issue prompted a production behavior change.
+
+Independent review found weak foreground-cancellation evidence, missing Host/
+executor teardown and a wrong-scope check limited to P3 query; all three were
+corrected as described above. Models, authority resolver, Agent manager and
+lower Agent remain controlled, so this is not complete production authorization,
+language, Provider, browser or human acceptance. The old P2 test is retained as
+an identified stale oracle; its adjustment/barge-in combination is not claimed
+replaced. No production code changed in this evidence batch, so all three code
+counts and the 195,321 combined baseline delta remain unchanged.
+
+Command: `.venv/Scripts/python.exe -m pytest -q -o addopts= -o log_cli=false tests/integration/live_voice/test_unified_host_task_joint.py --tb=short`.
+Scoped Ruff and diff whitespace checks also pass.
