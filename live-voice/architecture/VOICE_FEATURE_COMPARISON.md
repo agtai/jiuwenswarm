@@ -4,71 +4,105 @@
 >
 > 本文三个对象：**LiveVoice Native 主链、Hermes Voice、PR #2813 + #5301 合起来的多模态全双工插件**。后者简称“多模态插件”，不再拆成两套产品比较。
 
-## 展示版：先讲四个能力块，不逐个讲九模块
+## 展示版：保留接入边界，再展开关键职责
 
-**M1 产品交互可以不单独讲。** 对这次架构和能力对比，先用一句“用户在页面开启语音并查看结果”交代入口即可。它对产品可用性仍然重要，但不是本次三者核心执行链的主要区别。只有讨论恢复体验、多平台入口或任务页集成时，再展开 M1。
+**Gateway 应当恢复为主介绍中的独立模块。** 它决定媒体经过哪里、Provider 连接由谁维护、业务请求怎样进入宿主、音频和控制如何返回。把它藏进“媒体输入输出”，会让听众误以为浏览器直连 Realtime，或误以为所有音频都先进入 AgentServer。
 
-其他模块按“是否影响理解能力与行为差异”决定合并或展开，不按代码量取舍。推荐主介绍只讲下面四块；原有 M1–M9 保留为代码核对索引，不重新编号或改变职责归属。
+推荐采用两层颗粒度：先用一张图交代**浏览器、Gateway、云端语音服务、Host/AgentServer，以及 Agent 执行底座**；再沿数据流介绍其中的职责模块。前四项是运行位置或服务边界，AgentCore 是执行依赖，Work/Task 则是宿主内的业务模块；图中用容器区分，不把它们说成同一种独立服务。
 
-| 展示时讲什么 | 对应代码职责 | 必须讲清的一句话 | 可暂时收起的细节 |
-|---|---|---|---|
-| A 媒体输入输出 | M2；M1 只作入口背景 | 能听、能说，以及能否持续看摄像头或屏幕 | UI 组件名、设备枚举、编码/采样率、Worklet、连接握手 |
-| B 实时对话与打断 | M3 + M4 | 谁形成回答，插话停止什么，已生成与已播放如何区分 | Provider 事件名、generation/cursor 字段、轮次状态机函数 |
-| C 业务接入与 Agent 执行 | M5 + M6 + M7 | 哪些直接回答，哪些查已有事实，哪些调用真实 Agent，谁管理后台工作 | Router/Facade 类名、请求封装、执行器池；首次不展开全部操作与版本字段 |
-| D 正式交付与文件执行 | M8 + M9 | 普通 Agent 能写文件，与正式任务的调整、执行记录和恢复机制有什么区别 | Store 表、Attempt/Outbox 协议、文件影响计划与恢复算法 |
+### 主介绍必须保留哪些模块
 
-**合并讲解不等于合并模块。** C 仍须区分“路由决定交给谁”“Work 管状态”“Agent 真正执行”；D 仍须区分“Task 管生命周期”“项目执行器处理实际文件”。首次不必展开类名，但不能把这两组各说成一个没有内部责任的“Agent”。
+| 介绍模块 | 必须讲清的责任与数据 | 与原索引的关系 |
+|---|---|---|
+| 浏览器交互与媒体 | 用户开启/结束会话；采集音频、播放声音、显示文字和工作结果，并上报播放进度 | M1 + M2；界面细节可简讲，客户端不能消失 |
+| Gateway 接入与媒体运行 | 接收音频和控制请求，维护媒体路由；Native Engine 在这里连接 Realtime；转发业务/呈现事件并交付下行音频 | 新增 G 接入职责；承接 M2 的服务端部分，运行 M3 适配器 |
+| Realtime 语音模型适配 | 音频进入模型；返回语音、输入/输出转写和结构化业务调用；普通对话可直接回答 | M3；必须区分 Gateway 内的适配代码与云端模型 |
+| 会话、打断与呈现 | 管理轮次、响应失效、通知播报和播放确认；区分生成、发送、播放与历史准入 | M4；关键事实在 Host，Gateway/浏览器配合执行 |
+| 业务路由与事实查询 | 将请求分成查询已有事实、发起/控制 Work、创建/控制 Task，校验项目、来源及对象归属 | M5；不能省掉分流，否则容易误解“所有问题都调用 Agent” |
+| Work 服务 | 管理当前语音入口的只读分析/查询工作及其状态、更新、取消和结果 | M6；不能与执行一次模型调用混为一谈 |
+| 共享 Agent 执行 | 使用应用配置的 AgentModel 和工具真正完成工作；复用 Jiuwen Runtime/AgentCore 能力 | M7；AgentModel 与 Realtime 的职责必须分开 |
+| 正式 Task 系统 | 保存交付任务、执行尝试、命令、调整和恢复事实；决定哪个结果属于当前任务 | M8；不是聊天框里的“任务完成”标签 |
+| 项目执行器 | 准备项目环境，调用 Agent 做文件工作，核对文件影响并向 Task 返回执行事实 | M9；不能只用“Agent 写文件”概括 |
 
-### 展示用流程图
+**Host/AgentServer 也必须介绍，但作为上述宿主模块的容器。** 在当前本地部署中，它是本机业务后端，不是云端语音模型。它承载会话准入、业务路由、Work、Task 和项目执行等责任，并连接共享 Agent 执行能力。Gateway 与 Host 分开运行；Work、Task、AgentCore 并不因此各自成为独立网络服务。
+
+### 展示用模块图：部署边界和职责同时可见
 
 ```mermaid
 flowchart TB
-  A["A 用户声音输入与播放"] <--> B["B 实时对话与打断"]
-  B -->|需要真实业务| C["C 业务路由"]
-  C -->|已有事实| Q["查询已有状态或结果"]
-  C -->|只读分析或查询| W["Work 管理 → 共享 Agent"]
-  C -->|正式交付| D["D 正式 Task → 项目执行器 → Agent"]
-  Q --> R["真实结果：可保存、可查看"]
-  W --> R
-  D --> R
-  R -->|协调播报| B
-  A -->|播放确认| B
+  subgraph Browser["浏览器"]
+    UI["M1 交互：操作、文字、结果"]
+    Audio["M2 媒体：采集、播放、播放回执"]
+  end
+  subgraph Gateway["Gateway 接入服务"]
+    G["G 同源控制与媒体路由"]
+    E["M3 Native Engine：Realtime 适配"]
+  end
+  P["云端 Realtime：听说、转写、业务调用"]
+  subgraph Host["Host / AgentServer：宿主业务与会话服务"]
+    S["M4 会话、打断、通知与呈现"]
+    R["M5 业务路由 / 已有事实查询"]
+    W["M6 Work 服务"]
+    T["M8 正式 Task 系统"]
+    X["M9 项目执行器"]
+    A["M7 共享 Agent 执行入口"]
+    H["会话历史、Work 日志、Task 与执行记录"]
+  end
+  Core["AgentCore / 配置的 AgentModel 与工具能力"]
+  UI <-->|激活、控制、状态与文字| G
+  Audio <-->|输入音频 / 下行音频| G
+  G <--> E
+  E <-->|音频、转写、模型事件| P
+  E <-->|轮次准入、取消、呈现控制| S
+  E -->|结构化业务调用，经准入| R
+  R -->|只读分析 / 查询| W
+  R -->|正式交付| T
+  W <-->|执行与输出| A
+  T <-->|任务命令 / 执行事实| X
+  X <-->|执行与输出| A
+  A <--> Core
+  R -->|已有事实| S
+  W -->|回执、进度、结果| S
+  T -->|回执、进度、结果| S
+  S -->|播报 / 结果回填| E
+  Audio -->|播放回执，经 Gateway| G
+  G -->|播放确认| S
+  S --> H
+  W --> H
+  T --> H
+  H -->|历史 / 状态| G
 ```
 
-这是 LiveVoice Native 的概念流程图：普通对话留在 A/B，业务才进入 C；正式交付是 C 分流到 D，**不是所有请求都串行经过四块**。Gateway/Host 位置和具体传输箭头收在后面的架构图里。图中的播放确认是浏览器报告的播放事实，不证明人的主观听觉。
+图中的共享存储框代表几类记录，并非同一张表或同一个数据库。AgentCore 框表示依赖关系，并非另一个必经网络跳点。Work 和 Task 调用各自的 Agent 入口；并非每个请求都经过全部模块，也不是所有音频帧都先经过 Host。
 
-### 展示用横向对照
+### Gateway 与同层级边界：三方横向对齐
 
-| 能力块 | LiveVoice | Hermes Voice | 多模态插件（两个 PR 合起来） | 展示时解释的差异 |
+| 边界 | LiveVoice Native | Hermes Voice | 多模态插件（#2813 + #5301） | 必须解释的差异 |
 |---|---|---|---|---|
-| A 媒体输入输出 | 当前主链是音频，经 Gateway 接入 | Live 用 WebRTC；Chained 及平台有各自录音/播放适配 | 音频加摄像头、屏幕、视频文件抽帧 | 基础采集播放职责共同；插件多出持续视频源输入，传输实现也不同 |
-| B 实时对话与打断 | Realtime 对话；Host 协调轮次、播报和播放账本 | Live 是实时模型委托；Chained 是 STT → Agent → TTS；部分打断会中止 Agent turn | Qwen/JoyAI 编排；前端控制打断、旧音频过滤和结果播报 | 都能听说/打断，但模型结构、取消对象和“已播放”语义不同 |
-| C 业务与执行 | 查事实、只读 Work、正式 Task 显式分流；复用 Jiuwen Agent | 主要接已有 Hermes 普通 Agent turn | Gateway 通用 job 队列接 Jiuwen AgentServer，可调用文件工具 | 都执行真实工具；Work、turn、job 的范围和状态管理不等价 |
-| D 正式交付与文件 | 独立 Task 和项目执行层，记录调整、文件执行和恢复事实 | 普通 Agent 可做文件工作；所查 Voice 路径无同等独立协议层 | Core Agent 可写文件、展示产物；job 未接 PersistentTaskCore | 文件能力共有；LiveVoice 另有专门生命周期和副作用协议，不能据此声称其他两者不会做任务 |
+| 客户端 | Web 操作、采集、播放与 ACK；关键会话事实交 Host 管理 | Desktop/CLI/平台入口；Live 客户端管理 WebRTC 和 delegation，Chained 串接录音与播放 | Web 中编排 Qwen/JoyAI、视频源、打断和结果注入 | 都有客户端，但承担的会话逻辑不同；插件还持续输入图像 |
+| 接入后端 / Gateway | 持有媒体路由和 Native Engine，音频经过 Gateway；业务与呈现事件走内部 Host 接口 | GPT-Live 后端负责带凭证交换 SDP，音轨走客户端 ↔ Provider；Chained 可中继，也可按配置直连；平台另有 Gateway adapter | Qwen 经 Gateway 做 WS 双向中继，主要会话编排在前端；JoyAI/ASR/TTS 走插件后端接口，业务 job 也由 Gateway 插件管理 | “都有 Gateway”不代表音频拓扑、模型适配位置或任务归属相同 |
+| 云端语音服务 | 原生 Realtime 音频输入输出及转写，提出业务调用 | GPT-Live 为独立语音模型；Chained 是 STT + Agent + TTS | Qwen Omni 音图会话；JoyAI 图像对话加独立 ASR/TTS | 独立 Realtime 并非所有模式都有；视觉输入与语音服务组合不同 |
+| 宿主业务后端 | AgentServer 承载会话/业务权威；Work、正式 Task 和项目执行为不同模块 | 复用 Hermes 普通 turn、Agent 与历史；并非 Jiuwen Host | Gateway 的 VideoSearchManager 持有 job，AgentServer 执行标准 CHAT_SEND | LiveVoice 的 Work/Task 与插件 job 不在同一管理层，不能只画一个“后端 Agent” |
+| Agent 执行底座 | Work/Task 入口各异，底层使用 Jiuwen Agent 与 AgentCore 能力 | Hermes 自己的 Agent、模型和工具 | 通过通用消息入口到 Jiuwen AgentServer/AgentCore | 两个 Jiuwen 特性复用部分底座，但入口契约和生命周期尚未统一 |
 
-### 哪些可以略过，哪些不能略过
+详细业务模块仍按第 3–4 节 M1–M9 比较；新增的 G 负责补足接入边界，不重编号，也不重复计算 M2/M3 的代码归属。
 
-| 原模块 | 主介绍处理方式 | 不能因精简而丢掉的内容 |
-|---|---|---|
-| M1 产品交互 | 略过独立模块框，用一句话交代 | 用户入口、结果可查看；比较多平台或恢复体验时再展开 |
-| M2 媒体 | 保留能力，略过底层实现 | 音频还是音视频输入，以及播放出口 |
-| M3 语音模型 | 保留核心区别 | 原生实时模型与 STT/Agent/TTS 的结构不同 |
-| M4 会话与呈现 | 与 M3 合讲，不能完全略过 | 停声音不必然停任务；生成/保存/播放确认不同 |
-| M5 业务路由 | 与 M6/M7 合讲，保留分流 | 直接对话、已有事实、真实执行、正式交付不是一条必经链 |
-| M6 Work 管理 | 收入业务块，首次省去独立类名 | Work、普通 turn、plugin job 的工作范围和生命周期不同 |
-| M7 Agent 执行 | 保留一句核心事实，省去 SDK 调用细节 | 真实模型/工具由既有 Agent 执行，两个 Jiuwen 入口共享部分底座 |
-| M8 正式 Task | 与 M9 合讲，不能完全略过 | 任务状态、调整与恢复，不只是一个 UI 卡片 |
-| M9 项目执行器 | 收入正式交付块，省去算法细节 | 工具写文件与项目副作用核对的区别 |
+### 什么可以简讲，什么不能删
 
-首次展示也可略过鉴权字段、诊断事件、数据库表和全部函数名；讨论部署、安全、延迟或恢复方案时再展开。唤醒词、多平台入口作为 Hermes 的补充差异，视频输入放在 A 主线中，不能为了简化而删掉。
+- **M1 可以简讲，浏览器不能删。** 用一句话说明操作与结果展示，仍要保留采集、播放、文字展示和回执的客户端位置。
+- **Gateway、Host、云端语音模型必须出现在主图。** 否则无法解释传输、权限、延迟、断连恢复以及本地问题和模型问题的区别。
+- **M4、M5、M6、M7、M8、M9 必须交代独立责任。** 可用每个模块一句话控制时长；不能用一个“业务执行”框替代全部含义。
+- **历史与结果记录必须交代保存条件。** 业务完成、聊天展示、浏览器播放确认是不同事实；不必展开表结构。
+- 配置鉴权、会话/项目绑定、协议校验、诊断与恢复作为横向责任简讲，分别指出谁校验、谁记录、谁恢复；不必逐项讲字段和函数。
+- 组件名、采样参数、WebSocket 握手细节、数据库表和恢复算法可留到技术问答。视频源、Hermes 多入口/唤醒等差异按主题补充。
 
-**阅读建议：** 3–5 分钟介绍只用本节和第 9 节；架构讨论再读第 2–5 节；代码审查按 M1–M9 与第 10 节源码索引逐项核对。精简只改变介绍颗粒度，不表示已统一实现，也不改变当前完成边界。
+**阅读建议：** 产品介绍使用本节模块图、模块表和第 9 节；架构讨论补充第 2–5 节的路径与数据。颗粒度控制在“能说明责任、输入输出、运行位置、与相邻模块关系”，无需首次就讲到类和函数，也不再压缩到看不见关键边界。
 
 ## 1. 详细索引：四组能力、九个职责模块
 
 **三者都有采集、对话、业务委托、真实 Agent 执行和播放；主要差异是媒体输入、业务分流、状态由谁管理，以及完成和恢复的含义。**
 
-下面是需要展开时使用的代码职责索引，不是首次展示必须逐项讲完的清单。能力组用于归类，前面的 A–D 用于口头讲解；二者都映射回同一组 M1–M9。模块不代表独立进程，也不要求只对应一个文件。Gateway 是接入层和运行位置，不宜与“Agent 执行”这种职责直接并列。
+下面按四组能力整理 M1–M9 职责。展示时保留这些关键责任，并额外标明 G Gateway 接入模块以及 Browser/Gateway/Host/Provider 运行边界。职责模块不代表独立进程，也不要求只对应一个文件；Gateway 容器内部包含 G 接入、M2 服务端媒体与 M3 适配代码。
 
 | 能力组 | 模块 | 一句话责任 |
 |---|---|---|
@@ -82,7 +116,7 @@ flowchart TB
 | 正式工作与结果 | M8 正式 Task 系统 | 管理交付任务、执行尝试、持久命令、调整和恢复事实 |
 | 正式工作与结果 | M9 项目执行器 | 准备项目环境，执行文件工作并核对副作用 |
 
-原先八模块描述没有独立列出 Work 管理，容易把 Work、Agent 和 Task 混为一谈；这里固定拆成九个，后续编号保持一致。
+原先八模块描述没有独立列出 Work 管理，容易把 Work、Agent 和 Task 混为一谈；保留九个职责编号，并以 G 补充原索引没有单列的 Gateway 接入责任。
 
 比较结论严格分三类：
 
@@ -131,10 +165,10 @@ M7 表示共同的执行能力，Work 与 Task 的 Agent 入口不同。返回�
 
 | 请求 | LiveVoice 路径 | 是否新调用 AgentModel |
 |---|---|---|
-| 普通闲聊、稳定常识、改写用户已提供的文字 | M2 → M3 → M2；M4 管理轮次与呈现 | 不必 |
-| 查询已存在的任务状态或结果 | M3 → M5 → Host 已有事实 → M4/M3 → M2 | 通常不必 |
-| 读取文件分析、实际查询和核实 | M3 → M5 → M6 Work → M7 Agent → M6 → M4/M3 → M2 | 需要 |
-| 修改保存文件、后台完成正式交付物 | M3 → M5 → M8 Task → M9 → M7 → M9 → M8 → M4/M3 → M2 | 需要 |
+| 普通闲聊、稳定常识、改写用户已提供的文字 | M2 → G/M3 → Realtime → G/M3 → M2；M4 管理轮次与呈现 | 不必 |
+| 查询已存在的任务状态或结果 | Gateway M3 → Host M5 → 已有事实 → M4 → Gateway M3 → M2 | 通常不必 |
+| 读取文件分析、实际查询和核实 | Gateway M3 → Host M5 → M6 Work → M7 Agent → M6 → M4 → Gateway M3 → M2 | 需要 |
+| 修改保存文件、后台完成正式交付物 | Gateway M3 → Host M5 → M8 Task → M9 → M7 → M9 → M8 → M4 → Gateway M3 → M2 | 需要 |
 
 路由依据是请求需要的事实、权限和副作用，不是“Realtime 能不能猜一个答案”。明确要求查询或核实，应真实查询；正式后台交付物即使没有指定文件名，也走 Task。模型提出操作，Host 再校验和执行，提示词不能代替服务端边界。
 
@@ -142,19 +176,22 @@ M7 表示共同的执行能力，Work 与 Task 的 Agent 入口不同。返回�
 
 ### 2.3 回来时有两条线
 
-**业务结果线：** Work/Task/事实服务 → 受理回执、进度、结果、产物引用、失败或调整事实 → 前端展示和持久记录。
+**业务结果线：** Host 的 Work/Task/事实服务保存受理回执、进度、结果、产物引用、失败或调整事实；通过 Gateway 将相应状态和结果投影返回前端。持久保存和前端展示是不同操作。
 
 **语音呈现线：** 真实业务结果 → Host 会话/通知协调 → Realtime 生成语音 → Gateway → 浏览器播放 → 播放 ACK 回 Host → 更新呈现与符合条件的 Native 回复历史。
+
+**不涉及业务的回复：** Realtime → Gateway Native Engine → 浏览器音频播放；Host 仍参与轮次与呈现准入。输入转写和回复转写由 Provider 提供，Gateway/Host 处理事件、记录与前端投影，不是由 Gateway 自己生成回答。文字展示与音频传输是两条相关但异步的路径，不能把文字到达时间当成首音播放时间。
 
 任务完成、结果可查看、结果已交给语音模型、浏览器报告已播放，是四种事实。业务结果保存不必等待播放；ACK 也不能证明用户主观上听清了。
 
 代码：[业务指令](../../jiuwenswarm/channels/live_voice/native_business_instructions.py)、[路由](../../jiuwenswarm/channels/live_voice/native_business_router.py)、[Native 会话](../../jiuwenswarm/channels/live_voice/native_interaction_runtime.py)。
 
-## 3. 九模块横向总表
+## 3. Gateway 与九个职责模块横向总表
 
 | 模块 | LiveVoice | Hermes Voice | 多模态插件：#2813 + #5301 | 判断 |
 |---|---|---|---|---|
 | M1 产品交互 | 专门语音面板、恢复与业务状态 | Desktop、CLI/TUI、平台语音入口 | 视频面板、常规任务入口、队列与文件时间线 | 共同职责，入口和工作对象不同 |
+| G Gateway 接入 | 同源控制/媒体路由、Native Engine、内部 Host 桥接及通知交付 | Live 的 SDP 后端与媒体直连；Chained 中继/直连；平台 Gateway | Qwen WS 中继、JoyAI/语音 RPC、Gateway 内的 job 管理 | 共同接入职责，媒体是否经过后端、状态及业务队列归属不同 |
 | M2 媒体 | 浏览器音频经同源 Gateway；播放与 ACK | Live WebRTC；Chained 录音/STT/TTS；平台适配 | Qwen 音图 WS；JoyAI 抽帧/ASR/TTS | 共同职责，拓扑不同；插件另有视频源模块 |
 | M3 语音模型 | Gateway OpenAI Realtime Native Engine | Live 有独立语音模型；Chained 是 STT → Agent → TTS | Qwen Omni；JoyAI 图像对话与独立语音服务 | 部分结构对应；Chained 没有同等独立 Realtime 层 |
 | M4 会话与呈现 | Host 轮次、响应失效、账本、通知、历史准入 | 客户端 delegation/播放序列；平台流式消费状态 | 前端 turn/response、Silero、播放 generation、结果注入与历史 | 共同职责，状态位置与完成定义不同 |
@@ -167,6 +204,21 @@ M7 表示共同的执行能力，Work 与 Task 的 Agent 入口不同。返回�
 **M8/M9 的不同不表示 Hermes 或插件不会修改文件。** 它们可以完成实际文件工作，未对应的是这里的独立正式生命周期和项目执行协议。
 
 ## 4. 每个模块具体差在哪里
+
+### G Gateway：必须单独说明的接入与转发责任
+
+LiveVoice Gateway 在客户端与云端模型、Host 之间承担四件事：
+
+1. **接入控制。** 接收激活、关闭、通知拉取等请求，关联实际浏览器连接；向 Host 转发需要宿主处理的操作，将结果送回对应连接。
+2. **承载媒体。** 管理专用媒体路由、票据、音频流和有界缓冲；输入音频送到本进程的 Native Engine，下行音频经媒体连接送回浏览器。
+3. **桥接模型与宿主。** Native Engine 在 Gateway 内维护 Provider 连接；内部 Runtime Client 将轮次、业务调用、呈现等事件交给 Host，并将准入结果、业务回填和取消控制交回语音适配器。云端模型本身不运行在 Gateway。
+4. **同步通知和恢复状态。** Gateway 可以直接交付本地已排队的 Native 音频等通知；未在本地交付的拉取再转发 Host。重新激活时从 Host 私有描述恢复通知序号，浏览器同步协调刷新与拉取，避免有效音频一直等不到下行消费者。
+
+因此 Gateway 并非只做透明代理，也不是 Work/Task 的权威管理者。关键轮次和呈现准入、业务授权与工作生命周期仍交 Host；媒体到达 Gateway 不等于已经在浏览器播放。
+
+**横向差异：** Hermes GPT-Live 的后端协助建立会话，持续音轨走客户端与 Provider 的 WebRTC；其平台 Gateway 与 Desktop 接入不能当作同一条媒体中继。多模态插件的 Qwen Gateway 主要中继 Provider WebSocket，实时编排在前端，VideoSearchManager 的 job 管理却在 Gateway 插件内。LiveVoice 将 Native 适配放在 Gateway、Work/Task 放在 Host。这些差异影响部署、延迟定位、重连恢复和后续模块复用，值得在主介绍中明确展示。
+
+源码：[Gateway 分流](../../jiuwenswarm/gateway/app_gateway.py)、[Web 连接与回包](../../jiuwenswarm/gateway/channel_manager/web/web_connect.py)、[媒体登记与通知](../../jiuwenswarm/gateway/live_voice/dedicated_media_registration.py)、[内部 Runtime Client](../../jiuwenswarm/gateway/live_voice/native_interaction_runtime_client.py)、[插件 Qwen 中继](../../jiuwenswarm/extensions/video_duplex/backend/qwen_omni_gateway.py)。Hermes 固定源码见 [Live 会话和后端 SDP 链路](HERMES_VOICE_CODE_FLOW.md#模块-5gpt-live-会话与委托适配)。
 
 ### M1 产品交互：相同的是操作会话，不同的是入口和展示对象
 
@@ -335,8 +387,9 @@ Hermes 和插件都能通过普通 Agent 文件/执行工具读取或修改文�
 
 | 关系 | 当前事实 |
 |---|---|
-| 三者 M1/M2/M4/M5/M7 | 共同职责，内部实现不同，不是完全相同模块 |
+| 三者 G 接入、M1/M2/M4/M5/M7 | 共同职责，内部实现不同，不是完全相同模块 |
 | Hermes 与 Jiuwen | 本次未见直接源码/服务复用，是职责对应 |
+| 两个 Jiuwen 特性的 G | 复用宿主 Gateway 基础接入；Native 专用媒体/内部 Runtime 桥与插件 Qwen 中继、JoyAI RPC、job 管理各自实现 |
 | 两个 Jiuwen 特性的 M7 | 共享配置 Agent、工具和部分 Runtime/AgentCore 底座；入口契约不同 |
 | 两个 Jiuwen 特性的历史底座 | 可到达共享 session_history，写入时机和 Native 准入不同 |
 | 两个 Jiuwen 特性的 M6/M8 | 尚未统一：VideoSearchManager 与 HostWorkService/PersistentTaskCore 不同 |
@@ -348,9 +401,9 @@ Hermes 和插件都能通过普通 Agent 文件/执行工具读取或修改文�
 
 ## 9. 可直接对外介绍的版本
 
-按“媒体 → 对话 → 业务 → 正式交付”讲，不逐个念 M1–M9 或类名。用户在页面开启语音并查看结果，作为一句入口背景即可。
+先讲“浏览器 → Gateway → Realtime，以及独立的 Host 业务后端”，再展开会话呈现、路由、Work、Agent、Task 和项目执行器。每个模块讲清一句责任与一条输入输出，不必念类名。
 
-> LiveVoice 通过浏览器和 Gateway 把声音交给 Realtime。需要真实业务时，Host 路由分成已有事实查询、只读 Work 和正式 Task。Work 调共享 Agent 做分析，Task 通过项目执行器管理交付与文件工作。真实结果返回后再生成语音，任务完成和播放确认分别记录。
+> LiveVoice 的浏览器负责操作、录音、播放和结果展示；Gateway 负责媒体接入与控制转发，并运行连接云端 Realtime 的适配器。Realtime 负责听说、转写和提出业务调用，普通对话可以直接回复。Host 是独立的本地业务后端：会话呈现模块管理轮次、打断和播放事实，业务路由将请求交给已有事实查询、只读 Work 或正式 Task。Work 管分析工作的生命周期，共享 Agent 使用配置的 AgentModel 和工具执行；Task 管正式交付，项目执行器处理项目与文件副作用。结果经会话协调回填 Realtime，再通过 Gateway 回浏览器播放；业务结果、聊天记录和播放确认分别管理。
 >
 > Hermes 有两条主要路线：Chained 把语音识别成文字后调用普通 Hermes Agent，再合成语音；GPT-Live 由实时语音模型在需要时委托同一个普通 Agent。它在多入口、唤醒和语音服务适配上覆盖较广，工作生命周期主要复用既有会话机制。
 >
@@ -362,11 +415,11 @@ Hermes 和插件都能通过普通 Agent 文件/执行工具读取或修改文�
 
 | 对象 | 本次依据 | 流程和代码索引 |
 |---|---|---|
-| LiveVoice | 文档修订前 HEAD 639dd0a1；生产集成 5cb5303d | [LiveVoice 模块介绍](LIVE_VOICE_MODULE_GUIDE.md)及本文本地源码链接 |
+| LiveVoice | 本次本地源码 f9cee727；生产集成 5cb5303d，含通知序号恢复修复 | [LiveVoice 模块介绍](LIVE_VOICE_MODULE_GUIDE.md)及本文本地源码链接 |
 | Hermes | NousResearch/hermes-agent@e151d0b3458e136729fe498b566deb795ffb6a42 | [Hermes 流程及固定 SHA 源码链接](HERMES_VOICE_CODE_FLOW.md) |
 | PR #2813 | 本地镜像合入 df5f89646227b05c6cbd90e1a0debe729ab2b26e | [基础流程](JIUWENSWARM_DUPLEX_PR2813_FLOW.md) |
 | PR #5301 | 本地镜像合入 b83923ae1f8cf0a315ce1f580e016edf48a02c2d | [增量流程](JIUWENSWARM_DUPLEX_PR5301_FLOW.md) |
 
 #2813 建立音视频插件，#5301 增加通用委托、任务页集成、队列控制、历史/文件及语音检测等。本文比较它们合起来的能力；当前分支已包含两者。
 
-本次沿用已读固定外部源码，重新核对业务分流、Work 恢复、Agent 入口、插件结果调度及 Hermes 委托回填等关键差异。未重新部署、调用真实模型、测试麦克风/摄像头或进行延迟 A/B。未见等价模块的结论限定已追踪语音路径，不等于整个项目没有相关通用能力。
+本次沿用已读固定外部源码，恢复 Gateway/Host/Provider 的主介绍边界，并核对本地接入、媒体适配和 Agent 桥接代码；外部方案仍以表中固定版本为依据。未重新部署、调用真实模型、测试麦克风/摄像头或进行延迟 A/B。未见等价模块的结论限定已追踪语音路径，不等于整个项目没有相关通用能力。
