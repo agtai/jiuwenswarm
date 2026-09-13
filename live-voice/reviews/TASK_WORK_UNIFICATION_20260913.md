@@ -119,3 +119,72 @@ classification, baseline/current counts, additions/removals and source SHA-256.
 The [counting script](../../scripts/live_voice/code_ownership_counts.py) documents
 the stable ownership rules. The Host affected-file total includes 102,515
 baseline lines; it must not be presented as 152,256 lines introduced by Voice.
+
+## Work stage boundary
+
+Task-stage Host commit is `a8e681f1588ca9b8de184bf733ab79f5c9d4db05`.
+Work stage starts from this paired source and SDK `ae5494e16`.
+
+Move general Work admission/revision/settlement/UNKNOWN restoration and its
+checkpoint CAS into SDK application/tasks. Reuse SDK scope/context contracts and
+an interaction-cancellation primitive; detached accepted execution must not
+inherit transient speech cancellation. Host retains AgentRuntime producer pins,
+model/Agent configuration and input-journal/source/presentation integration.
+Split those application journal tables from generic Work checkpoint storage,
+preserving one transaction and all existing schema validation hooks.
+
+Existing SDK AsyncToolRuntime is a per-harness background-tool registry with
+immediate cancellation reporting and no durable revision/CAS/UNKNOWN restoration.
+Replacing Work with that API would lose physical-settlement and restart truth.
+Existing project Tasks require project_mutation authority; routing all queries
+through them would add incorrect write/Task-card semantics. Unification therefore
+means a single SDK owner and shared primitives with explicit execution modes,
+not merging distinct state meanings or rewriting existing Controller/Team APIs.
+Retain serialized work IDs/states/reasons, queue bounds and model timeouts.
+
+### Work implementation and verification
+
+SDK now owns WorkRuntime/SqliteWorkStore, shared read-only settlement and bounded
+observation cursors. Host runtime implementation is deleted; Host journal keeps
+only input/source/presentation integration using atomic SDK schema hooks. Local
+NativeWork aliases reference SDK classes, not compatibility copies. Package pins
+advance together to `0.1.17+livevoice.3`.
+
+- Work/journal/service/business/ownership/policy regression: 145 passed.
+- SDK application group with independent Task+Work SQLite and observation waits:
+  106 passed; SDK boundary test scans all imports including deferred imports.
+- Observation/presentation regression after cursor correction: 33 passed.
+- Ruff for SDK boundary and changed Host service/schema/count scripts passes.
+- Independent static review confirmed unchanged execution/cancellation/CAS and
+  journal semantics. Its one P1 reverse Host import in SDK observation waits was
+  fixed by a shared SDK cursor contract and independent scope/wait tests.
+
+Two test invocations were stopped after inherited repository-wide coverage
+generation kept the process running; the affected tests completed with
+`-o addopts=` (no broad coverage), 33 passed in 13.11 seconds. A first combined
+cross-repository pytest invocation had conftest import-name collision; SDK and
+Host runs are correctly separate. Neither required a production workaround.
+
+Architecture now uses M4+M5 and M7+M9 and identifies AgentServer as application
+container, AgentCore as SDK. Work/Task remain distinct execution modes with one
+SDK owner. Fixed-source Hermes and unchanged combined duplex plugin code were
+rechecked; their execution/voice state machines were not modified. Counts are
+in architecture/UNIFIED_CODE_ACCOUNTING.md with per-file hashes and exclusive
+module buckets. Retained Native/Cascade/diagnostic code is included explicitly.
+
+Incremental independent review closed the P1 and found no new architecture/SDK
+ownership issue. Both wheels build and import together from a fresh target;
+SDK `.3` observation runs before Host import, Host Work is the same SDK class,
+and the Host project adapter subclasses the packaged SDK executor. The clean
+Host wheel excludes both retired runtime/checkpoint modules. The old build cache
+was preserved outside the repository before building. Current manifest source
+hashes, module-total reconciliation and local documentation links pass.
+Changed Host tests collect successfully (104); collection is not execution.
+Work-stage SDK commit: `2d87926c0903fb9b130c8ca6fa8129d978168200`.
+
+Deployment preflight found SDK initialization logs on stdout before the Speech
+capability JSON. Startup now parses one explicit capability-result prefix (same
+pattern as its existing runtime probe), retaining nonzero exit and unavailable
+capability failures. This is included in the Work Host commit, not a model delay
+workaround. Existing untracked Demo output is preserved using the supported
+AllowDirtyProject startup baseline; no user artifact is cleaned or committed.

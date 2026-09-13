@@ -13,8 +13,8 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import Assurance, ScopeRef
 from jiuwenswarm.runtime.service import AgentRuntime, RuntimeStateError
 from jiuwenswarm.server.runtime.formal_tasks.unified_committed_input import SqliteUnifiedCommittedInputJournal
 from jiuwenswarm.server.runtime.work.native_work_journal import SqliteNativeWorkJournal
-from jiuwenswarm.server.runtime.work.native_work_runtime import NativeWorkSnapshot, NativeWorkState
-from jiuwenswarm.server.runtime.work.native_work_runtime import context_identity
+from openjiuwen.core.application.tasks.work_runtime import (WorkSnapshot as NativeWorkSnapshot, WorkState as NativeWorkState)
+from openjiuwen.core.application.tasks.work_runtime import (context_identity)
 from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import FormalContextSnapshot
 
 

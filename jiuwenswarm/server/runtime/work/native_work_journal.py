@@ -1,61 +1,35 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+"""Host input provenance and notification receipts extending SDK Work storage.
 
-"""Native work checkpoints and recovery facts in the input journal DB.
-
-This adapter never executes work, recovers an Agent, or manufactures an ACK.
-Registry supplies the existing SqliteUnifiedCommittedInputJournal.database_path;
-NativeWorkRuntime converts lost process ownership to UNKNOWN on restoration.
+Work checkpoint CAS/recovery has a single SDK owner. These extra tables bind
+application input and presentation facts; they cannot create execution success.
 """
 
 from __future__ import annotations
-
-import hashlib
 import json
 import sqlite3
-from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-
-from jiuwenswarm.common.schema.live_voice_contract_v2 import (
+from openjiuwen.core.application.tasks.contracts import (
     ErrorCode,
     ScopeRef,
     canonical_json_bytes,
 )
-from jiuwenswarm.server.runtime.work.native_work_runtime import (
-    NativeWorkSnapshot,
-    NativeWorkState,
-    NativeWorkViolation,
+from openjiuwen.core.application.tasks.work_runtime import (
+    WorkViolation as NativeWorkViolation,
+)
+from openjiuwen.core.application.tasks.work_store import (
+    SqliteWorkStore,
+    _digest,
+    _scope_digest,
+    verify_work_tables,
 )
 
 _SCHEMA_VERSION = 1
-_MAX_PAYLOAD_BYTES = 192 * 1024
+
 _SUPPRESSION_REASONS = frozenset({"speech_interrupted", "superseded"})
-_IMMUTABLE_FIELDS = (
-    "scope",
-    "work_id",
-    "revision",
-    "request_id",
-    "input_id",
-    "instruction",
-    "model_identity",
-    "model_config_version",
-    "context_id",
-    "foreground",
-    "accepted_at",
-    "supersedes_revision",
-)
-_COLUMNS = {
-    "native_work_checkpoint": (
-        ("schema_version", "INTEGER", 0),
-        ("scope_sha256", "TEXT", 1),
-        ("work_id", "TEXT", 2),
-        ("revision", "INTEGER", 3),
-        ("sequence", "INTEGER", 0),
-        ("request_id", "TEXT", 0),
-        ("identity_sha256", "TEXT", 0),
-        ("snapshot_json", "TEXT", 0),
-        ("snapshot_sha256", "TEXT", 0),
-    ),
+
+_APPLICATION_COLUMNS = {
     "native_work_presentation": (
         ("schema_version", "INTEGER", 0),
         ("scope_sha256", "TEXT", 1),
@@ -81,53 +55,6 @@ _COLUMNS = {
         ("fact_sha256", "TEXT", 0),
     ),
 }
-_TRANSITIONS = {
-    NativeWorkState.ACCEPTED: frozenset(
-        {
-            NativeWorkState.RUNNING,
-            NativeWorkState.CANCELLING,
-            NativeWorkState.CANCELLED,
-            NativeWorkState.SUPERSEDED,
-            NativeWorkState.FAILED,
-            NativeWorkState.UNKNOWN,
-        }
-    ),
-    NativeWorkState.RUNNING: frozenset(
-        {
-            NativeWorkState.COMPLETED,
-            NativeWorkState.CANCELLING,
-            NativeWorkState.CANCELLED,
-            NativeWorkState.SUPERSEDED,
-            NativeWorkState.FAILED,
-            NativeWorkState.UNKNOWN,
-        }
-    ),
-    NativeWorkState.CANCELLING: frozenset(
-        {NativeWorkState.CANCELLED, NativeWorkState.UNKNOWN}
-    ),
-    NativeWorkState.COMPLETED: frozenset(
-        {NativeWorkState.SUPERSEDED, NativeWorkState.UNKNOWN}
-    ),
-    NativeWorkState.FAILED: frozenset(
-        {NativeWorkState.SUPERSEDED, NativeWorkState.UNKNOWN}
-    ),
-    NativeWorkState.CANCELLED: frozenset({NativeWorkState.UNKNOWN}),
-    NativeWorkState.SUPERSEDED: frozenset({NativeWorkState.UNKNOWN}),
-    NativeWorkState.UNKNOWN: frozenset(),
-}
-
-
-def _digest(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
-
-
-def _scope_digest(scope: ScopeRef) -> str:
-    if not isinstance(scope, ScopeRef):
-        raise NativeWorkViolation(
-            "NATIVE_WORK_JOURNAL_SCOPE_INVALID", "canonical work scope is required"
-        )
-    canonical = ScopeRef.from_dict(scope.to_dict())
-    return _digest(canonical_json_bytes(canonical.to_dict()))
 
 
 def _event_identity(event_id: str) -> str:
@@ -170,8 +97,8 @@ def _origin_identity(task_id: str, source_identity: str, commit_id: str) -> None
         ) from error
 
 
-class SqliteNativeWorkJournal:
-    """Bounded additive tables; exact sequence CAS and no automatic replay."""
+class SqliteNativeWorkJournal(SqliteWorkStore):
+    """Application extensions validated atomically with the SDK checkpoints."""
 
     def __init__(
         self,
@@ -189,105 +116,51 @@ class SqliteNativeWorkJournal:
                 "NATIVE_WORK_JOURNAL_BOUNDS_INVALID",
                 "journal bounds must be positive integers",
             )
-        self.database_path = Path(database_path)
-        self._max_records = max_records
         self._max_presentations = max_presentations
         self._max_task_origins = max_task_origins
-        self._require_existing_database()
-        with self._connection(write=True, verify=False) as connection:
-            self._require_input_journal(connection)
-            connection.execute("""
-                CREATE TABLE IF NOT EXISTS native_work_checkpoint (
-                    schema_version INTEGER NOT NULL CHECK(schema_version = 1),
-                    scope_sha256 TEXT NOT NULL,
-                    work_id TEXT NOT NULL,
-                    revision INTEGER NOT NULL CHECK(revision > 0),
-                    sequence INTEGER NOT NULL CHECK(sequence > 0),
-                    request_id TEXT NOT NULL,
-                    identity_sha256 TEXT NOT NULL,
-                    snapshot_json TEXT NOT NULL,
-                    snapshot_sha256 TEXT NOT NULL,
-                    PRIMARY KEY(scope_sha256, work_id, revision),
-                    UNIQUE(scope_sha256, request_id)
-                )
-            """)
-            connection.execute("""
-                CREATE TABLE IF NOT EXISTS native_work_presentation (
-                    schema_version INTEGER NOT NULL CHECK(schema_version = 1),
-                    scope_sha256 TEXT NOT NULL,
-                    event_id TEXT NOT NULL,
-                    presented_at TEXT NOT NULL,
-                    fact_sha256 TEXT NOT NULL,
-                    PRIMARY KEY(scope_sha256, event_id)
-                )
-            """)
-            connection.execute("""
-                CREATE TABLE IF NOT EXISTS native_work_suppression (
-                    schema_version INTEGER NOT NULL CHECK(schema_version = 1),
-                    scope_sha256 TEXT NOT NULL,
-                    event_id TEXT NOT NULL,
-                    reason TEXT NOT NULL CHECK(reason IN ('speech_interrupted', 'superseded')),
-                    recorded_at TEXT NOT NULL,
-                    fact_sha256 TEXT NOT NULL,
-                    PRIMARY KEY(scope_sha256, event_id)
-                )
-            """)
-            connection.execute("""
-                CREATE TABLE IF NOT EXISTS native_business_task_origin (
-                    schema_version INTEGER NOT NULL CHECK(schema_version = 1),
-                    scope_sha256 TEXT NOT NULL,
-                    task_id TEXT NOT NULL,
-                    source_identity TEXT NOT NULL,
-                    commit_id TEXT NOT NULL,
-                    recorded_at TEXT NOT NULL,
-                    fact_sha256 TEXT NOT NULL,
-                    PRIMARY KEY(scope_sha256, task_id)
-                )
-            """)
-            self._verify_schema(connection)
+        super().__init__(database_path, max_records=max_records)
 
-    def _require_existing_database(self) -> None:
-        if self.database_path.is_symlink() or not self.database_path.is_file():
-            raise NativeWorkViolation(
-                "NATIVE_WORK_JOURNAL_UNAVAILABLE",
-                "Native work requires the existing regular input journal database",
-                ErrorCode.UNAVAILABLE,
+    def _initialize_application_schema(self, connection: sqlite3.Connection) -> None:
+        self._require_input_journal(connection)
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS native_work_presentation (
+                schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+                scope_sha256 TEXT NOT NULL,
+                event_id TEXT NOT NULL,
+                presented_at TEXT NOT NULL,
+                fact_sha256 TEXT NOT NULL,
+                PRIMARY KEY(scope_sha256, event_id)
             )
+        """)
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS native_work_suppression (
+                schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+                scope_sha256 TEXT NOT NULL,
+                event_id TEXT NOT NULL,
+                reason TEXT NOT NULL CHECK(reason IN ('speech_interrupted', 'superseded')),
+                recorded_at TEXT NOT NULL,
+                fact_sha256 TEXT NOT NULL,
+                PRIMARY KEY(scope_sha256, event_id)
+            )
+        """)
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS native_business_task_origin (
+                schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+                scope_sha256 TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                source_identity TEXT NOT NULL,
+                commit_id TEXT NOT NULL,
+                recorded_at TEXT NOT NULL,
+                fact_sha256 TEXT NOT NULL,
+                PRIMARY KEY(scope_sha256, task_id)
+            )
+        """)
 
-    @contextmanager
-    def _connection(self, *, write: bool = False, verify: bool = True):
-        self._require_existing_database()
-        connection = None
-        try:
-            connection = sqlite3.connect(
-                self.database_path.absolute().as_uri() + "?mode=rw",
-                uri=True,
-                timeout=5.0,
-                isolation_level=None,
-            )
-            connection.row_factory = sqlite3.Row
-            connection.execute("PRAGMA foreign_keys=ON")
-            connection.execute("PRAGMA busy_timeout=5000")
-            connection.execute("BEGIN IMMEDIATE" if write else "BEGIN")
-            if verify:
-                self._verify_schema(connection)
-            yield connection
-            connection.commit()
-        except (sqlite3.Error, OverflowError) as error:
-            if connection is not None:
-                connection.rollback()
-            raise NativeWorkViolation(
-                "NATIVE_WORK_JOURNAL_UNAVAILABLE",
-                "Native work checkpoint transaction is unavailable",
-                ErrorCode.UNAVAILABLE,
-            ) from error
-        except BaseException:
-            if connection is not None:
-                connection.rollback()
-            raise
-        finally:
-            if connection is not None:
-                connection.close()
+    def _verify_application_schema(self, connection: sqlite3.Connection) -> None:
+        self._require_input_journal(connection)
+        verify_work_tables(connection, _APPLICATION_COLUMNS)
+
+    """Bounded additive tables; exact sequence CAS and no automatic replay."""
 
     @staticmethod
     def _require_input_journal(connection: sqlite3.Connection) -> None:
@@ -301,202 +174,6 @@ class SqliteNativeWorkJournal:
                 "NATIVE_WORK_INPUT_JOURNAL_REQUIRED",
                 "Native work must share the committed input journal database",
                 ErrorCode.UNAVAILABLE,
-            )
-
-    @staticmethod
-    def _verify_schema(connection: sqlite3.Connection) -> None:
-        SqliteNativeWorkJournal._require_input_journal(connection)
-        for table, expected in _COLUMNS.items():
-            columns = connection.execute(f"PRAGMA table_info({table})").fetchall()
-            actual = tuple(
-                (str(row["name"]), str(row["type"]).upper(), int(row["pk"]))
-                for row in columns
-            )
-            if actual != expected or any(not row["notnull"] for row in columns):
-                raise NativeWorkViolation(
-                    "NATIVE_WORK_JOURNAL_SCHEMA_UNSUPPORTED",
-                    "Native work journal schema is unsupported",
-                    ErrorCode.UNAVAILABLE,
-                )
-            if connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name=? LIMIT 1",
-                (table,),
-            ).fetchone():
-                raise NativeWorkViolation(
-                    "NATIVE_WORK_JOURNAL_SCHEMA_UNSUPPORTED",
-                    "Native work journal triggers are unsupported",
-                    ErrorCode.UNAVAILABLE,
-                )
-
-    @staticmethod
-    def _encode(snapshot: NativeWorkSnapshot) -> tuple[str, str, str]:
-        if not isinstance(snapshot, NativeWorkSnapshot):
-            raise NativeWorkViolation(
-                "NATIVE_WORK_CHECKPOINT_INVALID",
-                "checkpoint requires an immutable work snapshot",
-            )
-        payload = snapshot.to_dict()
-        encoded = canonical_json_bytes(payload)
-        if len(encoded) > _MAX_PAYLOAD_BYTES:
-            raise NativeWorkViolation(
-                "NATIVE_WORK_CHECKPOINT_TOO_LARGE",
-                "checkpoint exceeds its closed size bound",
-            )
-        identity = _digest(
-            canonical_json_bytes({key: payload[key] for key in _IMMUTABLE_FIELDS})
-        )
-        return encoded.decode("utf-8"), _digest(encoded), identity
-
-    @classmethod
-    def _decode(cls, row: sqlite3.Row) -> NativeWorkSnapshot:
-        try:
-            encoded = row["snapshot_json"].encode("utf-8")
-            if (
-                row["schema_version"] != _SCHEMA_VERSION
-                or len(encoded) > _MAX_PAYLOAD_BYTES
-                or _digest(encoded) != row["snapshot_sha256"]
-            ):
-                raise ValueError("invalid checkpoint envelope")
-            snapshot = NativeWorkSnapshot.from_dict(json.loads(encoded))
-            _, digest, identity = cls._encode(snapshot)
-            if (
-                digest != row["snapshot_sha256"]
-                or identity != row["identity_sha256"]
-                or _scope_digest(snapshot.scope) != row["scope_sha256"]
-                or snapshot.work_id != row["work_id"]
-                or snapshot.revision != row["revision"]
-                or snapshot.sequence != row["sequence"]
-                or snapshot.request_id != row["request_id"]
-            ):
-                raise ValueError("checkpoint row identity disagrees with payload")
-            return snapshot
-        except (ValueError, TypeError, KeyError, AttributeError) as error:
-            raise NativeWorkViolation(
-                "NATIVE_WORK_CHECKPOINT_CORRUPT",
-                "Native work checkpoint integrity failed",
-                ErrorCode.UNAVAILABLE,
-            ) from error
-
-    def save(self, snapshot: NativeWorkSnapshot) -> None:
-        encoded, payload_sha, identity_sha = self._encode(snapshot)
-        scope_sha = _scope_digest(snapshot.scope)
-        key = (scope_sha, snapshot.work_id, snapshot.revision)
-        with self._connection(write=True) as connection:
-            prior = connection.execute(
-                "SELECT * FROM native_work_checkpoint WHERE scope_sha256=? AND work_id=? AND revision=?",
-                key,
-            ).fetchone()
-            if prior is not None:
-                previous = self._decode(prior)
-                if (
-                    snapshot.sequence == previous.sequence
-                    and prior["snapshot_sha256"] == payload_sha
-                ):
-                    return
-                if snapshot.sequence != previous.sequence + 1:
-                    raise NativeWorkViolation(
-                        "NATIVE_WORK_CHECKPOINT_SEQUENCE_CONFLICT",
-                        "checkpoint must advance exactly one sequence or replay exactly",
-                        ErrorCode.CONFLICT,
-                    )
-                if identity_sha != prior["identity_sha256"]:
-                    raise NativeWorkViolation(
-                        "NATIVE_WORK_CHECKPOINT_IDENTITY_CONFLICT",
-                        "checkpoint cannot change admitted work identity",
-                        ErrorCode.CONFLICT,
-                    )
-                if (
-                    snapshot.state is not previous.state
-                    and snapshot.state not in _TRANSITIONS[previous.state]
-                ):
-                    raise NativeWorkViolation(
-                        "NATIVE_WORK_CHECKPOINT_STATE_CONFLICT",
-                        "checkpoint cannot revive a retired work revision",
-                        ErrorCode.CONFLICT,
-                    )
-                connection.execute(
-                    "UPDATE native_work_checkpoint SET sequence=?, snapshot_json=?, snapshot_sha256=? WHERE scope_sha256=? AND work_id=? AND revision=? AND sequence=?",
-                    (snapshot.sequence, encoded, payload_sha, *key, previous.sequence),
-                )
-                return
-            if (
-                snapshot.sequence != 1
-                or snapshot.state is not NativeWorkState.ACCEPTED
-                or snapshot.execution_settled
-            ):
-                raise NativeWorkViolation(
-                    "NATIVE_WORK_CHECKPOINT_ADMISSION_REQUIRED",
-                    "new checkpoint requires initial accepted state",
-                    ErrorCode.CONFLICT,
-                )
-            if connection.execute(
-                "SELECT 1 FROM native_work_checkpoint WHERE scope_sha256=? AND request_id=?",
-                (scope_sha, snapshot.request_id),
-            ).fetchone():
-                raise NativeWorkViolation(
-                    "NATIVE_WORK_CHECKPOINT_REQUEST_CONFLICT",
-                    "request already names another work revision",
-                    ErrorCode.CONFLICT,
-                )
-            latest = connection.execute(
-                "SELECT MAX(revision) FROM native_work_checkpoint WHERE scope_sha256=? AND work_id=?",
-                (scope_sha, snapshot.work_id),
-            ).fetchone()[0]
-            if snapshot.revision != (int(latest) + 1 if latest is not None else 1):
-                raise NativeWorkViolation(
-                    "NATIVE_WORK_CHECKPOINT_REVISION_CONFLICT",
-                    "new revision must follow its retained predecessor",
-                    ErrorCode.CONFLICT,
-                )
-            count = connection.execute(
-                "SELECT COUNT(*) FROM native_work_checkpoint"
-            ).fetchone()[0]
-            if count >= self._max_records:
-                raise NativeWorkViolation(
-                    "NATIVE_WORK_JOURNAL_FULL",
-                    "bounded work journal is full",
-                    ErrorCode.UNAVAILABLE,
-                )
-            connection.execute(
-                "INSERT INTO native_work_checkpoint VALUES(?,?,?,?,?,?,?,?,?)",
-                (
-                    _SCHEMA_VERSION,
-                    scope_sha,
-                    snapshot.work_id,
-                    snapshot.revision,
-                    snapshot.sequence,
-                    snapshot.request_id,
-                    identity_sha,
-                    encoded,
-                    payload_sha,
-                ),
-            )
-
-    def restore(self) -> tuple[NativeWorkSnapshot, ...]:
-        with self._connection() as connection:
-            count = connection.execute(
-                "SELECT COUNT(*) FROM native_work_checkpoint"
-            ).fetchone()[0]
-            if count > self._max_records:
-                raise NativeWorkViolation(
-                    "NATIVE_WORK_JOURNAL_FULL",
-                    "retained work exceeds configured capacity",
-                    ErrorCode.UNAVAILABLE,
-                )
-            if connection.execute(
-                "SELECT 1 FROM native_work_checkpoint WHERE length(CAST(snapshot_json AS BLOB)) > ? LIMIT 1",
-                (_MAX_PAYLOAD_BYTES,),
-            ).fetchone():
-                raise NativeWorkViolation(
-                    "NATIVE_WORK_CHECKPOINT_CORRUPT",
-                    "retained checkpoint exceeds its size bound",
-                    ErrorCode.UNAVAILABLE,
-                )
-            return tuple(
-                self._decode(row)
-                for row in connection.execute(
-                    "SELECT * FROM native_work_checkpoint ORDER BY scope_sha256, work_id, revision"
-                ).fetchall()
             )
 
     def presented(self, event_id: str, scope: ScopeRef) -> bool:
@@ -726,21 +403,41 @@ class SqliteNativeWorkJournal:
                      AND json_extract(result_json,'$.native_origin.scope_sha256')=?
                      AND json_extract(result_json,'$.task_id') NOT IN
                        (SELECT task_id FROM native_business_task_origin WHERE scope_sha256=?)
-                   LIMIT ?""", (scope_sha, scope_sha, self._max_task_origins + 1),
+                   LIMIT ?""",
+                (scope_sha, scope_sha, self._max_task_origins + 1),
             ).fetchall()
         if len(rows) > self._max_task_origins:
-            raise NativeWorkViolation("NATIVE_TASK_ORIGIN_LEDGER_FULL", "Recovery exceeds origin capacity", ErrorCode.UNAVAILABLE)
+            raise NativeWorkViolation(
+                "NATIVE_TASK_ORIGIN_LEDGER_FULL",
+                "Recovery exceeds origin capacity",
+                ErrorCode.UNAVAILABLE,
+            )
         for row in rows:
-            if type(row["origin_json"]) is not str or len(row["origin_json"].encode("utf-8")) > 4096:
-                raise NativeWorkViolation("NATIVE_TASK_ORIGIN_CORRUPT", "Creation receipt origin is invalid", ErrorCode.UNAVAILABLE)
+            if (
+                type(row["origin_json"]) is not str
+                or len(row["origin_json"].encode("utf-8")) > 4096
+            ):
+                raise NativeWorkViolation(
+                    "NATIVE_TASK_ORIGIN_CORRUPT",
+                    "Creation receipt origin is invalid",
+                    ErrorCode.UNAVAILABLE,
+                )
             origin = json.loads(row["origin_json"])
             source = origin.get("source_identity")
             identity = row["voice_identity_sha256"]
-            if (set(origin) != {"scope_sha256", "source_identity", "commit_id"}
-                or source != row["request_id"] or source != "native-business:" + identity
-                or len(identity) != 64 or any(char not in "0123456789abcdef" for char in identity)
-                or bytes(row["fingerprint"]) != bytes.fromhex(identity)):
-                raise NativeWorkViolation("NATIVE_TASK_ORIGIN_CORRUPT", "Creation receipt identity changed", ErrorCode.UNAVAILABLE)
+            if (
+                set(origin) != {"scope_sha256", "source_identity", "commit_id"}
+                or source != row["request_id"]
+                or source != "native-business:" + identity
+                or len(identity) != 64
+                or any(char not in "0123456789abcdef" for char in identity)
+                or bytes(row["fingerprint"]) != bytes.fromhex(identity)
+            ):
+                raise NativeWorkViolation(
+                    "NATIVE_TASK_ORIGIN_CORRUPT",
+                    "Creation receipt identity changed",
+                    ErrorCode.UNAVAILABLE,
+                )
             self.record_task_origin(scope, row["task_id"], source, origin["commit_id"])
 
     def record_task_origin(

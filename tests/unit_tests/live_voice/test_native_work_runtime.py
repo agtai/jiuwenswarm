@@ -11,13 +11,7 @@ from jiuwenswarm.server.runtime.work.native_foreground import (
     NativeForegroundControl,
     NATIVE_FOREGROUND,
 )
-from jiuwenswarm.server.runtime.work.native_work_runtime import (
-    NativeWorkRuntime,
-    NativeWorkState,
-    NativeWorkViolation,
-    NativeWorkSnapshot,
-    context_identity,
-)
+from openjiuwen.core.application.tasks.work_runtime import (WorkRuntime as NativeWorkRuntime, WorkState as NativeWorkState, WorkViolation as NativeWorkViolation, WorkSnapshot as NativeWorkSnapshot, context_identity)
 from jiuwenswarm.common.schema.live_voice_contract_v2 import ResponseRef, ContextRef
 from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
     FormalContextSnapshot,

@@ -914,9 +914,12 @@ try {
     [Environment]::SetEnvironmentVariable('LIVE_VOICE_SPEECH_TTS_VOICE', 'marin', 'Process')
     [Environment]::SetEnvironmentVariable('LIVE_VOICE_FORMAL_BATCH_SPEECH_ENABLED', '1', 'Process')
     [Environment]::SetEnvironmentVariable('LIVE_VOICE_FORMAL_STREAMING_SPEECH_ENABLED', '1', 'Process')
-    $speechProbeJson = & $Python -c "import asyncio,json; from jiuwenswarm.channels.live_voice.batch_speech import create_environment_batch_speech_provider; from jiuwenswarm.channels.live_voice.openai_streaming_speech import select_environment_streaming_speech; b=create_environment_batch_speech_provider().capability(); s=asyncio.run(select_environment_streaming_speech(batch_available=b.available)); print(json.dumps({'batch':b.available,'streaming':s.tier.value == 'streaming' and s.provider is not None}))"
+    $speechProbePrefix = 'FORMAL_SPEECH_CAPABILITY_RESULT '
+    $speechProbeJson = & $Python -c "import asyncio,json; from jiuwenswarm.channels.live_voice.batch_speech import create_environment_batch_speech_provider; from jiuwenswarm.channels.live_voice.openai_streaming_speech import select_environment_streaming_speech; b=create_environment_batch_speech_provider().capability(); s=asyncio.run(select_environment_streaming_speech(batch_available=b.available)); print('FORMAL_SPEECH_CAPABILITY_RESULT '+json.dumps({'batch':b.available,'streaming':s.tier.value == 'streaming' and s.provider is not None}))"
     if ($LASTEXITCODE -ne 0) { Fail '无法执行正式 Speech Provider 可用性探针。' }
-    $speechProbe = $speechProbeJson | ConvertFrom-Json
+    $speechProbeLines = @($speechProbeJson | Where-Object { $_ -is [string] -and $_.StartsWith($speechProbePrefix) })
+    if ($speechProbeLines.Count -ne 1) { Fail '正式 Speech Provider 探针未返回唯一结果。' }
+    $speechProbe = $speechProbeLines[0].Substring($speechProbePrefix.Length) | ConvertFrom-Json
     if ($speechProbe.batch -ne $true -or $speechProbe.streaming -ne $true) {
         Fail '正式 Streaming/Batch Speech Provider 未就绪。'
     }

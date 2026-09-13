@@ -369,7 +369,7 @@ class NativeBusinessRouter:
             return runtime
 
     async def _work(self, route, delegate, admission, selection):
-        from jiuwenswarm.server.runtime.work.native_work_runtime import context_identity
+        from openjiuwen.core.application.tasks.work_runtime import (context_identity)
         action = delegate.business
         # Admission/journal I/O can yield after context selection. Query and
         # cancellation, as well as execution, need authority at their effect.

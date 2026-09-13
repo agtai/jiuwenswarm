@@ -11,12 +11,7 @@ import pytest
 from jiuwenswarm.common.schema.live_voice_contract_v2 import canonical_json_bytes
 
 from jiuwenswarm.server.runtime.work.native_work_journal import SqliteNativeWorkJournal
-from jiuwenswarm.server.runtime.work.native_work_runtime import (
-    NativeWorkRuntime,
-    NativeWorkSnapshot,
-    NativeWorkState,
-    NativeWorkViolation,
-)
+from openjiuwen.core.application.tasks.work_runtime import (WorkRuntime as NativeWorkRuntime, WorkSnapshot as NativeWorkSnapshot, WorkState as NativeWorkState, WorkViolation as NativeWorkViolation)
 from jiuwenswarm.server.runtime.formal_tasks.unified_committed_input import (
     SqliteUnifiedCommittedInputJournal,
 )

@@ -1,7 +1,7 @@
 # JiuwenSwarm PR #5301：全双工接入常规任务的增量流程
 
 > 核对日期：2026-09-13。[原 PR #5301](https://github.com/openJiuwen-ai/jiuwenswarm/pull/5301) 已合入。本地镜像合入提交：`b83923ae1f8cf0a315ce1f580e016edf48a02c2d`；以其父提交到该提交的差异区分新增行为。
-> 当前检查分支基线：`hx/0912_livevoice@ae1aecde61948797ee36f824245b105120625af9`。`git diff b83923ae HEAD -- jiuwenswarm/extensions/video_duplex` 为空：本文读取的当前插件代码与该合入点相同。宿主代码可能另有后续变化。
+> 插件源码复核：本次 Task/Work 统一后 `git diff b83923ae HEAD -- jiuwenswarm/extensions/video_duplex` 仍为空。插件保留同一实现；LiveVoice 已改用 AgentCore Task/Work，不代表此插件的 job 已自动改用它们。宿主代码另有后续变化。
 > 基础媒体/Provider 流程见 [#2813 文档](JIUWENSWARM_DUPLEX_PR2813_FLOW.md)；本篇重点是增量。比较结论见[三方对比](VOICE_FEATURE_COMPARISON.md)。本次未运行真实音视频或 Agent 验收。
 
 ## 1. 它不是第二套全双工插件

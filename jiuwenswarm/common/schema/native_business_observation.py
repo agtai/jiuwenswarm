@@ -5,9 +5,13 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 
+from openjiuwen.core.application.tasks.observation import (
+    MAX_OBSERVATION_WAIT_MS as MAX_OBSERVATION_WAIT_MS,
+    observation_cursor as observation_cursor,
+)
+
 NATIVE_BUSINESS_OBSERVATION_VERSION = "live-voice.native-business-observation.v1"
 NATIVE_PROVIDER_RECEIPT_VERSION = "live-voice.native-provider-receipt.v1"
-MAX_OBSERVATION_WAIT_MS = 1000
 
 
 def is_task_acceptance_receipt(value: object) -> bool:
@@ -57,18 +61,6 @@ def is_task_feedback_receipt(value: object) -> bool:
     task_id, receipt = value.get("task_id"), value.get("receipt")
     return (value.get("status") == "dispatched" and type(task_id) is str and 0 < len(task_id) <= 256
             and isinstance(receipt, Mapping) and receipt.get("task_id") == task_id)
-
-
-def observation_cursor(value):
-    if value is None:
-        return None
-    if (type(value) is not dict or set(value) != {"epoch", "sequence", "read_sequence"}
-            or type(value["epoch"]) is not str or len(value["epoch"]) != 32
-            or any(c not in "0123456789abcdef" for c in value["epoch"])
-            or any(type(value[k]) is not int or not 0 <= value[k] <= 9_007_199_254_740_991
-                   for k in ("sequence", "read_sequence"))):
-        raise ValueError("invalid Native observation cursor")
-    return dict(value)
 
 
 def canonical_native_receipt(value: Mapping[str, object]) -> str:

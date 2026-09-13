@@ -23,9 +23,7 @@ from jiuwenswarm.common.live_voice_operation_budgets import (
 from jiuwenswarm.server.runtime.work.native_foreground import (
     NATIVE_FOREGROUND, NativeForegroundInterrupted,
 )
-from jiuwenswarm.server.runtime.work.native_work_runtime import (
-    NativeWorkControl, NativeWorkCancelled, context_identity,
-)
+from openjiuwen.core.application.tasks.work_runtime import (WorkControl as NativeWorkControl, WorkCancelled as NativeWorkCancelled, context_identity)
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     CONTRACT_VERSION,

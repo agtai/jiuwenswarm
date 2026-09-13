@@ -93,8 +93,10 @@ Task completion first, Work convergence second, and architecture/code accounting
 The [execution record](reviews/TASK_WORK_UNIFICATION_20260913.md) owns the bounded
 implementation and evidence. SDK owns Task execution, storage, attempt recovery,
 file effects and verified results; Host supplies project/Agent/application policy
-and Voice supplies speech/presentation. Work implementation remains unchanged
-during the Task stage. Modules merge M4+M5 and M7+M9 in final documentation.
+and Voice supplies speech/presentation. Work now uses SDK admission, revision,
+checkpoint CAS, cancellation settlement and UNKNOWN recovery; Host retains Agent
+producer lifetime, input/source integration and presentation receipts. Architecture
+merges M4+M5 and M7+M9; Work/Task share SDK ownership with distinct execution modes.
 One commit per affected repository per stage; no remote update. Preserve existing
 data, model and timeout settings; prior physical acceptance is not a new latency
 guarantee or closure of the separately retained stale-announcement issue.

@@ -10,7 +10,7 @@ from jiuwenswarm.channels.live_voice.native_business_router import NativeBusines
 from jiuwenswarm.channels.live_voice.native_business_contract import NativeBusinessAction
 from jiuwenswarm.channels.live_voice.native_interaction_runtime import NativeInteractionRuntimeError
 from jiuwenswarm.server.runtime.work.native_work_journal import SqliteNativeWorkJournal
-from jiuwenswarm.server.runtime.work.native_work_runtime import NativeWorkRuntime
+from openjiuwen.core.application.tasks.work_runtime import (WorkRuntime as NativeWorkRuntime)
 from jiuwenswarm.server.runtime.formal_tasks.unified_committed_input import SqliteUnifiedCommittedInputJournal
 from jiuwenswarm.server.runtime.formal_tasks.voice_task_bridge import UnifiedCommittedInputRoute
 from tests.unit_tests.live_voice import test_native_continuation_preparation as p
