@@ -318,6 +318,9 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         "x-jiuwenswarm-original-host",
         "x-original-host",
     }
+    #: True only while the response under construction is index.html. Every other
+    #: path through this handler also calls ``end_headers``, so the default matters.
+    _serving_index = False
     _WS_LOG_MAX_CHARS = 2000
     _HTTP_PROXY_TIMEOUT = 30
     _WS_CONNECT_TIMEOUT = 10
@@ -2032,10 +2035,27 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             return None
 
         if in_base and target.exists():
+            self._serving_index = target.name == "index.html"
             return super().send_head()
 
         self.path = "/index.html"
+        self._serving_index = True
         return super().send_head()
+
+    def end_headers(self) -> None:
+        """Keep ``index.html`` out of the browser cache.
+
+        Its entire job is to point at the hashed asset bundle, so a cached copy pins
+        the browser to the **previous build's** JavaScript across an upgrade. Nothing
+        looks wrong when that happens -- the page renders normally and silently runs
+        old code, so the symptom shows up as a feature that "does nothing" rather than
+        as a stale-cache error. The assets keep their long cache: their names change
+        whenever their contents do, so they are safe to reuse.
+        """
+        if self._serving_index:
+            self.send_header("Cache-Control", "no-cache, must-revalidate")
+            self._serving_index = False
+        super().end_headers()
 
 
 def _normalize_api_target(value: str) -> str:
