@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from dataclasses import replace
 import pytest
 
@@ -17,12 +18,13 @@ from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
     FormalContextSnapshot,
     FormalContextEntry,
 )
+from jiuwenswarm.server.runtime.work.service import HostWorkAgentExecutor
 from tests.unit_tests.live_voice.test_agent_conversation_runtime import (
     scope,
     commit,
-    runtime,
+    facade,
     LowerFormalAdapter,
-    RecordingHistoryWriter,
+    ScriptedFormalAdapter,
 )
 
 
@@ -310,15 +312,14 @@ async def test_restart_restores_terminal_or_unknown_never_replays_and_close_canc
 async def test_agent_work_uses_actual_harness_independent_of_speech_and_without_history():
     release = asyncio.Event()
     lower = LowerFormalAdapter(final="real formal bridge final", release=release)
-    history = RecordingHistoryWriter()
-    agent = runtime(lower, history, native_delegate_timeout_seconds=0.01)
+    agent = HostWorkAgentExecutor(scope=scope(), instance_id="work-test", facade=facade(lower))
     await agent.start()
     current, selected = agent_input()
     owner = NativeWorkRuntime()
 
     async def runner(control):
-        return await agent.execute_native_work(
-            control=control,
+        return await agent.execute_work(
+            control=control, instruction="hello",
             commit=current,
             context=selected,
             correlation_id="work-correlation",
@@ -345,17 +346,8 @@ async def test_agent_work_uses_actual_harness_independent_of_speech_and_without_
         and result.result_text == "real formal bridge final"
     )
     assert lower.calls == 1 and lower.legacy_calls == 0
-    assert (
-        history.users
-        == history.assistant_intents
-        == history.native_assistant_intents
-        == []
-    )
-    snapshot = agent.snapshot()
-    assert (
-        snapshot.queued_notifications == 0
-        and snapshot.conversation.presentation.records == ()
-    )
+    assert not hasattr(agent, "_cr") and not hasattr(agent, "_bridge")
+    assert agent.snapshot().active_rounds == ()
     await owner.close()
     await agent.close(timeout_seconds=1.0)
 
@@ -363,15 +355,14 @@ async def test_agent_work_uses_actual_harness_independent_of_speech_and_without_
 @pytest.mark.asyncio
 async def test_agent_work_exact_cancel_waits_harness_terminal_and_bad_binding_has_zero_effects():
     lower = LowerFormalAdapter(release=asyncio.Event())
-    history = RecordingHistoryWriter()
-    agent = runtime(lower, history)
+    agent = HostWorkAgentExecutor(scope=scope(), instance_id="work-test", facade=facade(lower))
     await agent.start()
     current, selected = agent_input()
     owner = NativeWorkRuntime()
 
     async def runner(control):
-        return await agent.execute_native_work(
-            control=control,
+        return await agent.execute_work(
+            control=control, instruction="hello",
             commit=current,
             context=selected,
             correlation_id="work-correlation",
@@ -395,9 +386,136 @@ async def test_agent_work_exact_cancel_waits_harness_terminal_and_bad_binding_ha
         and failed.reason == "NATIVE_WORK_BINDING_MISMATCH"
     )
     assert lower.calls == 1 and agent._harness.snapshot().cancel_effects == 1
-    assert history.users == history.assistant_intents == []
     await owner.close()
     await agent.close(timeout_seconds=1.0)
+
+
+@pytest.mark.asyncio
+async def test_host_work_sqlite_restart_preserves_result_and_never_reexecutes(tmp_path):
+    from openjiuwen.core.application.tasks.work_store import SqliteWorkStore
+
+    database = tmp_path / "work.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE protected_data (value TEXT)")
+        connection.execute("INSERT INTO protected_data VALUES ('unchanged')")
+    store = SqliteWorkStore(database)
+    lower = LowerFormalAdapter()
+    agent = HostWorkAgentExecutor(scope=scope(), instance_id="work-sqlite", facade=facade(lower))
+    current, selected = agent_input()
+
+    async def runner(control):
+        return await agent.execute_work(control=control, commit=current, context=selected,
+            instruction="hello", correlation_id="work-sqlite")
+
+    args = {**admission(runner), "context_id": context_identity(selected)}
+    owner = NativeWorkRuntime(save=store.save, restored=store.restore())
+    work = await owner.start(**args)
+    done = await terminal(owner, work)
+    assert done.state is NativeWorkState.COMPLETED
+    assert done.result_text == "formal answer" and lower.calls == 1
+    await owner.close()
+    await agent.close(timeout_seconds=1)
+    reopened = SqliteWorkStore(database)
+    restored = NativeWorkRuntime(save=reopened.save, restored=reopened.restore())
+    try:
+        assert restored.query(scope=scope(), work_id=work.work_id).result_text == done.result_text
+        assert (await restored.start(**args)).work_id == work.work_id
+        assert lower.calls == 1  # Replay uses the durable result, even with a closed producer.
+        with sqlite3.connect(database) as connection:
+            assert connection.execute("SELECT value FROM protected_data").fetchall() == [("unchanged",)]
+            assert connection.execute("SELECT COUNT(*) FROM native_work_checkpoint").fetchone() == (1,)
+    finally:
+        await restored.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payloads", [
+    (),
+    ({"event_type": "chat.final", "content": ""},),
+    ({"event_type": "chat.final", "content": "one"}, {"event_type": "chat.final", "content": "two"}),
+    ({"event_type": "chat.final", "content": ""}, {"event_type": "chat.final", "content": "one"}),
+    ({"event_type": "chat.final", "content": "one"}, {"event_type": "chat.error", "error": "failed"}),
+])
+async def test_host_work_rejects_missing_duplicate_or_failed_final_without_presentation(payloads):
+    lower = ScriptedFormalAdapter(payloads)
+    agent = HostWorkAgentExecutor(scope=scope(), instance_id="work-invalid", facade=facade(lower))
+    current, selected = agent_input()
+    owner = NativeWorkRuntime()
+
+    async def runner(control):
+        return await agent.execute_work(control=control, commit=current, context=selected,
+            instruction="hello", correlation_id="work-result")
+
+    work = await owner.start(**{**admission(runner), "context_id": context_identity(selected)})
+    result = await terminal(owner, work)
+    assert result.state is NativeWorkState.UNKNOWN and result.result_text is None
+    assert lower.calls == 1 and lower.legacy_calls == 0
+    assert agent.snapshot().active_rounds == ()
+    assert not hasattr(agent, "_cr") and not hasattr(agent, "_bridge")
+    await owner.close()
+    await agent.close(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_host_work_cancel_unknown_keeps_slot_until_actual_cleanup():
+    cleanup = asyncio.Event()
+    lower = LowerFormalAdapter(release=asyncio.Event(), cancel_cleanup_release=cleanup)
+    agent = HostWorkAgentExecutor(scope=scope(), instance_id="work-cleanup", facade=facade(lower))
+    current, selected = agent_input()
+    owner = NativeWorkRuntime(max_active=2, reserved_foreground=1, cancel_settlement_seconds=0.02)
+
+    async def runner(control):
+        return await agent.execute_work(control=control, commit=current, context=selected,
+            instruction="hello", correlation_id="work-cleanup")
+
+    args = {**admission(runner), "context_id": context_identity(selected)}
+    work = await owner.start(**args)
+    await asyncio.wait_for(lower.started.wait(), 1)
+    await owner.cancel(scope=scope(), work_id=work.work_id, revision=1)
+    unknown = await terminal(owner, work, state=NativeWorkState.UNKNOWN)
+    assert not unknown.execution_settled
+    with pytest.raises(NativeWorkViolation) as error:
+        await owner.start(**{**args, "request_id": "cannot-run-until-cleanup"})
+    assert error.value.reason == "NATIVE_WORK_CAPACITY_FULL"
+    assert lower.calls == 1 and agent.snapshot().active_rounds
+    cleanup.set()
+    settled = await terminal(owner, work)
+    assert settled.state is NativeWorkState.UNKNOWN and settled.execution_settled
+    assert agent.snapshot().active_rounds == ()
+    await owner.close()
+    await agent.close(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_host_work_cleanup_failure_cannot_claim_cancelled():
+    class FailingCleanup(LowerFormalAdapter):
+        async def process_formal_live_voice_stream_impl(self, request, inputs):
+            self.calls += 1
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+                yield  # pragma: no cover
+            finally:
+                raise RuntimeError("controlled cleanup failure")
+
+    lower = FailingCleanup()
+    agent = HostWorkAgentExecutor(scope=scope(), instance_id="work-failed-cleanup", facade=facade(lower))
+    current, selected = agent_input()
+    owner = NativeWorkRuntime()
+
+    async def runner(control):
+        return await agent.execute_work(control=control, commit=current, context=selected,
+            instruction="hello", correlation_id="failed-cleanup")
+
+    work = await owner.start(**{**admission(runner), "context_id": context_identity(selected)})
+    await asyncio.wait_for(lower.started.wait(), 1)
+    await owner.cancel(scope=scope(), work_id=work.work_id, revision=1)
+    result = await terminal(owner, work)
+    assert result.state is NativeWorkState.UNKNOWN
+    assert result.reason == "NATIVE_WORK_CANCEL_OUTCOME_UNKNOWN"
+    assert result.result_text is None and lower.calls == 1
+    await owner.close()
+    await agent.close(timeout_seconds=1)
 
 
 @pytest.mark.asyncio

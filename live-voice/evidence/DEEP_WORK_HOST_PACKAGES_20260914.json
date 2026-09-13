@@ -1,0 +1,9 @@
+{
+  "result": "CLEAN_PAIRED_IMPORT_OK",
+  "scope": "Tracked current source staged without build cache; temporary uv --target install with existing venv external dependencies, no deployment. Package paths verified; retired TaskCore absent.",
+  "rejected_attempt": "Direct repository build retained stale build/lib task_core.py; rejected and replaced with clean staged build.",
+  "wheels_sha256": {
+    "workswarm-0.2.5b1-py3-none-any.whl": "be20d46f17a858d0ac8356d4e49a0a4c6b6501e375c496d1485e281a63b2d8d6",
+    "openjiuwen-0.1.17+livevoice.4-py3-none-any.whl": "20ec2c88e5b63ee8387350af135142df1fff7e24d9cdb9a79d3fd4ca6335ca37"
+  }
+}

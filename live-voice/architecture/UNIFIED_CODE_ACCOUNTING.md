@@ -21,6 +21,9 @@
 | 本轮实施后 | Voice 专属路径 | 113,323 | 113,323 | 113,323 |
 | 本轮实施后 | JiuwenSwarm 应用/共享 | 39,894 | 48,100 | 150,615 |
 | 本轮实施后 | AgentCore 新增 | 33,812 | 33,872 | 34,017 |
+| Work 宿主执行收敛 09-14 | Voice 专属路径 | 113,237 | 113,237 | 113,237 |
+| Work 宿主执行收敛 09-14 | JiuwenSwarm 应用/共享 | 40,006 | 48,212 | 150,727 |
+| Work 宿主执行收敛 09-14 | AgentCore 新增 | 33,812 | 33,872 | 34,017 |
 
 本轮三部分净增量合计从 **195,680** 降至 **195,295**，减少 **385** 行：
 Voice −99、Host −377、SDK +91。SDK 的 34,017 行受影响文件中包含既有
@@ -32,7 +35,12 @@ Work 阶段相对 Task 阶段：Voice −2，JiuwenSwarm −1,264，AgentCore +1
 
 Voice 分类按专属目录/文件命名；公共 schema 和 `server/runtime` 归 JiuwenSwarm。它包含保留的 Native、Cascade、批量语音与诊断，不是只计算当前 Native 热路径。Host 适配中也有语音集成逻辑，因此该分法是可复现的文件所有权口径，不能解释成每行语义都完全通用。`live-voice/` 目录只有架构、验证与支持资料，没有该口径下的生产模块。
 
-## 2. 本轮实施后的合并模块统计
+09-14 后续使用同一口径：合计 **195,321**，较首批增加26行，较审计前减少359行。
+Voice净−86、Host净+112、SDK不变；这是删除Work对Voice协调运行时的依赖、
+增加宿主薄适配和既有Harness结果收集的实际变化，不是等量搬迁或代码减量承诺。
+Work状态/存储未复制；普通Voice委托的限时与播放行为未改。
+
+## 2. 最新实施后的合并模块统计
 
 每个受影响生产文件按主要职责只归一组。AgentServer 是运行容器，不重复计数；云端模型代码不在仓库，不计数。横向公共层单列，避免把巨大共享文件硬塞给某个语音模块。
 
@@ -41,9 +49,9 @@ Voice 分类按专属目录/文件命名；公共 schema 和 `server/runtime` �
 | 浏览器 M1+M2 | 45,070 | 45,925 | 70,769 |
 | Gateway G | 18,198 | 19,581 | 38,416 |
 | Realtime/语音适配 M3 | 14,427 | 14,427 | 14,427 |
-| 会话与业务协调 M4+M5 | 39,548 | 39,548 | 39,548 |
-| 工作管理 M6+M8 | 37,388 | 37,448 | 37,593 |
-| Agent 与项目执行 M7+M9 | 12,906 | 16,994 | 51,014 |
+| 会话与业务协调 M4+M5 | 39,462 | 39,462 | 39,462 |
+| 工作管理 M6+M8 | 37,471 | 37,531 | 37,676 |
+| Agent 与项目执行 M7+M9 | 12,935 | 17,023 | 51,043 |
 | 公共契约、授权、配置、观测与 Host 装配 | 19,492 | 21,372 | 46,188 |
 
 这些是文件粒度的职责分桶，不是逐函数测量。例如前端 Task UI 归浏览器，SDK file-effect/durability 归执行，SDK 状态和存储归工作管理；M3 同时包含保留的非 Native 语音适配。大型 Registry 主要归会话协调，实际同时承担装配。需要精确定位时查看逐文件清单，而不是把展示框大小理解为独立部署包大小。
@@ -86,6 +94,8 @@ Work revision/CAS/UNKNOWN及取消实际结算保证。保留这些扩展的依�
 - [实施前](../evidence/DEEP_INTEGRATION_BEFORE_20260913.json)
 - [实施后](../evidence/DEEP_INTEGRATION_AFTER_20260913.json)
 - [当前模块分桶](../evidence/DEEP_INTEGRATION_MODULES_20260913.json)
+- [09-14 Work宿主执行逐文件清单](../evidence/DEEP_WORK_HOST_20260914.json)
+- [09-14 最新模块分桶](../evidence/DEEP_WORK_HOST_MODULES_20260914.json)
 
 ```powershell
 .venv/Scripts/python.exe scripts/live_voice/code_ownership_counts.py --stage deep-integration-after --output live-voice/evidence/DEEP_INTEGRATION_AFTER_20260913.json

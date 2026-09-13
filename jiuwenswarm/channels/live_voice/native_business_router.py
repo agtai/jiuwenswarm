@@ -296,7 +296,7 @@ class NativeBusinessRouter:
                 code=getattr(error, "code", ErrorCode.UNAVAILABLE))
 
     async def _executor(self, route):
-        from jiuwenswarm.channels.live_voice.agent_conversation_runtime import AgentConversationRuntime
+        from jiuwenswarm.server.runtime.work.service import HostWorkAgentExecutor
         self.works()  # Every producer belongs to the resident Host service.
         scope = route.binding.scope
 
@@ -340,8 +340,8 @@ class NativeBusinessRouter:
                 agent_channel_id="live_voice_native_work", mode="agent",
                 project_dir=route.native_p3_authority.context.file_path,
             )
-            runtime = AgentConversationRuntime(scope=scope, instance_id="native-work-service:" + identity,
-                facade=producer, enabled=True, max_concurrency=4, max_requests=128)
+            runtime = HostWorkAgentExecutor(scope=scope, instance_id="native-work-service:" + identity,
+                facade=producer, max_concurrency=4, max_requests=128)
             try:
                 if not await runtime.start():
                     raise NativeBusinessViolation("NATIVE_WORK_EXECUTOR_UNAVAILABLE", code=ErrorCode.UNAVAILABLE)
@@ -389,8 +389,8 @@ class NativeBusinessRouter:
             control.check()
             await self._require_work_authority(route)
             control.check()
-            return await executor.execute_native_work(control=control, commit=commit, context=context,
-                correlation_id=route.binding.correlation_id, channel_id="web", allow_tools=True)
+            return await executor.execute_work(control=control, commit=commit, context=context, instruction=action.instruction,
+                correlation_id=route.binding.correlation_id, channel_id="web")
         arguments = dict(scope=scope, request_id=delegate.source_identity, input_id=commit.commit_id,
             instruction=action.instruction, model_identity=route.native_p3_authority.model_identity,
             model_config_version=route.native_p3_authority.model_config_version,

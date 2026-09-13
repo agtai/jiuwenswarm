@@ -100,7 +100,10 @@ production Task/threaded-executor fixtures, removes the legacy scheduler carrier
 requires Host-owned Work producers, and shares new-session selections between
 text and Voice. Controller/Team tasks, application delivery Task and Work are
 not one management state machine; their cancellation, transaction and result
-semantics differ. The broad Work/Voice coordinator reduction remains unproved.
+semantics differ. Work now directly uses HostWorkAgentExecutor and the existing
+Harness, removing its Voice ConversationRuntime/Bridge allocation; SQLite result
+recovery, replay suppression and cancellation cleanup checks cover this seam.
+The broader Host/Voice registry and unified-route joint acceptance remain open.
 Module diagrams retain M4+M5 and M7+M9; accounting separates actual deletion,
 retained/migrated code and native-file additions. Earlier ownership extraction
 is recorded in [the preceding packet](reviews/TASK_WORK_UNIFICATION_20260913.md),

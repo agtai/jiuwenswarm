@@ -257,7 +257,7 @@ async def test_closed_session_cannot_allocate_work_executor(tmp_path):
 
 @pytest.mark.asyncio
 async def test_host_close_waits_for_blocked_start_and_retains_late_failed_cleanup(tmp_path, monkeypatch):
-    from jiuwenswarm.channels.live_voice import agent_conversation_runtime
+    from jiuwenswarm.server.runtime.work import service as work_service
     from jiuwenswarm.channels.live_voice.native_business_contract import NativeBusinessViolation
 
     value, agent, manager, runtime, router, route = await executor_router(tmp_path)
@@ -280,7 +280,7 @@ async def test_host_close_waits_for_blocked_start_and_retains_late_failed_cleanu
             return SimpleNamespace(closed=False)
 
     producer = StartingExecutor()
-    monkeypatch.setattr(agent_conversation_runtime, "AgentConversationRuntime", lambda **kwargs: producer)
+    monkeypatch.setattr(work_service, "HostWorkAgentExecutor", lambda **kwargs: producer)
     allocation = asyncio.create_task(router._executor(route))
     await asyncio.wait_for(started.wait(), 2)
     closing = asyncio.create_task(runtime.close())
@@ -332,8 +332,7 @@ async def test_nonsettled_predecessor_is_retained_without_reuse_or_unpin(tmp_pat
     predecessor = SimpleNamespace(
         close=AsyncMock(return_value=SimpleNamespace(closed=False)),
         snapshot=lambda: SimpleNamespace(closed=False,
-            active_requests=("active",) if state == "active" else (),
-            harness=SimpleNamespace(active_rounds=())),
+            active_rounds=("active",) if state == "active" else ()),
     )
     previous_facade = object()
     key = (value.commit.scope, generation)

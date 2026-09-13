@@ -111,7 +111,7 @@ callback framework. Ordinary registered callbacks retain their error policy.
 | Team assignment / dependencies | `agent_teams/tools/database/task_dao.py` start_task/claim_task/cancel_task | Partial overlap. Native DAO CAS owns Team member assignment, pending status and dependency release, not work revisions or application effect attempts. No current dependency/Team assignment requirement; do not create unrelated Team rows or duplicate status. |
 | Work creation / query / revision / cancellation | HostWorkService.work_runtime → SDK WorkRuntime.start/update/query/cancel → SqliteWorkStore.save | Keep SDK Work authority and Host-scoped service. Revisions/CAS, UNKNOWN/no replay, cancellation settlement and occupied capacity are necessary. Removed router's unreachable generationless/direct-facade and standalone-close alternatives. |
 | Scheduling distinction | Controller TaskScheduler.execute_task/cancel_task; Harness NativeHarness.launch_async_tool → AsyncToolRuntime | Controller publishes session task events and marks CANCELED before physical coroutine settlement; Harness completion is injected best-effort into the owning model round. Neither is a durable Work outcome or heard-audio fact. Keep distinct execution modes, not a short/long split. Work does not automatically create a formal Task card. |
-| Work Agent producer | NativeBusinessRouter._executor → Host AgentManager.get_agent/pin → RuntimeFormalAgentFacade → AgentRuntime.stream_owned → RuntimeSessionCoordinator | Actual Host admission, retained Agent and session generation are used; the router cannot own/close the runtime. Still allocates AgentConversationRuntime for Harness/Bridge canonical-final and cancellation settlement. This is a remaining integration opportunity, NOT justified merely by moving its directory. Direct stream replacement has not proved equivalent result/projection/cleanup semantics. |
+| Work Agent producer | NativeBusinessRouter._executor → HostWorkAgentExecutor → existing JiuWenSwarmRoundHarness → RuntimeFormalAgentFacade → AgentRuntime.stream_owned → RuntimeSessionCoordinator | 09-14 removes Work's AgentConversationRuntime/ConversationRuntimeLoop/Bridge allocation. Host admission, Agent pin and generation remain. SDK WorkRuntime owns durable state; Harness owns actual producer, exact cancel and cleanup. The result collector requires one nonempty final and COMPLETED; cancellation with failed cleanup remains UNKNOWN. This closes this execution seam, not all management overlap. |
 | Recovery / results | SDK durability readers/effects/checkpoint, TaskResultReader; Work restored snapshots | Retain exact-byte/index/file-application journal and manifest verification. Checkpointer KV serialization and default DB engine do not replace multi-file effects + rollback/unknown guarantees. Real temporary Git/SQLite tests cover existing oracles; no irreversible schema migration performed. |
 | Event query / subscription | task_store.events/events_page → TaskEventSubscription; Work observation cursor/epoch → Host context RPC | Durable paginated Task event sequence and revision-scoped Work change signal are different from native callback notification. Replacing them with an ephemeral EventBus loses replay/fencing. They project the same authoritative Task/Work rows, not another execution state machine. |
 | SQLite | SqliteTaskStore._transaction; SqliteWorkStore._connection; Host SqliteNativeWorkJournal hooks | BEGIN IMMEDIATE, CAS and command/outbox validation remain in the transaction owner. Host journal adds accepted-input prerequisite/presentation/task-origin tables to that same Work DB; it does not fork Work snapshots. DefaultDbStore supplies an AsyncEngine, without these operations. No second storage facade added just to claim reuse. |
@@ -211,3 +211,55 @@ install using the existing venv's third-party dependencies, not deployment.
 Both commits use the existing local-agent identity `Codex <codex@local.invalid>`
 via per-command options because repository user.name/email is unset; no Git
 identity configuration was persisted and no existing history was rewritten.
+
+## Work producer continuation (2026-09-14, Tier 2 lifecycle seam)
+
+Starting from the paired commits above, remove the Work-only construction of a
+complete AgentConversationRuntime and AgentBridgeRuntime. Reuse the existing
+Host JiuWenSwarmRoundHarness reservation, actual runner/cleanup and exact cancel;
+add a bounded final-result consumer on its existing handle. SDK WorkRuntime
+remains the sole durable admission/revision/recovery/capacity owner. The Host
+adapter owns no separate scheduler, history, presentation ledger or request
+state. Voice retains committed-input/specification adaptation. Existing native
+foreground delegate behavior and all speech deadlines are excluded.
+
+Acceptance requires completed canonical result, wrong binding zero execution,
+multiple/empty/error finals fail closed, exact cancellation and late cleanup
+UNKNOWN/occupied slot, Host close retry/unpin, generation fences and no speech/
+history effects. No schema, Task-card, tool permission or replay-policy change.
+
+Implementation: HostWorkAgentExecutor calls the existing Harness directly;
+AgentConversationRuntime.execute_native_work and its Work branches are removed.
+The ordinary foreground delegate retains its previous deadline and interruption
+behavior. HarnessRoundHandle.collect_final_text consumes existing events and
+waits for actual runner cleanup; it is not another authoritative lifecycle.
+Work still does not create a Task card. The SDK is unchanged from f91bc2d5e.
+
+Evidence: 122 affected Work/Host/ordinary-conversation tests passed before the
+additional fault cases. The final focused Work/Host set is **36 passed** and covers malformed finals,
+delayed cleanup with capacity retained, cleanup failure, generation retirement,
+Host-close retry, and actual SQLite result persistence/reopen/replay suppression.
+The SQLite test executes through Host Harness and RuntimeFormalAgentFacade with
+a controlled lower Agent; it is not a live model/provider or human audio check.
+Unrelated SQLite data remains unchanged and replay after closing the producer
+does not increment Agent calls. Empty recording-history fakes that were no
+longer connected after removing Voice runtime were removed from tests rather
+than presented as evidence. No presentation/history runtime is allocated.
+
+Independent read-only review found a P1: wait_settled returning FAILED after
+cleanup error must not be called CANCELLED. Fixed by validating terminal outcome;
+the cleanup-error/normal-cancel pair passes. Review found no other definite
+blocking issue. A prior test failure used the wrong expected controlled-Agent
+answer; corrected to its actual scripted value, with restart assertions retained.
+
+Production delta against Host24ac93b6 is Voice -86, Host +112, SDK 0; total +26.
+This removes an unnecessary runtime stack, not 26 lines of functionality. Frozen
+09-13 manifests remain historical; 09-14 manifests record the new exact source.
+The retired P2 joint scenario and broader Host/Voice registry audit remain open.
+
+[Clean paired wheel evidence](../evidence/DEEP_WORK_HOST_PACKAGES_20260914.json)
+records the rebuilt Host with the unchanged SDK .4. A direct repository build
+was rejected because old build/lib retained deleted task_core.py; staging the
+current tracked source without build caches removed it. The clean wheel has no
+extra production Python file and its new Host executor/Harness and SDK imports
+resolve inside the temporary target. No environment package or deployment change.

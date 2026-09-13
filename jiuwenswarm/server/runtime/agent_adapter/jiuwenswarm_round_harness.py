@@ -243,6 +243,35 @@ class HarnessRoundHandle:
         await asyncio.shield(record.task)
         return record.terminal_event
 
+    async def collect_final_text(self) -> str:
+        """Consume this owned round without creating a presentation/Bridge runtime.
+
+        The actual runner and cleanup must settle, not merely emit a final chunk.
+        Count every final, including empty ones, as the existing Bridge does.
+        """
+        final_count = 0
+        text = None
+        valid_events = True
+        try:
+            async for item in self.events():
+                if isinstance(item, AgentResponseChunk):
+                    event_type = item.payload.get("event_type")
+                    valid_events &= isinstance(event_type, str) and bool(event_type.strip())
+                    if event_type == "chat.final":
+                        final_count += 1
+                        text = item.payload.get("content")
+        finally:
+            terminal = await self.wait_settled()
+        if (not valid_events or final_count != 1 or not isinstance(text, str)
+                or not text.strip() or terminal is None
+                or terminal.payload.get("outcome") != TerminalOutcome.COMPLETED.value):
+            raise HarnessRoundViolation(
+                "NATIVE_DELEGATE_AGENT_RESULT_INVALID",
+                "Agent did not return one completed canonical final",
+                ErrorCode.RESULT_UNKNOWN,
+            )
+        return text
+
     async def events(self) -> AsyncIterator[AgentResponseChunk | EventEnvelope]:
         self._harness.require_handle(self)
         if self._subscribed:

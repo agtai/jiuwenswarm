@@ -87,5 +87,8 @@ Hermes 另有 Chained：客户端录音 → STT → 普通 Agent turn → 流式
 上述 Hermes SHA、插件 SHA 和 PR 编号是继承的静态分析边界，不代表最新版本，
 也不是本轮外部实现验证。LiveVoice 旧 Task/Work 提取保留了大量原实现，详见
 [迁移来源实测](../evidence/DEEP_INTEGRATION_ORIGINS_20260913.json)；其存入 SDK
-不能等同于已采用 Controller/Team 的管理能力。当前新清理只消除被代码证明无
-生产调用的旧 carrier/模型/备用寿命路径，以及前端重复配置复制，未统一三方协议。
+不能等同于已采用 Controller/Team 的管理能力。新清理消除无生产调用的旧
+carrier/模型/备用寿命路径和前端重复配置复制；09-14 的 Work producer 进一步
+直接复用宿主 Harness，不再套用 Voice ConversationRuntime/Bridge。Task 的
+checkpoint 已进入既有 SDK callback rail。以上是具体执行复用，未统一三方协议，
+也未证明所有持久任务管理能力已合一。
