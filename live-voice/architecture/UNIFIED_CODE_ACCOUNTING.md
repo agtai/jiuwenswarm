@@ -24,6 +24,9 @@
 | Work 宿主执行收敛 09-14 | Voice 专属路径 | 113,237 | 113,237 | 113,237 |
 | Work 宿主执行收敛 09-14 | JiuwenSwarm 应用/共享 | 40,006 | 48,212 | 150,727 |
 | Work 宿主执行收敛 09-14 | AgentCore 新增 | 33,812 | 33,872 | 34,017 |
+| Registry 旧受理消重 09-14 | Voice 专属路径 | 113,111 | 113,111 | 113,111 |
+| Registry 旧受理消重 09-14 | JiuwenSwarm 应用/共享 | 40,006 | 48,212 | 150,727 |
+| Registry 旧受理消重 09-14 | AgentCore 新增 | 33,812 | 33,872 | 34,017 |
 
 本轮三部分净增量合计从 **195,680** 降至 **195,295**，减少 **385** 行：
 Voice −99、Host −377、SDK +91。SDK 的 34,017 行受影响文件中包含既有
@@ -40,6 +43,10 @@ Voice净−86、Host净+112、SDK不变；这是删除Work对Voice协调运行�
 增加宿主薄适配和既有Harness结果收集的实际变化，不是等量搬迁或代码减量承诺。
 Work状态/存储未复制；普通Voice委托的限时与播放行为未改。
 
+随后 Registry 删除无生产写入的旧 P2 ledger、无调用的容量预留/预检及恒假分支，
+生产净−126行（全部Voice）。最新合计 **195,195**，较审计前减少 **485** 行。
+这是实际删除旧受理管理，没有搬迁或新增替代框架；统一journal仍负责当前输入。
+
 ## 2. 最新实施后的合并模块统计
 
 每个受影响生产文件按主要职责只归一组。AgentServer 是运行容器，不重复计数；云端模型代码不在仓库，不计数。横向公共层单列，避免把巨大共享文件硬塞给某个语音模块。
@@ -49,7 +56,7 @@ Work状态/存储未复制；普通Voice委托的限时与播放行为未改。
 | 浏览器 M1+M2 | 45,070 | 45,925 | 70,769 |
 | Gateway G | 18,198 | 19,581 | 38,416 |
 | Realtime/语音适配 M3 | 14,427 | 14,427 | 14,427 |
-| 会话与业务协调 M4+M5 | 39,462 | 39,462 | 39,462 |
+| 会话与业务协调 M4+M5 | 39,336 | 39,336 | 39,336 |
 | 工作管理 M6+M8 | 37,471 | 37,531 | 37,676 |
 | Agent 与项目执行 M7+M9 | 12,935 | 17,023 | 51,043 |
 | 公共契约、授权、配置、观测与 Host 装配 | 19,492 | 21,372 | 46,188 |
@@ -96,6 +103,8 @@ Work revision/CAS/UNKNOWN及取消实际结算保证。保留这些扩展的依�
 - [当前模块分桶](../evidence/DEEP_INTEGRATION_MODULES_20260913.json)
 - [09-14 Work宿主执行逐文件清单](../evidence/DEEP_WORK_HOST_20260914.json)
 - [09-14 最新模块分桶](../evidence/DEEP_WORK_HOST_MODULES_20260914.json)
+- [Registry消重后的逐文件清单](../evidence/DEEP_REGISTRY_20260914.json)
+- [Registry消重后的最新模块分桶](../evidence/DEEP_REGISTRY_MODULES_20260914.json)
 
 ```powershell
 .venv/Scripts/python.exe scripts/live_voice/code_ownership_counts.py --stage deep-integration-after --output live-voice/evidence/DEEP_INTEGRATION_AFTER_20260913.json

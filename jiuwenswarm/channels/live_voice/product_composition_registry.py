@@ -1041,7 +1041,6 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
         self._p2_orphan_cleanups: list[_P2FailedCleanupLease] = []
         self._root_orphan_cleanups: list[ProductCompositionLease] = []
         self._root_cleanup_tasks: dict[ProductCompositionLease, asyncio.Task[None]] = {}
-        self._p2_submit_operations: dict[str, _RetainedProductOperation] = {}
         self._unified_operations: dict[str, _RetainedProductOperation] = {}
         self._unified_settlement_tasks: set[asyncio.Task[None]] = set()
         # Durable truth remains the terminal TaskEvent.  This bounded map only
@@ -1096,9 +1095,6 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
         self._semantic_analysis_tasks: dict[str, asyncio.Task[None]] = {}
         self._semantic_dialogue_commits: dict[str, TurnCommit] = {}
         self._speculations_in_flight = 0
-        self._pending_turn_commits_by_commit: dict[str, TurnCommit] = {}
-        self._pending_turn_commits_by_turn: dict[str, TurnCommit] = {}
-        self._pending_voice_commit_routes: dict[str, tuple[str, str]] = {}
         self._accepted_turn_commits_by_commit: dict[str, TurnCommit] = {}
         self._accepted_turn_commits_by_turn: dict[str, TurnCommit] = {}
         self._accepted_voice_commit_routes: dict[str, tuple[str, str]] = {}
@@ -6369,7 +6365,6 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
         commit: TurnCommit,
         context: FormalContextSnapshot,
         channel_id: str,
-        route_key: tuple[str, str],
         before_agent_dispatch: Callable[[ResponseRef, str], Awaitable[None]]
         | None = None,
         after_agent_dispatch: Callable[[Any], None] | None = None,
@@ -6379,7 +6374,6 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
         l0_commit_admission: _L0CommitAdmissionClock | None = None,
         speculation: SpeculativeDialogue | None = None,
     ) -> P3RouteResult:
-        result_unknown = False
         submission_started = time.monotonic()
 
         def measurement_binding(
@@ -6476,121 +6470,6 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
                 code=getattr(exc, "code", ErrorCode.UNAVAILABLE),
                 message=str(exc),
                 manifest=retained.manifest,
-            )
-        finally:
-            async with self._lock:
-                if (
-                    result_unknown
-                    and commit.commit_id not in self._accepted_turn_commits_by_commit
-                    and commit.commit_id not in self._consumed_turn_commits_by_commit
-                ):
-                    self._unknown_turn_commits_by_commit[commit.commit_id] = commit
-                    self._unknown_turn_commits_by_turn[commit.turn_id] = commit
-                    self._unknown_voice_commit_routes[commit.commit_id] = route_key
-                if self._pending_turn_commits_by_commit.get(commit.commit_id) is commit:
-                    self._pending_turn_commits_by_commit.pop(commit.commit_id, None)
-                if self._pending_turn_commits_by_turn.get(commit.turn_id) is commit:
-                    self._pending_turn_commits_by_turn.pop(commit.turn_id, None)
-                self._pending_voice_commit_routes.pop(commit.commit_id, None)
-
-    def _reserve_turn_commit_locked(
-        self, commit: TurnCommit, route_key: tuple[str, str]
-    ) -> None:
-        self._preflight_turn_commit_identity_locked(commit)
-        retained_count = (
-            len(self._pending_turn_commits_by_commit)
-            + len(self._accepted_turn_commits_by_commit)
-            + len(self._unknown_turn_commits_by_commit)
-            + len(self._consumed_turn_commits_by_commit)
-        )
-        while retained_count >= self._TURN_COMMIT_CAPACITY:
-            evicted = self._evict_completed_product_operation(
-                self._p3_mutation_operations, namespace="p3.mutate"
-            ) or self._evict_completed_product_operation(
-                self._p2_submit_operations, namespace="p2.submit"
-            )
-            if not evicted:
-                break
-            retained_count = (
-                len(self._pending_turn_commits_by_commit)
-                + len(self._accepted_turn_commits_by_commit)
-                + len(self._unknown_turn_commits_by_commit)
-                + len(self._consumed_turn_commits_by_commit)
-            )
-        if retained_count >= self._TURN_COMMIT_CAPACITY:
-            raise FormalTaskViolation(
-                "PRODUCT_TURN_COMMIT_LEDGER_FULL",
-                "bounded committed-turn authority is full",
-                ErrorCode.UNAVAILABLE,
-            )
-        retained_for_route = (
-            sum(
-                retained_route == route_key
-                for retained_route in self._pending_voice_commit_routes.values()
-            )
-            + sum(
-                retained_route == route_key
-                for retained_route in self._accepted_voice_commit_routes.values()
-            )
-            + sum(
-                retained_route == route_key
-                for retained_route in self._unknown_voice_commit_routes.values()
-            )
-        )
-        while retained_for_route >= self._TURN_COMMIT_CAPACITY_PER_ROUTE:
-            evicted = self._evict_completed_product_operation(
-                self._p3_mutation_operations, namespace="p3.mutate"
-            ) or self._evict_completed_product_operation(
-                self._p2_submit_operations, namespace="p2.submit"
-            )
-            if not evicted:
-                break
-            retained_for_route = (
-                sum(
-                    retained_route == route_key
-                    for retained_route in self._pending_voice_commit_routes.values()
-                )
-                + sum(
-                    retained_route == route_key
-                    for retained_route in self._accepted_voice_commit_routes.values()
-                )
-                + sum(
-                    retained_route == route_key
-                    for retained_route in self._unknown_voice_commit_routes.values()
-                )
-            )
-        if retained_for_route >= self._TURN_COMMIT_CAPACITY_PER_ROUTE:
-            raise FormalTaskViolation(
-                "PRODUCT_ROUTE_TURN_COMMIT_LEDGER_FULL",
-                "bounded committed-turn authority for this route is full",
-                ErrorCode.UNAVAILABLE,
-            )
-        self._pending_turn_commits_by_commit[commit.commit_id] = commit
-        self._pending_turn_commits_by_turn[commit.turn_id] = commit
-        self._pending_voice_commit_routes[commit.commit_id] = route_key
-
-    def _preflight_turn_commit_identity_locked(self, commit: TurnCommit) -> None:
-        self._require_turn_commit_not_retired_locked(commit)
-        existing = (
-            self._pending_turn_commits_by_commit.get(commit.commit_id)
-            or self._pending_turn_commits_by_turn.get(commit.turn_id)
-            or self._accepted_turn_commits_by_commit.get(commit.commit_id)
-            or self._accepted_turn_commits_by_turn.get(commit.turn_id)
-            or self._unknown_turn_commits_by_commit.get(commit.commit_id)
-            or self._unknown_turn_commits_by_turn.get(commit.turn_id)
-            or self._consumed_turn_commits_by_commit.get(commit.commit_id)
-            or self._consumed_turn_commits_by_turn.get(commit.turn_id)
-        )
-        if existing is not None:
-            reason = (
-                "TURN_COMMIT_ALREADY_SUBMITTED"
-                if existing.canonical_bytes() == commit.canonical_bytes()
-                else "TURN_COMMIT_CONFLICT"
-            )
-            raise FormalTaskViolation(
-                reason,
-                "commit_id and turn_id are immutable and may submit only once",
-                ErrorCode.CONFLICT,
             )
 
     def _release_voice_origin_locked(self, commit: TurnCommit) -> None:
@@ -7235,10 +7114,6 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
                 commit=commit,
                 context=context,
                 channel_id=channel_id,
-                route_key=(
-                    retained.binding.session_id,
-                    retained.binding.interaction_id,
-                ),
                 before_agent_dispatch=checkpoint,
                 after_agent_dispatch=checkpoint_accepted,
                 allow_agent_tools=allow_tools,
@@ -15021,7 +14896,6 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
         retained_tasks = tuple(
             entry.task
             for ledger in (
-                self._p2_submit_operations,
                 self._unified_operations,
                 self._p2_notification_operations,
                 self._p2_ack_operations,

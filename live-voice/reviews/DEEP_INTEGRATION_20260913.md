@@ -276,6 +276,15 @@ resolve inside the temporary target. No environment package or deployment change
 
 ## Current unified-input joint evidence (2026-09-14)
 
+Bounded Registry cleanup scope (Tier 2, no authority/schema change): remove the
+unwritten retired P2 submit ledger, uncalled turn reservation/preflight methods,
+their pending indexes and the constant-false UNKNOWN dispatch branch. Current
+handle_unified_submit uses durable journal admission, not those indexes. Keep
+the public retired-route rejection and current commit/source/capability checks.
+Owned surfaces are Registry and affected characterization assertions; verify
+unified success/replay/conflict, interrupted admission, native dispatch and
+close/recovery. No new shared lifecycle abstraction or wire policy is introduced.
+
 `tests/integration/live_voice/test_unified_host_task_joint.py` exercises
 handle_unified_submit → semantic model port → authenticated P3 composition →
 PersistentTaskCore/SQLite → direct project executor, alongside a real Host
@@ -314,3 +323,41 @@ counts and the 195,321 combined baseline delta remain unchanged.
 
 Command: `.venv/Scripts/python.exe -m pytest -q -o addopts= -o log_cli=false tests/integration/live_voice/test_unified_host_task_joint.py --tb=short`.
 Scoped Ruff and diff whitespace checks also pass.
+
+## Registry retired-admission deletion result
+
+Implemented the bounded deletion above: 126 production lines removed from
+product_composition_registry.py. No replacement owner/framework was added.
+The current Host unified journal owns admission/fingerprint/effect recovery;
+_unified_operations and settlement tasks still retain live execution and are
+drained at stop. Public P2 submit still rejects. Other accepted/source-proof
+compatibility structures were not broadened or mechanically merged in this batch.
+
+Independent static review found no production dynamic call/write into removed
+state. It identified one remaining historical test that reads the old private
+ledger after attempting retired P2 submission; this was already stale and is
+not claimed as current-route coverage. The new unified joint cases remain green.
+
+The broader selected registry/speculation/joint command produced 28 passed,
+27 failed, 189 deselected. The exact same command on isolated, unmodified
+ffc29c73 produced the identical counts and failing IDs, with baseline module
+import location verified. [Comparison and failing IDs](../evidence/DEEP_REGISTRY_BASELINE_COMPARISON_20260914.json)
+retain the evidence. A number of old Task expectations still use the fixture's
+default dialogue semantic response, rather than a specified task model result;
+they do not verify the old parser's behavior in today's implementation. They
+remain validation debt; failure-set parity does not make them passing evidence.
+No new production behavior is inferred from those failures.
+
+The directly changed uncertainty/retired-bypass/close/client-response rejection
+characterizations pass: 5 passed, 231 deselected. Scoped Ruff and diff checks
+pass. Tests required no production policy or timing change.
+
+The baseline archive initially attempted an unavailable historical LFS video;
+it was recreated with process-local GIT_LFS_SKIP_SMUDGE=1. No Git configuration,
+credential, source checkout or remote ref was changed. Neither this read-only
+archive nor the new production deletion changes the deferred speech timeout.
+
+Current code accounting: Voice113111, Host48212, SDK33872; combined195195,
+485 fewer than the initial195680. The new per-file/module manifests preserve
+the same official baselines and line metric. Earlier wheel evidence remains
+tied to its earlier source; this batch has no dependency/package-layout changes.

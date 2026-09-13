@@ -92,3 +92,7 @@ carrier/模型/备用寿命路径和前端重复配置复制；09-14 的 Work pr
 直接复用宿主 Harness，不再套用 Voice ConversationRuntime/Bridge。Task 的
 checkpoint 已进入既有 SDK callback rail。以上是具体执行复用，未统一三方协议，
 也未证明所有持久任务管理能力已合一。
+
+随后当前输入受理删除了126行无生产入口的旧P2 ledger/容量管理/恒假恢复分支，
+继续使用宿主统一提交journal。该变化只涉及LiveVoice本地实现；外部方案的
+版本与证据范围保持上述固定快照，不作新的功能或性能比较结论。

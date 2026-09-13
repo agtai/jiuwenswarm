@@ -138,3 +138,9 @@ HostWorkService 仍持有 producer 寿命和 Agent pin，语音轮次结束不�
 Harness 的结果收集只接受恰好一个非空 final 和成功终态；物理结算与结果有效性
 分别检查，清理失败或超时保留 UNKNOWN。该执行路径已收敛，不代表所有持久管理
 能力已与 Controller/Team 合一。
+
+Registry 的当前输入受理由宿主 SqliteUnifiedCommittedInputJournal 的 fingerprint、
+持久操作/effect checkpoint 与内存中正在执行的操作共同完成。09-14 删除了已无
+写入的旧 P2 submit ledger、无调用的预留/预检和恒假 UNKNOWN 分支，共126行；
+公开旧入口仍固定拒绝。这里没有将旧 ledger 搬成第三个输入管理服务。播放确认、
+来源证明与宿主业务会话仍是不同事实，后续审查不能仅凭同名状态机械合并。

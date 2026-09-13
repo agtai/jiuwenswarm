@@ -8956,7 +8956,7 @@ async def test_p2_actual_uncertainty_cannot_acquire_task_origin(
     assert composition.query_calls == []
     assert composition.production_authority_calls == []
     assert composition.production_reader_calls == []
-    assert registry._pending_turn_commits_by_commit == {}
+    assert not hasattr(registry, "_pending_turn_commits_by_commit")
     assert registry._accepted_turn_commits_by_commit == {}
     assert registry._unknown_turn_commits_by_commit == {}
     assert registry._critical_input_commit_generations == {}
@@ -9040,7 +9040,7 @@ async def test_retired_speech_bypass_claim_is_rejected_regardless_of_old_flag(
         "CRITICAL_TOKEN_POLICY_REQUIRED"
     )
     assert bypass_enabled._accepted_turn_commits_by_commit == {}
-    assert bypass_enabled._pending_turn_commits_by_commit == {}
+    assert not hasattr(bypass_enabled, "_pending_turn_commits_by_commit")
     assert bypass_enabled._unknown_turn_commits_by_commit == {}
     assert manager.agent.calls == 0
     assert composition.handle_calls == []
@@ -15585,7 +15585,7 @@ async def test_p2_close_fences_a_concurrent_next_submit_before_agent_effect(
         "ACTIVATION_LEASE_NOT_OPEN"
     )
     assert manager.agent.calls == 0
-    assert registry._p2_submit_operations == {}
+    assert not hasattr(registry, "_p2_submit_operations")
     await registry.close_active_routes()
 
 
@@ -16732,7 +16732,7 @@ async def test_p2_task_origin_rejects_client_declared_canonical_response_id(
     assert cast(dict, rejected.payload["error"])["code"] == (
         ErrorCode.INVALID_ARGUMENT.value
     )
-    assert registry._p2_submit_operations == {}
+    assert not hasattr(registry, "_p2_submit_operations")
     assert manager.agent.calls == 0
 
 
