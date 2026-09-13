@@ -1,6 +1,6 @@
 # LiveVoice：模块、运行位置与数据流
 
-> 2026-09-13 Task/Work 统一后的代码导读。SDK 配套版本 `0.1.17+livevoice.3`。
+> 2026-09-13 代码审计后的模块导读。SDK 配套版本 `0.1.17+livevoice.4`；深度融合仍为 PARTIAL。
 > 对应[统一记录](../reviews/TASK_WORK_UNIFICATION_20260913.md)和[代码量清单](UNIFIED_CODE_ACCOUNTING.md)。这是源码说明；当前产品验收边界仍由 [STATUS](../STATUS.md) 管理。
 
 ## 1. 介绍颗粒度
@@ -43,7 +43,7 @@ flowchart TB
 | Realtime M3 | 与实时模型听说，把 Provider 事件接入内部协议 | 输入音频 → 回复音频、输入/输出转写、响应状态、结构化业务调用；接收业务结果和取消 | `OpenAIRealtimeNativeInteractionEngine`、`OpenAIRealtimeSession`；本地适配+云端模型 |
 | 会话与业务协调 M4+M5 | 决定哪些语音事件有效、业务交给谁、结果何时可播 | 轮次/响应/播放回执/业务调用 → 准入、取消、上下文与工作请求、历史准入 | `NativeInteractionRuntimeOwner`、`NativeBusinessRouter`、`ProductCompositionRegistry`、呈现账本；AgentServer，浏览器/Gateway 配合 |
 | 工作管理 M6+M8 | 保存受理和执行状态，提供可核对的真实结果 | 授权请求 → Work/Task 状态、版本、调整/取消回执与结果 | Host `HostWorkService` 和 Task 装配；SDK `WorkRuntime/SqliteWorkStore`、`PersistentTaskCore/SqliteTaskStore` |
-| Agent 与项目执行 M7+M9 | 用配置好的 Agent 实际执行，项目任务额外核对文件副作用 | 执行上下文 → Agent 输出、工具效果、文件产物、结算/恢复事实 | Host `SessionExecutionService`、Agent adapter、项目应用绑定；SDK Agent/工具底座、`DirectProjectCodeExecutorAdapter`、checkpoint、file-effect、durability |
+| Agent 与项目执行 M7+M9 | 用配置好的 Agent 实际执行，项目任务额外核对文件副作用 | 执行上下文 → Agent 输出、工具效果、文件产物、结算/恢复事实 | Host `AgentRuntime.stream_owned` / `RuntimeSessionCoordinator`、Agent adapter、项目应用绑定；SDK Agent/工具底座、`DirectProjectCodeExecutorAdapter`、checkpoint、file-effect、durability |
 
 代码入口：[Voice](../../jiuwenswarm/channels/live_voice/)、[Gateway](../../jiuwenswarm/gateway/live_voice/)、[应用工作管理](../../jiuwenswarm/server/runtime/work/)、[应用 Task 装配](../../jiuwenswarm/server/runtime/formal_tasks/)、[Agent 适配](../../jiuwenswarm/server/runtime/agent_adapter/)、[SDK Task/Work](../../../agent-core/openjiuwen/core/application/tasks/)。
 
@@ -85,7 +85,7 @@ Work 当前 Voice 入口用于只读分析、读取与查询，不能借分析�
 
 项目执行器负责隔离基线、文件作用范围、执行尝试、取消/调整和失败恢复事实。Host 仍负责选择实际项目、应用的受保护路径、Agent 请求及配置；这是必须保留的集成责任。Task 的“完成”来自执行与结果事实；Realtime 说“完成了”不能使 Task 完成。持久化恢复也不保证所有中断都自动续跑。
 
-## 5. 这次统一解决了什么
+## 5. 当前复用事实与保留边界
 
 | 部分 | 统一后的唯一通用实现 | 应用必须保留的内容 |
 |---|---|---|
@@ -95,10 +95,41 @@ Work 当前 Voice 入口用于只读分析、读取与查询，不能借分析�
 
 Task 和 Work 的这些应用执行增强由 LiveVoice 开发后下沉，不应称为官方基线原本就有。AgentCore 已有 Controller Task、AgentTeam 工具异步运行等能力；它们与这里带权限、持久化尝试、项目副作用和 UNKNOWN 语义的对象不同。复用底座并补足 SDK，不把不同名字相近的 Task 生硬套在一起。
 
-统一后减少的是 JiuwenSwarm 对通用工作机制的重复所有权；不是把全部业务代码搬进 SDK，也不保证总行数大幅下降。Native/Cascade、语音编排和诊断仍属于本次未裁剪的 Voice 范围。详细两阶段与各模块统计见[代码量](UNIFIED_CODE_ACCOUNTING.md)。
+此前提取主要改变 JiuwenSwarm 对通用工作机制的所有权；不是把全部业务代码搬进 SDK，也不保证总行数大幅下降。Native/Cascade、语音编排和诊断仍属于本次未裁剪的 Voice 范围。详细两阶段与各模块统计见[代码量](UNIFIED_CODE_ACCOUNTING.md)。
 
 ## 6. 一分钟介绍稿
 
 用户通过浏览器录音和播放，Gateway 接通媒体并运行 NativeEngine，NativeEngine 与云端 Realtime 合起来提供实时听说能力。普通对话由 Realtime 回复；业务请求进入 AgentServer 的语音会话与业务协调模块，查询已有事实，或交给工作管理。工作管理在 AgentCore 中保留 Work 分析和正式 Task 两种模式；Agent 与项目执行模块调用应用配置的 AgentModel 和工具，正式任务额外管理项目文件副作用。真实结果返回语音层，浏览器报告播放进度。业务完成、文字展示和音频播放分别记录。
 
 三方横向比较见 [VOICE_FEATURE_COMPARISON](VOICE_FEATURE_COMPARISON.md)。
+
+## 7. 深度融合审计补充（2026-09-13）
+
+[代码审计](../reviews/DEEP_INTEGRATION_20260913.md)逐项区分原生调用、
+迁移实现和仍未证明的统一。当前不能宣称 Controller/Team/Work/Task 的管理层
+已合一：Controller 的会话状态、Team 的成员分工、持久交付的 Task/Attempt/outbox
+和 Work 的 checkpoint/UNKNOWN 仍是不同实现。区别必须由取消结算、事务和副作用
+保证证明，不能由名称或长短证明。
+
+本轮删除无生产消费者的旧 Task 模型/映射入口、旧 scheduler carrier 的生命周期
+分支，以及 Voice 自行关闭 Work 的备用路径。历史测试所需模型只在 tests/support；
+正式产品命令只使用 SDK 契约。前端文字和语音入口共用
+`copyNewConversationSelections`，继续通过 `createConversationSession` 调用
+AgentServer 的 `session.create`，没有另一套语音产品会话。
+
+普通语音 Agent/Work 的真实执行链是 `RuntimeFormalAgentFacade` →
+`AgentRuntime.stream_owned` → `RuntimeSessionCoordinator` → 原有 Agent facade →
+SDK Agent。正式 Task 则由持久 outbox 和 SDK 项目执行器管理独立 attempt，再调用
+Host 的 `process_background_code_task_stream`；不能把这个路径画成普通会话队列。
+AgentServer 装配 Runtime、Gateway WS、授权入口及通知转发；AgentCore 是进程内 SDK。
+
+checkpoint 现使用 SDK `AgentCallbackManager.execute` 的 `scoped_agent_rail` 与
+`TaskCheckpointRail`。根 Agent registry-only 实验曾被错根回调绕过，已撤销；
+最终实现使用可撤销的执行上下文，因此切换回调 Agent 仍会检查。工具检查先于
+普通 tool/history 投影，模型调整采纳在原有上下文预处理之后。Host 只提供缓存
+实例和会话身份适配，不再在展示 Rail 上安装动态 Task 回调。
+
+Work 保留独立持久管理，不能等同于 Controller/Team 的任务对象；其 producer
+复用同一个 AgentConversationRuntime 类，但实例寿命由 HostWorkService 持有，
+防止语音轮次结束时取消已接受工作。完全消除该 Voice 协调包装尚未证明，不能
+将本轮原生 checkpoint 融合扩写为整个管理层已合一。

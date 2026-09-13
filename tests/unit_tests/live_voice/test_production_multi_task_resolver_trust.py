@@ -33,7 +33,9 @@ from jiuwenswarm.server.runtime.formal_tasks.production_task_intent import (
     TrustedConfirmationConsumptionReceipt,
     TrustedProductionOriginReceipt,
 )
-from jiuwenswarm.server.runtime.formal_tasks.task_core import AttemptState, TaskState
+from openjiuwen.core.application.tasks.formal_task_models import (
+    FormalAttemptState as AttemptState, FormalTaskState as TaskState,
+)
 from jiuwenswarm.server.runtime.formal_tasks.voice_task_bridge import VoiceTaskBridge
 
 SCOPE = ScopeRef("subject-a", "project-a", "session-a", Assurance.AUTHENTICATED)

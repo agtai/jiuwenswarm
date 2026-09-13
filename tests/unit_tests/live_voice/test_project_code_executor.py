@@ -63,7 +63,7 @@ from jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition import
     AgentManagerProjectBindingResolver,
 )
 from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (DirectProjectCodeExecutorAdapter)
-from openjiuwen.core.application.tasks.project_executor import (AttemptProjectExecutorLease, FORMAL_PROJECT_EXECUTOR_ID, FORMAL_RUNTIME_SUPPORT_POLICY, PROJECT_CODE_ARTIFACT_KIND, PROJECT_CODE_EFFECT_POLICY, PROJECT_CODE_EXECUTOR, PROJECT_CODE_PIPELINE, ProjectExecutionBinding)
+from openjiuwen.core.application.tasks.project_executor import (AttemptProjectExecutorLease, FORMAL_PROJECT_EXECUTOR_ID, FORMAL_RUNTIME_SUPPORT_POLICY, PROJECT_CODE_ARTIFACT_KIND, PROJECT_CODE_EFFECT_POLICY, PROJECT_CODE_EXECUTOR, PROJECT_CODE_PIPELINE)
 from openjiuwen.core.application.tasks.task_store import SqliteTaskStore
 from jiuwenswarm.server.runtime.agent_adapter import interface as agent_interface
 from jiuwenswarm.server.runtime.agent_manager import AgentManager
@@ -72,6 +72,8 @@ from scripts.live_voice.w2_rehearsal.w2_d069_runtime_diagnostic import (
     _P3_FROZEN_ENTRY_COUNTS,
     _P3NonterminalBarrier,
 )
+from openjiuwen.core.application.tasks.project_executor import ProjectExecutionBinding
+from tests.support.live_voice.legacy_project_executor import ProjectExecutionBinding as LegacyProjectExecutionBinding
 
 
 class _ProjectExecutor:
@@ -496,8 +498,8 @@ async def _clean_dispatch_fence() -> None:
     return None
 
 
-def _binding(project: Path, service: _Service) -> ProjectExecutionBinding:
-    return ProjectExecutionBinding(
+def _binding(project: Path, service: _Service) -> LegacyProjectExecutionBinding:
+    return LegacyProjectExecutionBinding(
         service=service,
         execution_agent=object(),
         project_executor=_ProjectExecutor(),
@@ -528,7 +530,6 @@ def _direct_binding(
     releases: list[str] | None = None,
 ) -> ProjectExecutionBinding:
     return ProjectExecutionBinding(
-        service=None,
         execution_agent=object(),
         project_executor=executor,
         effective_execution_root=str(project.resolve()),
@@ -3023,6 +3024,11 @@ async def test_production_resolver_manager_real_facade_executes_exact_d0_root(
     monkeypatch: pytest.MonkeyPatch,
     progress_outcome: str,
 ) -> None:
+    from contextvars import copy_context
+    from openjiuwen.core.runner.callback.errors import AbortError
+    from openjiuwen.core.single_agent.agent_callback_manager import AgentCallbackManager, _execution_rails
+    from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, AgentCallbackEvent
+
     project = tmp_path / "project"
     _git_project(project)
     created_adapters: list[object] = []
@@ -3032,8 +3038,9 @@ async def test_production_resolver_manager_real_facade_executes_exact_d0_root(
         _is_session_scoped_adapter = False
 
         def __init__(self) -> None:
-            self._instance = SimpleNamespace(_react_agent=object())
-            self._stream_event_rail = SimpleNamespace(background_model_checkpoint=None)
+            self._instance = SimpleNamespace(_react_agent=SimpleNamespace(
+                agent_callback_manager=AgentCallbackManager("controlled-task")))
+            self._stream_event_rail = SimpleNamespace()
             self._project_dir = ""
             self.sessions: set[str] = set()
             self.sub_mode: str | None = "unset"
@@ -3069,8 +3076,9 @@ async def test_production_resolver_manager_real_facade_executes_exact_d0_root(
             from openjiuwen.core.context_engine import ContextEngineConfig
             from openjiuwen.core.context_engine.context.context import SessionModelContext
             from openjiuwen.core.foundation.llm import AssistantMessage, ToolCall, ToolMessage
-            callback = self._stream_event_rail.background_model_checkpoint
-            assert callback is not None
+            assert _execution_rails.get()
+            async def callback(ctx):
+                await ctx.fire(AgentCallbackEvent.BEFORE_MODEL_CALL)
             from openjiuwen.core.application.tasks.execution_checkpoint import current_background_task_checkpoint
             owner = current_background_task_checkpoint(request.session_id)
             original_adopt = owner.adopt
@@ -3079,12 +3087,14 @@ async def test_production_resolver_manager_real_facade_executes_exact_d0_root(
                 adoptions.append(context)
                 await original_adopt(context)
             owner.adopt = observed_adopt
-            await callback(SimpleNamespace(agent=object(), context=None))
+            await callback(AgentCallbackContext(agent=SimpleNamespace(
+                agent_callback_manager=AgentCallbackManager("controlled-subagent"))))
             assert adoptions == [], "a subagent in the same session must not consume root adjustments"
             context = SessionModelContext("facade-progress", request.session_id, ContextEngineConfig(
                 enable_openrouter_model_context_window_tokens=False), history_messages=[], processors=[])
-            await callback(SimpleNamespace(agent=self._instance._react_agent, context=context))
+            await callback(AgentCallbackContext(agent=self._instance._react_agent, context=context))
             assert len(adoptions) == 1
+            self.retained_context = copy_context()
             self.retained_callback = callback
             requested = Path(request.params["project_dir"]).resolve()
             assert requested == Path(self._project_dir).resolve()
@@ -3097,7 +3107,7 @@ async def test_production_resolver_manager_real_facade_executes_exact_d0_root(
                             id=f"read-{number}", name="read_file", type="function",
                             arguments='{"file_path":"README.md"}')]))
                         await context.add_messages(ToolMessage(tool_call_id=f"read-{number}", content="     1\tunchanged"))
-                        await callback(SimpleNamespace(agent=self._instance._react_agent, context=context))
+                        await callback(AgentCallbackContext(agent=self._instance._react_agent, context=context))
                     pytest.fail("six identical completed read rounds did not stop")
                 except RuntimeError as error:
                     assert str(error) == "BACKGROUND_TASK_READ_NO_PROGRESS"
@@ -3118,7 +3128,7 @@ async def test_production_resolver_manager_real_facade_executes_exact_d0_root(
             )
 
         async def cleanup_session_adapter(self, session_id: str) -> bool:
-            assert self._stream_event_rail.background_model_checkpoint is None
+            assert _execution_rails.get() == ()
             existed = session_id in self.sessions
             self.sessions.discard(session_id)
             return existed
@@ -3162,7 +3172,6 @@ async def test_production_resolver_manager_real_facade_executes_exact_d0_root(
     resolver = AgentManagerProjectBindingResolver(
         authority_resolver=Authority(),  # type: ignore[arg-type]
         agent_manager=manager,
-        service=None,
         model_resolver=Models(),  # type: ignore[arg-type]
         principal=object(),  # type: ignore[arg-type]
     )
@@ -3196,9 +3205,10 @@ async def test_production_resolver_manager_real_facade_executes_exact_d0_root(
     assert isolated.sub_mode is None  # type: ignore[attr-defined]
     assert canonical.ensure_calls == 0  # type: ignore[attr-defined]
     assert isolated.ensure_calls == 0  # type: ignore[attr-defined]
-    assert isolated._stream_event_rail.background_model_checkpoint is None
-    with pytest.raises(RuntimeError, match="BACKGROUND_TASK_CHECKPOINT_STALE"):
-        await isolated.retained_callback(SimpleNamespace(agent=isolated._instance._react_agent, context=None))
+    assert _execution_rails.get() == ()
+    with pytest.raises(AbortError, match="SCOPED_AGENT_RAIL_CLOSED"):
+        await isolated.retained_context.run(asyncio.create_task, isolated.retained_callback(
+            AgentCallbackContext(agent=isolated._instance._react_agent)))
     assert not (project / "root-agent-side-effect.txt").exists()
     assert manager._agent_pins == {}
     assert adapter.retained_cleanup_attempt_ids() == ()
@@ -3313,7 +3323,6 @@ async def test_production_partial_attempt_initialization_releases_before_worktre
     resolver = AgentManagerProjectBindingResolver(
         authority_resolver=Authority(),  # type: ignore[arg-type]
         agent_manager=manager,
-        service=None,
         model_resolver=Models(),  # type: ignore[arg-type]
         principal=object(),  # type: ignore[arg-type]
     )
@@ -3369,7 +3378,6 @@ async def test_binding_resolver_close_failure_fences_resolve_and_retries_cleanup
     resolver = AgentManagerProjectBindingResolver(
         authority_resolver=Authority(),  # type: ignore[arg-type]
         agent_manager=manager,
-        service=None,
         model_resolver=object(),  # type: ignore[arg-type]
         principal=object(),  # type: ignore[arg-type]
     )
@@ -3456,7 +3464,6 @@ async def test_binding_resolve_close_race_releases_owner_before_closed(
     resolver = AgentManagerProjectBindingResolver(
         authority_resolver=Authority(),  # type: ignore[arg-type]
         agent_manager=manager,
-        service=None,
         model_resolver=Models(),  # type: ignore[arg-type]
         principal=object(),  # type: ignore[arg-type]
     )
@@ -3485,21 +3492,12 @@ async def test_binding_resolve_close_race_releases_owner_before_closed(
 
 
 @pytest.mark.asyncio
-async def test_binding_resolver_clear_failure_is_visible_and_retryable(
+async def test_binding_resolver_agent_cleanup_failure_is_visible_and_retryable(
     tmp_path: Path,
 ) -> None:
     class Authority:
         def revalidate(self, _context, **_kwargs):
             raise AssertionError("closed resolver must not revalidate")
-
-    class Service:
-        def __init__(self) -> None:
-            self.clear_calls = 0
-
-        def clear_scheduled_task_execution_contexts(self) -> None:
-            self.clear_calls += 1
-            if self.clear_calls == 1:
-                raise RuntimeError("injected context cleanup failure")
 
     class Manager:
         def __init__(self) -> None:
@@ -3507,13 +3505,13 @@ async def test_binding_resolver_clear_failure_is_visible_and_retryable(
 
         async def cleanup_live_voice_formal_task_agents(self) -> None:
             self.cleanup_calls += 1
+            if self.cleanup_calls == 1:
+                raise RuntimeError("injected Agent cleanup failure")
 
-    service = Service()
     manager = Manager()
     resolver = AgentManagerProjectBindingResolver(
         authority_resolver=Authority(),  # type: ignore[arg-type]
         agent_manager=manager,
-        service=service,
         model_resolver=object(),  # type: ignore[arg-type]
         principal=object(),  # type: ignore[arg-type]
     )
@@ -3522,12 +3520,10 @@ async def test_binding_resolver_clear_failure_is_visible_and_retryable(
         await resolver.close()
     assert resolver._closed is False
     assert resolver._close_requested is True
-    assert service.clear_calls == 1
     assert manager.cleanup_calls == 1
 
     await resolver.close()
     assert resolver._closed is True
-    assert service.clear_calls == 2
     assert manager.cleanup_calls == 2
 
 

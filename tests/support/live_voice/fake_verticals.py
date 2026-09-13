@@ -16,7 +16,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     TurnCommit,
 )
 
-from jiuwenswarm.channels.live_voice.agent_bridge import AgentBridgePort, AgentEvent
+from tests.support.live_voice.legacy_agent_bridge import AgentBridgePort, AgentEvent
 from jiuwenswarm.channels.live_voice.conversation_runtime import (
     ConversationRuntime,
     ConversationSnapshot,
@@ -38,14 +38,14 @@ from jiuwenswarm.channels.live_voice.speech_ports import (
     SynthesisRequest,
 )
 from tests.support.live_voice.legacy_task_core import TaskCore
-from jiuwenswarm.server.runtime.formal_tasks.task_core import (
+from tests.support.live_voice.legacy_task_core import (
     AuthorizationContext,
     TaskCommand,
     TaskRecord,
     WorkProgress,
     project_work_progress,
 )
-from jiuwenswarm.server.runtime.formal_tasks.voice_task_bridge import TaskIntent, VoiceTaskBridge
+from tests.support.live_voice.legacy_voice_task_bridge import TaskIntent, VoiceTaskBridge
 
 
 class FakeVerticalViolation(ValueError):

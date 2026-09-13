@@ -11,10 +11,11 @@ from openjiuwen.core.context_engine.schema.messages import OffloadToolMessage
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig, AgentCard
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, AgentCallbackEvent
 
+from openjiuwen.core.single_agent.agent_callback_manager import scoped_agent_rail
 from jiuwenswarm.agents.harness.common.rails.stream_event_rail import JiuSwarmStreamEventRail
 from openjiuwen.core.application.tasks.execution_checkpoint import (
     background_task_checkpoint, current_background_task_checkpoint,
-    BackgroundReadProgress,
+    BackgroundReadProgress, BackgroundTaskCheckpoint, TaskCheckpointRail,
 )
 
 
@@ -34,21 +35,24 @@ async def test_real_sdk_rebuilds_model_input_after_adoption_and_does_not_swallow
     ), history_messages=[], processors=[])
     await context.add_messages(UserMessage(content="Original task."))
     rail = JiuSwarmStreamEventRail()
-    async def adopt(ctx):
+    async def adopt(context):
         if reject:
             raise RuntimeError("CONTROLLED_ADOPTION_REJECTED")
-        await ctx.context.add_messages(UserMessage(content="New accepted requirement."))
-    rail.background_model_checkpoint = adopt
+        await context.add_messages(UserMessage(content="New accepted requirement."))
     await agent.register_callback(AgentCallbackEvent.BEFORE_MODEL_CALL, rail.before_model_call)
     ctx = AgentCallbackContext(agent=agent, context=context, extra={rail._SID_KEY: "formal-task-attempt"})
-    if reject:
-        with pytest.raises(RuntimeError, match="CONTROLLED_ADOPTION_REJECTED"):
+    with scoped_agent_rail(TaskCheckpointRail(
+        BackgroundTaskCheckpoint("formal-task-attempt", adopt), root_agent=agent,
+        binding_is_current=lambda: True, session_identity=lambda ctx: "formal-task-attempt",
+    )):
+        if reject:
+            with pytest.raises(RuntimeError, match="CONTROLLED_ADOPTION_REJECTED"):
+                await agent._call_model(ctx, context, [])
+            assert calls == []
+        else:
             await agent._call_model(ctx, context, [])
-        assert calls == []
-    else:
-        await agent._call_model(ctx, context, [])
-        assert len(calls) == 1
-        assert [m.content for m in calls[0]["messages"]][-2:] == ["Original task.", "New accepted requirement."]
+            assert len(calls) == 1
+            assert [m.content for m in calls[0]["messages"]][-2:] == ["Original task.", "New accepted requirement."]
 
 
 @pytest.mark.asyncio
@@ -99,23 +103,24 @@ async def test_real_sdk_read_guard_stops_before_seventh_model_and_latches():
         return None
     with background_task_checkpoint("formal-task-attempt", adopt):
         owner = current_background_task_checkpoint("formal-task-attempt")
-        async def check(ctx):
-            owner.check_model_progress(ctx.context)
-        rail.background_model_checkpoint = check
         await agent.register_callback(AgentCallbackEvent.BEFORE_MODEL_CALL, rail.before_model_call)
         ctx = AgentCallbackContext(agent=agent, context=context, extra={rail._SID_KEY: "formal-task-attempt"})
-        await agent._call_model(ctx, context, [])
-        for number in range(1, 6):
-            await read_round(context, number, reverse=number % 2 == 0)
+        with scoped_agent_rail(TaskCheckpointRail(
+            owner, root_agent=agent, binding_is_current=lambda: True,
+            session_identity=lambda ctx: "formal-task-attempt",
+        )):
             await agent._call_model(ctx, context, [])
-            owner.check_model_progress(context)  # Exact callback replay is free.
-        await read_round(context, 6)
-        with pytest.raises(RuntimeError, match="BACKGROUND_TASK_READ_NO_PROGRESS"):
-            await agent._call_model(ctx, context, [])
-        assert len(calls) == 6
-        assert owner.failure_reason == "BACKGROUND_TASK_READ_NO_PROGRESS"
-        with pytest.raises(RuntimeError, match="BACKGROUND_TASK_READ_NO_PROGRESS"):
-            owner.raise_if_failed()
+            for number in range(1, 6):
+                await read_round(context, number, reverse=number % 2 == 0)
+                await agent._call_model(ctx, context, [])
+                owner.check_model_progress(context)  # Exact callback replay is free.
+            await read_round(context, 6)
+            with pytest.raises(RuntimeError, match="BACKGROUND_TASK_READ_NO_PROGRESS"):
+                await agent._call_model(ctx, context, [])
+            assert len(calls) == 6
+            assert owner.failure_reason == "BACKGROUND_TASK_READ_NO_PROGRESS"
+            with pytest.raises(RuntimeError, match="BACKGROUND_TASK_READ_NO_PROGRESS"):
+                owner.raise_if_failed()
     assert owner.closed
 
 

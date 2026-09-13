@@ -15,7 +15,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     TerminalOutcome,
 )
 from tests.support.live_voice.legacy_task_core import TaskCore
-from jiuwenswarm.server.runtime.formal_tasks.task_core import (
+from tests.support.live_voice.legacy_task_core import (
     AuthorizationContext,
     TaskCommand,
     TaskCoreViolation,

@@ -1,6 +1,6 @@
 import { useChatStore, useGoalStore, usePlanStore, useSessionStore } from '../../stores';
 import { createConversationSession, type SessionCreateRequestFn } from './createConversationSession';
-import { NEW_CONVERSATION_ID, registerCreatedConversation } from './newConversationLifecycle';
+import { NEW_CONVERSATION_ID, copyNewConversationSelections, registerCreatedConversation } from './newConversationLifecycle';
 
 export class LiveVoiceProjectRequiredError extends Error {}
 
@@ -41,25 +41,9 @@ export async function createLiveVoiceConversation(input: {
   const draft = chat.getRuntime(NEW_CONVERSATION_ID)?.inputValue ?? '';
   chat.setInputValue(session.session_id, draft);
   chat.setInputValue(NEW_CONVERSATION_ID, '');
-  const pendingRuntime = sessions.getRuntime(NEW_CONVERSATION_ID);
-  for (const plugin of pendingRuntime?.enabledPlugins ?? []) sessions.addEnabledPlugin(session.session_id, plugin);
-  for (const mcp of pendingRuntime?.enabledMcps ?? []) sessions.addEnabledMcp(session.session_id, mcp);
-  if (pendingRuntime?.metadata) sessions.setSessionMetadata(session.session_id, pendingRuntime.metadata);
-  sessions.setAgentSelectionIntent(session.session_id, pendingRuntime?.agentSelectionIntent ?? { kind: 'keep' });
-  if (pendingRuntime?.enableSwarmflow) {
-    sessions.setSwarmflowActive(session.session_id, true, pendingRuntime.swarmflowBudget);
-  }
-  for (const skill of pendingRuntime?.selectedSkills ?? []) {
-    sessions.addSelectedSkill(session.session_id, skill);
-  }
+  copyNewConversationSelections(session.session_id);
   sessions.clearSelectedSkills(NEW_CONVERSATION_ID);
   const plan = usePlanStore.getState();
-  if (plan.isActive(NEW_CONVERSATION_ID)) {
-    plan.setActive(session.session_id, true, {
-      explicitEntry: plan.hasPendingExplicitEntry(NEW_CONVERSATION_ID),
-      entrySource: plan.getPendingEntrySource(NEW_CONVERSATION_ID) ?? undefined,
-    });
-  }
   plan.removeRuntime(NEW_CONVERSATION_ID);
   const goal = useGoalStore.getState();
   goal.setArmed(session.session_id, goal.runtimes[NEW_CONVERSATION_ID]?.armed ?? false);

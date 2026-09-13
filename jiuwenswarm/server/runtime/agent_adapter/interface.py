@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import aclosing
-import json
 from dataclasses import replace
 import inspect
 import logging
@@ -1458,8 +1457,9 @@ class JiuWenSwarm:
         inputs, _memory_mode, _raw_query = self._build_inputs(background_request)
         await prepare_session(background_request.session_id)
         checkpoint_rail = None
-        checkpoint_callback = None
-        file_checkpoint_callback = None
+        from contextlib import ExitStack
+
+        checkpoint_scope = ExitStack()
         checkpoint = None
         try:
             from openjiuwen.core.application.tasks.execution_checkpoint import current_background_task_checkpoint
@@ -1473,40 +1473,18 @@ class JiuWenSwarm:
                 if checkpoint_rail is None or root_agent is None:
                     raise RuntimeError("BACKGROUND_TASK_CHECKPOINT_UNAVAILABLE")
 
-                async def checkpoint_callback(ctx):
-                    if (checkpoint.closed or child._stream_event_rail is not checkpoint_rail
-                            or child._instance is not instance):
-                        raise RuntimeError("BACKGROUND_TASK_CHECKPOINT_STALE")
-                    if ctx.agent is root_agent:
-                        await checkpoint.adopt(ctx.context)
-                        checkpoint.check_model_progress(ctx.context)
+                from openjiuwen.core.application.tasks.execution_checkpoint import TaskCheckpointRail, file_effect_plan_tool
+                from openjiuwen.core.single_agent.agent_callback_manager import scoped_agent_rail
+                from openjiuwen.core.single_agent.rail.base import AgentCallbackEvent
 
-                if getattr(checkpoint_rail, "background_model_checkpoint", None) is not None:
-                    raise RuntimeError("BACKGROUND_TASK_CHECKPOINT_ALREADY_BOUND")
-                checkpoint_rail.background_model_checkpoint = checkpoint_callback
+                checkpoint_scope.enter_context(scoped_agent_rail(TaskCheckpointRail(
+                    checkpoint, root_agent=root_agent,
+                    binding_is_current=lambda: (
+                        child._stream_event_rail is checkpoint_rail and child._instance is instance
+                    ),
+                    session_identity=lambda ctx: checkpoint_rail._resolve_sid(ctx, ctx.session),
+                ), before_events=frozenset({AgentCallbackEvent.BEFORE_TOOL_CALL})))
                 if checkpoint.file_plan is not None:
-                    from openjiuwen.core.application.tasks.execution_checkpoint import file_effect_plan_tool
-                    from openjiuwen.core.single_agent.rail.base import ToolCallInputs
-
-                    async def file_checkpoint_callback(ctx):
-                        try:
-                            if (checkpoint.closed or child._stream_event_rail is not checkpoint_rail
-                                    or child._instance is not instance or ctx.agent is not root_agent
-                                    or checkpoint_rail._resolve_sid(ctx, ctx.session) != background_request.session_id
-                                    or not isinstance(ctx.inputs, ToolCallInputs)
-                                    or ctx.inputs.tool_name != getattr(ctx.inputs.tool_call, "name", None)):
-                                raise RuntimeError("FILE_EFFECT_TOOL_IDENTITY_MISMATCH")
-                            arguments = ctx.inputs.tool_call.arguments
-                            if isinstance(arguments, str):
-                                arguments = json.loads(arguments)
-                            await checkpoint.file_plan.before_tool(ctx.inputs.tool_name, arguments)
-                        except Exception as error:
-                            checkpoint.failure_reason = getattr(error, "reason", "BACKGROUND_FILE_EFFECT_REJECTED")
-                            raise
-
-                    if getattr(checkpoint_rail, "background_file_checkpoint", None) is not None:
-                        raise RuntimeError("BACKGROUND_FILE_CHECKPOINT_ALREADY_BOUND")
-                    checkpoint_rail.background_file_checkpoint = file_checkpoint_callback
                     plan_tool = file_effect_plan_tool()
                     instance.ability_manager.add_ability(plan_tool.card, plan_tool)
             async with aclosing(adapter.process_message_stream_impl(
@@ -1524,12 +1502,7 @@ class JiuWenSwarm:
                 checkpoint.raise_if_failed()
             raise
         finally:
-            if (checkpoint_rail is not None and checkpoint_callback is not None
-                    and checkpoint_rail.background_model_checkpoint is checkpoint_callback):
-                checkpoint_rail.background_model_checkpoint = None
-            if (checkpoint_rail is not None and file_checkpoint_callback is not None
-                    and checkpoint_rail.background_file_checkpoint is file_checkpoint_callback):
-                checkpoint_rail.background_file_checkpoint = None
+            checkpoint_scope.close()
             cleanup_session = getattr(adapter, "cleanup_session_adapter", None)
             if callable(cleanup_session):
                 await cleanup_session(background_request.session_id)

@@ -295,6 +295,8 @@ async def test_real_facade_sdk_tool_registration_and_pre_write_boundary(tmp_path
         background_task_checkpoint, current_background_task_checkpoint,
     )
 
+    from openjiuwen.core.single_agent.agent_callback_manager import _execution_rails
+
     owner = session(tmp_path)
     root = ReActAgent(AgentCard(id="file-plan-" + tmp_path.name, name="File plan test", description="controlled"))
     root.configure(ReActAgentConfig(model_name="controlled"))
@@ -306,7 +308,14 @@ async def test_real_facade_sdk_tool_registration_and_pre_write_boundary(tmp_path
     root.ability_manager.add_ability(tool.card, tool)
     context = SessionModelContext("file-plan-context", "exact-session", ContextEngineConfig(
         enable_openrouter_model_context_window_tokens=False), history_messages=[], processors=[])
-    ctx = AgentCallbackContext(agent=root, context=context, extra={rail._SID_KEY: "exact-session"})
+    from openjiuwen.core.session.agent import create_agent_session
+    sdk_session = create_agent_session("exact-session", card=root.card)
+    projections = []
+    async def write_projection(data):
+        projections.append(data)
+    sdk_session.write_stream = write_projection
+    ctx = AgentCallbackContext(agent=root, context=context, session=sdk_session,
+        extra={rail._SID_KEY: "exact-session"})
     before_write_history = []
     cleanups = []
     stream_closed = []
@@ -321,15 +330,17 @@ async def test_real_facade_sdk_tool_registration_and_pre_write_boundary(tmp_path
             return self if session_id == "exact-session" else None
         async def cleanup_session_adapter(self, session_id):
             assert stream_closed == ["same-context"]
-            assert rail.background_file_checkpoint is None and rail.background_model_checkpoint is None
+            assert _execution_rails.get() == ()
             cleanups.append(session_id)
         async def process_message_stream_impl(self, request, inputs):
             # Registration and identity checks are the production facade's actual code.
             declare = ToolCall(id="declare", name="declare_file_effect_plan", type="function",
                 arguments=json.dumps(proposal(owner)))
-            result = await root._execute_tool_call(ctx, [declare], None, context)
+            result = await root._execute_tool_call(ctx, [declare], sdk_session, context)
             assert owner.plan is not None and result[0][0].success
             before_write_history.extend(context.get_messages())
+            assert any(item.type == "tool_call" for item in projections)
+            projections.clear()
             if case == "wrong_root":
                 other_root = ReActAgent(AgentCard(id="other-" + tmp_path.name, name="Other", description="wrong root"))
                 await other_root.register_callback(AgentCallbackEvent.BEFORE_TOOL_CALL, rail.before_tool_call)
@@ -341,9 +352,13 @@ async def test_real_facade_sdk_tool_registration_and_pre_write_boundary(tmp_path
             path = owner.worktree / ("forbidden.md" if case == "unplanned" else "D.md")
             write = ToolCall(id="write", name="write_file", type="function",
                 arguments=json.dumps({"file_path": str(path), "content": "actual SDK file bytes"}))
-            result = await root._execute_tool_call(ctx, [write], None, context)
+            result = await root._execute_tool_call(ctx, [write], sdk_session, context)
             if case == "ok":
                 assert result[0][0].success
+                assert any(item.type == "tool_call" for item in projections)
+            else:
+                assert projections == []
+                assert "write" not in rail._inflight_tool_calls
             from contextvars import ContextVar
             marker = ContextVar("owned-stream-test")
             token = marker.set("stream")
@@ -352,7 +367,7 @@ async def test_real_facade_sdk_tool_registration_and_pre_write_boundary(tmp_path
                     payload={"event_type": "chat.final", "content": "done"}, is_complete=True)
             finally:
                 marker.reset(token)
-                assert rail.background_file_checkpoint is not None
+                assert _execution_rails.get() and all(item.active for item in _execution_rails.get())
                 stream_closed.append("same-context")
 
     facade = object.__new__(JiuWenSwarm)

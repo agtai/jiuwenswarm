@@ -197,7 +197,9 @@ from openjiuwen.core.application.tasks.task_store import (
     TaskDurabilityDiagnosticSnapshot,
     TaskOutboxDiagnosticFact,
 )
-from jiuwenswarm.server.runtime.formal_tasks.task_core import AttemptState, TaskState
+from openjiuwen.core.application.tasks.formal_task_models import (
+    FormalAttemptState as AttemptState, FormalTaskState as TaskState,
+)
 from jiuwenswarm.server.runtime.formal_tasks.unified_committed_input import (
     SqliteUnifiedCommittedInputJournal,
 )
@@ -8734,7 +8736,6 @@ async def test_real_itinerary_fixture_matches_store_agent_answer_and_applied_art
         return None
 
     binding = ProjectExecutionBinding(
-        service=None,
         execution_agent=object(),
         project_executor=executor,
         effective_execution_root=str(project.resolve()),

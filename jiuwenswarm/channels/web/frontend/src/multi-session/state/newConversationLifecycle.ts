@@ -12,6 +12,31 @@ import { toDisplaySessionTitle } from '../../utils/documentMessage';
 
 export const NEW_CONVERSATION_ID = 'new';
 
+/** Copy product selections for a newly created text or voice conversation.
+ * Callers retain ownership of draft text, goal activation and placeholder cleanup.
+ */
+export function copyNewConversationSelections(
+  sessionId: string,
+  pendingRuntime = useSessionStore.getState().getRuntime(NEW_CONVERSATION_ID),
+): void {
+  const sessions = useSessionStore.getState();
+  for (const skill of pendingRuntime?.selectedSkills ?? []) sessions.addSelectedSkill(sessionId, skill);
+  for (const plugin of pendingRuntime?.enabledPlugins ?? []) sessions.addEnabledPlugin(sessionId, plugin);
+  for (const mcp of pendingRuntime?.enabledMcps ?? []) sessions.addEnabledMcp(sessionId, mcp);
+  if (pendingRuntime?.metadata) sessions.setSessionMetadata(sessionId, pendingRuntime.metadata);
+  sessions.setAgentSelectionIntent(sessionId, pendingRuntime?.agentSelectionIntent ?? { kind: 'keep' });
+  if (pendingRuntime?.enableSwarmflow) {
+    sessions.setSwarmflowActive(sessionId, true, pendingRuntime.swarmflowBudget);
+  }
+  const plan = usePlanStore.getState();
+  if (plan.isActive(NEW_CONVERSATION_ID)) {
+    plan.setActive(sessionId, true, {
+      explicitEntry: plan.hasPendingExplicitEntry(NEW_CONVERSATION_ID),
+      entrySource: plan.getPendingEntrySource(NEW_CONVERSATION_ID) ?? undefined,
+    });
+  }
+}
+
 interface ConversationRuntimeSettings {
   mode: AgentMode;
   selectedModelName: string | null;

@@ -1,0 +1,34 @@
+[
+  {
+    "source_ref": "88a2228ab5d4075059a84e57fb0b94612b4f325e",
+    "source_path": "jiuwenswarm/server/runtime/formal_tasks/project_code_executor.py",
+    "current_path": "openjiuwen/core/application/tasks/project_executor.py",
+    "source_lines": 6599,
+    "current_lines": 6209,
+    "exact_matching_lines": 5789
+  },
+  {
+    "source_ref": "a8e681f1588ca9b8de184bf733ab79f5c9d4db05",
+    "source_path": "jiuwenswarm/server/runtime/work/native_work_runtime.py",
+    "current_path": "openjiuwen/core/application/tasks/work_runtime.py",
+    "source_lines": 959,
+    "current_lines": 860,
+    "exact_matching_lines": 686
+  },
+  {
+    "source_ref": "f9c8e283e699402679909cbfedeb741360d76f66",
+    "source_path": "jiuwenswarm/server/runtime/formal_tasks/task_store.py",
+    "current_path": "openjiuwen/core/application/tasks/task_store.py",
+    "source_lines": 15224,
+    "current_lines": 13898,
+    "exact_matching_lines": 13140
+  },
+  {
+    "source_ref": "f9c8e283e699402679909cbfedeb741360d76f66",
+    "source_path": "jiuwenswarm/server/runtime/formal_tasks/persistent_task_core.py",
+    "current_path": "openjiuwen/core/application/tasks/persistent_task_core.py",
+    "source_lines": 1645,
+    "current_lines": 1562,
+    "exact_matching_lines": 1497
+  }
+]

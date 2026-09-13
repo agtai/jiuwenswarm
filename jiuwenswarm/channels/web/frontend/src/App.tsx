@@ -99,6 +99,7 @@ import {
   registerCreatedConversation,
   resolveNewConversationEntrySettings,
   resetNewConversationRuntime,
+  copyNewConversationSelections,
 } from './multi-session/state/newConversationLifecycle';
 import { resolveNewConversationProjectDir } from './multi-session/state/newConversationProject';
 import { toDisplaySessionTitle } from './utils/documentMessage';
@@ -2535,23 +2536,7 @@ function AppContent({
         },
       );
 
-      (pendingRuntime?.selectedSkills ?? []).forEach((skill) => sessionStore.addSelectedSkill(newSid, skill));
-      (pendingRuntime?.enabledPlugins ?? []).forEach((id) => sessionStore.addEnabledPlugin(newSid, id));
-      (pendingRuntime?.enabledMcps ?? []).forEach((name) => sessionStore.addEnabledMcp(newSid, name));
-      if (pendingRuntime?.metadata) sessionStore.setSessionMetadata(newSid, pendingRuntime.metadata);
-      sessionStore.setAgentSelectionIntent(
-        newSid,
-        pendingRuntime?.agentSelectionIntent ?? { kind: 'keep' as const },
-      );
-      if (pendingRuntime?.enableSwarmflow) {
-        sessionStore.setSwarmflowActive(newSid, true, pendingRuntime.swarmflowBudget);
-      }
-      if (usePlanStore.getState().isActive(NEW_CONVERSATION_ID)) {
-        usePlanStore.getState().setActive(newSid, true, {
-          explicitEntry: usePlanStore.getState().hasPendingExplicitEntry(NEW_CONVERSATION_ID),
-          entrySource: usePlanStore.getState().getPendingEntrySource(NEW_CONVERSATION_ID) ?? undefined,
-        });
-      }
+      copyNewConversationSelections(newSid, pendingRuntime);
 
       pendingNewConversationRef.current = false;
       sessionStore.removeRuntime(NEW_CONVERSATION_ID);

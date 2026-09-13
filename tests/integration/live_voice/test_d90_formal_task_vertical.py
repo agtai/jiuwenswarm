@@ -449,7 +449,6 @@ async def test_d90_formal_direct_voice_task_survives_disconnect_and_restarts_tru
         assert _git(project, "rev-parse", "HEAD") == revision
 
     binding = ProjectExecutionBinding(
-        service=None,
         execution_agent=object(),
         project_executor=facade,
         effective_execution_root=str(project.resolve()),
@@ -569,7 +568,6 @@ async def test_only_confirmed_task_cancel_mutates_direct_task_and_other_cancels_
         return None
 
     binding = ProjectExecutionBinding(
-        service=None,
         execution_agent=object(),
         project_executor=facade,
         effective_execution_root=str(project.resolve()),
@@ -651,7 +649,6 @@ async def test_s6_joint_slow_conversation_detached_task_and_exact_cancel_domains
         assert _git(project, "rev-parse", "HEAD") == revision
 
     binding = ProjectExecutionBinding(
-        service=None,
         execution_agent=object(),
         project_executor=task_facade,
         effective_execution_root=str(project.resolve()),

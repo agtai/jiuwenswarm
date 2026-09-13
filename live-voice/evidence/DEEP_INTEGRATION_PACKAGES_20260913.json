@@ -1,0 +1,9 @@
+{
+  "result": "FINAL_PAIRED_WHEEL_IMPORT_OK",
+  "sdk_version": "0.1.17+livevoice.4",
+  "wheels_sha256": {
+    "openjiuwen-0.1.17+livevoice.4-py3-none-any.whl": "20ec2c88e5b63ee8387350af135142df1fff7e24d9cdb9a79d3fd4ca6335ca37",
+    "workswarm-0.2.5b1-py3-none-any.whl": "a9c6074a109a6ddd2dddac407cb988933946096f2996ecf8c9b30306893fe619"
+  },
+  "scope": "Temporary isolated --target install, no production deployment. Existing venv provides external dependencies; wheel package source imports verified inside target."
+}

@@ -87,21 +87,34 @@ support has been discussed, not implemented.
 ### Continuation boundary
 
 
-**Current unification (2026-09-13):** user accepted Task create/cancel/adjust/query/
-result and Work execution in session `web_1a09ba51ef2_c737a98beaa0`, then authorized
-Task completion first, Work convergence second, and architecture/code accounting.
-The [execution record](reviews/TASK_WORK_UNIFICATION_20260913.md) owns the bounded
-implementation and evidence. SDK owns Task execution, storage, attempt recovery,
-file effects and verified results; Host supplies project/Agent/application policy
-and Voice supplies speech/presentation. Work now uses SDK admission, revision,
-checkpoint CAS, cancellation settlement and UNKNOWN recovery; Host retains Agent
-producer lifetime, input/source integration and presentation receipts. Architecture
-merges M4+M5 and M7+M9; Work/Task share SDK ownership with distinct execution modes.
-One commit per affected repository per stage; no remote update. Preserve existing
-data, model and timeout settings; prior physical acceptance is not a new latency
-guarantee or closure of the separately retained stale-announcement issue.
+**Current deep-integration packet (2026-09-13/14): PARTIAL.** The user explicitly
+requires code-level native-capability audit, not directory/import ownership
+claims. [Audit, changes and evidence](reviews/DEEP_INTEGRATION_20260913.md) owns
+this packet, beginning at Host `948cfc7920fd35fdf0f4b9a476cd567bb4af9108` and SDK
+`2d87926c0903fb9b130c8ca6fa8129d978168200`. No push, history
+rewrite, deployment, private configuration or irreversible migration is authorized.
 
-**Current repair (2026-09-13):** restore Native notification sequencing after
+The scoped implementation enhances the native AgentCallbackManager for Task
+checkpoint enforcement, removes dynamic Host checkpoint channels and obsolete
+production Task/threaded-executor fixtures, removes the legacy scheduler carrier,
+requires Host-owned Work producers, and shares new-session selections between
+text and Voice. Controller/Team tasks, application delivery Task and Work are
+not one management state machine; their cancellation, transaction and result
+semantics differ. The broad Work/Voice coordinator reduction remains unproved.
+Module diagrams retain M4+M5 and M7+M9; accounting separates actual deletion,
+retained/migrated code and native-file additions. Earlier ownership extraction
+is recorded in [the preceding packet](reviews/TASK_WORK_UNIFICATION_20260913.md),
+not proof of deep native unification.
+
+User session `web_1a09c8505b1_6bce26af6cd4` verified Task creation, running
+adjustment, pre-execution cancellation, query and Work execution. It did NOT
+verify running cancellation; weather Work asked for a city. The single
+NATIVE_PREPARED_RESPONSE_TIMEOUT (Realtime completion after the local 15-second
+preparation deadline) remains explicitly deferred; no latency/buffer adjustment.
+The old joint integration test still submits through retired p2.submit, so its
+current unified-route journey and full product candidate remain PARTIAL.
+
+**Preceding repair (2026-09-13):** restore Native notification sequencing after
 Gateway authority expiry and serialize browser refresh with notification polling.
 The [repair record](reviews/NOTIFICATION_SEQUENCE_RECOVERY_20260913.md) owns the
 private Host cursor, exact Gateway restoration, concurrency review and checks.

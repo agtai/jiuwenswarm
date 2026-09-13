@@ -7061,7 +7061,6 @@ async def test_stop_settles_direct_interruption_into_canonical_store(
     releases: list[str] = []
     blocking_agent = BlockingProjectExecutor()
     binding = ProjectExecutionBinding(
-        service=None,
         execution_agent=object(),
         project_executor=blocking_agent,
         effective_execution_root=str(project.resolve()),
@@ -7554,7 +7553,6 @@ async def test_non_dispatch_binding_has_no_agent_or_model_side_effects(
     resolver = AgentManagerProjectBindingResolver(
         authority_resolver=Authority(),
         agent_manager=Manager(),
-        service=object(),
         model_resolver=models,
         principal=_principal(),
         clock=lambda: NOW,
@@ -7603,7 +7601,6 @@ async def test_dirty_dispatch_fails_before_model_agent_or_carrier(
     resolver = AgentManagerProjectBindingResolver(
         authority_resolver=Authority(),
         agent_manager=Manager(),
-        service=object(),
         model_resolver=Models(),
         principal=_principal(),
         clock=lambda: NOW,
@@ -7681,7 +7678,6 @@ async def test_dispatch_handoff_fence_rechecks_clean_state_after_agent_setup(
     resolver = AgentManagerProjectBindingResolver(
         authority_resolver=authority,
         agent_manager=manager,
-        service=object(),
         model_resolver=_ModelResolver(),
         principal=_principal(),
         clock=lambda: NOW,
@@ -7851,7 +7847,6 @@ async def test_default_change_and_model_config_drift_fail_before_agent_or_carrie
     binding_resolver = AgentManagerProjectBindingResolver(
         authority_resolver=Authority(),
         agent_manager=Manager(),
-        service=object(),
         model_resolver=resolver,
         principal=_principal(),
         clock=lambda: NOW,
@@ -7872,38 +7867,24 @@ async def test_default_change_and_model_config_drift_fail_before_agent_or_carrie
 
 
 @pytest.mark.asyncio
-async def test_binding_shutdown_releases_contexts_and_agents_after_scheduler_failure() -> (
+async def test_binding_shutdown_retries_failed_agent_cleanup() -> (
     None
 ):
-    class FailingService:
-        def __init__(self) -> None:
-            self.clear_calls = 0
-            self.stop_calls = 0
-
-        async def stop_scheduler(self, *, interrupt_running: bool = False) -> None:
-            assert interrupt_running is True
-            self.stop_calls += 1
-            if self.stop_calls == 1:
-                raise RuntimeError("scheduler stop failed")
-
-        def clear_scheduled_task_execution_contexts(self) -> None:
-            self.clear_calls += 1
-
     class Manager:
         def __init__(self) -> None:
             self.cleanup_calls = 0
 
         async def cleanup_live_voice_formal_task_agents(self) -> None:
             self.cleanup_calls += 1
+            if self.cleanup_calls == 1:
+                raise RuntimeError("injected Agent cleanup failure")
 
-    service = FailingService()
     manager = Manager()
     resolver = AgentManagerProjectBindingResolver(
         authority_resolver=ServerSessionProjectAuthorityResolver(
             session_reader=lambda _session_id: None
         ),
         agent_manager=manager,
-        service=service,
         model_resolver=_ModelResolver(),
         principal=_principal(),
         clock=lambda: NOW,
@@ -7916,16 +7897,12 @@ async def test_binding_shutdown_releases_contexts_and_agents_after_scheduler_fai
         await resolver.close()
     assert resolver._closed is False
     assert resolver._close_requested is True
-    assert service.stop_calls == 1
-    assert service.clear_calls == 1
     assert manager.cleanup_calls == 1
 
     await resolver.close()
     await resolver.close()
 
     assert resolver._closed is True
-    assert service.stop_calls == 2
-    assert service.clear_calls == 1
     assert manager.cleanup_calls == 2
 
 
@@ -9421,7 +9398,6 @@ async def test_dispatch_builds_the_agent_handle_instead_of_reading_the_accessor(
     resolver = AgentManagerProjectBindingResolver(
         authority_resolver=Authority(),
         agent_manager=Manager(),
-        service=object(),
         model_resolver=_ModelResolver(),
         principal=_principal(),
         clock=lambda: NOW,
@@ -9505,7 +9481,6 @@ async def test_attempt_scoped_dispatch_does_not_build_root_agent_on_target(
     resolver = AgentManagerProjectBindingResolver(
         authority_resolver=Authority(),
         agent_manager=Manager(),
-        service=None,
         model_resolver=_ModelResolver(),
         principal=_principal(),
         clock=lambda: NOW,

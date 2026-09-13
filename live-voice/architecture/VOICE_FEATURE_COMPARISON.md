@@ -1,6 +1,6 @@
 # LiveVoice、Hermes Voice 与多模态全双工：按同一模块比较
 
-> 2026-09-13，LiveVoice Task/Work 统一到配套 AgentCore `.3` 后更新。
+> 2026-09-13，LiveVoice 按配套 AgentCore `.4` 的代码审计更新；管理层深度融合仍为 PARTIAL。
 > LiveVoice 以当前两仓库源码为准；Hermes 固定 `e151d0b3458e136729fe498b566deb795ffb6a42`；多模态方案是 PR #2813 + #5301 的组合，插件代码对应 `b83923ae1f8cf0a315ce1f580e016edf48a02c2d`。这是模块级静态调用分析，不是三方性能或真实音视频实测。
 
 ## 1. 用什么颗粒度比较
@@ -47,7 +47,7 @@ Hermes 另有 Chained：客户端录音 → STT → 普通 Agent turn → 流式
 | Realtime 能力 M3 | OpenAI Native 适配+云端语音模型，音频/转写/业务调用 | GPT-Live 适配+云端模型使用 delegation/commentary；Chained 没有这一独立 Realtime 层 | Qwen 音图 Realtime；JoyAI 是动作响应+独立 ASR/TTS | 原生听说职责类似，协议并不兼容。LiveVoice 当前 Native 工厂未接 Qwen/JoyAI；配置 URL 不足以替换 |
 | 会话与业务协调 M4+M5 | Host 管轮次、旧响应失效、播放确认、通知仲裁、业务来源/项目校验；分状态读取、Work、Task | Live hook 管 delegation 与当前 turn，回复分句回填；新委托可能调用普通 turn 中断。Chained 本地打断采集、停止词和续听 | Qwen/JoyAI 前端管响应/播放 generation、VAD 和迟到输出；业务委托进入 Gateway job；结果回填按 call/job/turn 关联 | 都有打断和委托协调，但权威位置不同。LiveVoice 把语音失效与已受理工作取消分开；Hermes 新 delegation 可中断旧 Agent turn；插件清旧播放也不等于取消 job |
 | 工作管理 M6+M8 | SDK Work 状态/版本/CAS/UNKNOWN；Task/Attempt/outbox/调整/恢复；Host 保留来源和产品装配 | 这条语音链复用普通 prompt/session turn；未见与此对应的独立持久项目 Task/Work 双模式管理层 | VideoSearchManager：按 scope 排队、排序/抢占、queue_version、call_id 去重、真实取消确认；主要运行状态在内存 | 插件 job 不是空壳，也不是 SDK 持久 Task。Hermes 未见此层不代表整个项目没有定时/后台工具；不能把工具能力等同于语音入口的生命周期体系 |
-| Agent 与项目执行 M7+M9 | Host SessionExecution/Agent adapter 绑定配置；SDK 底座执行；正式 Task 增加项目基线、文件影响、checkpoint/durability、结果校验 | 普通 Hermes Agent/模型/工具，回复进入现有 turn 和历史 | execute_core_agent → E2A CHAT_SEND → AgentServer 普通 Agent/工具；画面通过附件归一化 | 两个 Jiuwen 方案复用同一底座，这是最接近“相同源码”的部分；LiveVoice 增加正式项目执行契约。插件不是调用 LiveVoice facade，Hermes 也不是 AgentCore |
+| Agent 与项目执行 M7+M9 | Host AgentRuntime/Agent adapter 绑定配置；SDK 底座执行；正式 Task 增加项目基线、文件影响、checkpoint/durability、结果校验 | 普通 Hermes Agent/模型/工具，回复进入现有 turn 和历史 | execute_core_agent → E2A CHAT_SEND → AgentServer 普通 Agent/工具；画面通过附件归一化 | 两个 Jiuwen 方案复用同一底座，这是最接近“相同源码”的部分；LiveVoice 增加正式项目执行契约。插件不是调用 LiveVoice facade，Hermes 也不是 AgentCore |
 | 历史与结果（归各模块，不另画框） | Task/Work 完成事实、聊天文字、音频呈现分别保存；已听记录依据播放回执 | 普通 Agent 历史、客户端 transcript/commentary 游标；未见对应 Host 音频 ACK 账本 | TaskFullDuplexRuntime 先写 UI/历史再按连接播放；JoyAI commitAndSpeak 先提交文字再决定 TTS | 都有历史，但“生成/展示”不是“已经播放”。LiveVoice 的 ACK 也只证明客户端报告播放进度，不证明人类确实听懂 |
 
 ## 4. 每个关键差异怎样解释
@@ -76,7 +76,16 @@ Hermes 另有 Chained：客户端录音 → STT → 普通 Agent turn → 流式
 ## 6. 代码证据与流程导读
 
 - LiveVoice：[模块/数据流](LIVE_VOICE_MODULE_GUIDE.md)、[Task/Work 统一证据](../reviews/TASK_WORK_UNIFICATION_20260913.md)、[代码量](UNIFIED_CODE_ACCOUNTING.md)。
-- Hermes：[模块调用完整导读](HERMES_VOICE_CODE_FLOW.md)。本次复核 `voice_live.py`、Desktop `voice-live.ts`、Live/Chained hooks、`methods_voice.py`、`methods_prompt.py`、`tts_streaming.py`；来源均固定上述 SHA。
-- 多模态：[2813 基础流程](JIUWENSWARM_DUPLEX_PR2813_FLOW.md)、[5301 增量流程](JIUWENSWARM_DUPLEX_PR5301_FLOW.md)。本次复核 [video_search.py](../../jiuwenswarm/extensions/video_duplex/backend/video_search.py)、[Qwen](../../jiuwenswarm/extensions/video_duplex/frontend/VideoLivePanel/qwenOmniSession.ts)、[JoyAI](../../jiuwenswarm/extensions/video_duplex/frontend/VideoLivePanel/joyaiProvider.ts)、[TaskFullDuplexRuntime](../../jiuwenswarm/extensions/video_duplex/frontend/TaskFullDuplexRuntime.tsx)。
+- Hermes：[模块调用完整导读](HERMES_VOICE_CODE_FLOW.md)。此前固定版本的记录复核 `voice_live.py`、Desktop `voice-live.ts`、Live/Chained hooks、`methods_voice.py`、`methods_prompt.py`、`tts_streaming.py`；来源均固定上述 SHA。
+- 多模态：[2813 基础流程](JIUWENSWARM_DUPLEX_PR2813_FLOW.md)、[5301 增量流程](JIUWENSWARM_DUPLEX_PR5301_FLOW.md)。此前固定版本的记录复核 [video_search.py](../../jiuwenswarm/extensions/video_duplex/backend/video_search.py)、[Qwen](../../jiuwenswarm/extensions/video_duplex/frontend/VideoLivePanel/qwenOmniSession.ts)、[JoyAI](../../jiuwenswarm/extensions/video_duplex/frontend/VideoLivePanel/joyaiProvider.ts)、[TaskFullDuplexRuntime](../../jiuwenswarm/extensions/video_duplex/frontend/TaskFullDuplexRuntime.tsx)。
 
 面向产品经理可用第 2 节和三个例子：闲聊、分析文件、修改文件；架构师再看第 3–5 节。类与函数放在导读中，避免首次介绍变成源码目录清单。
+
+## 7. 本轮证据边界
+
+本轮只重新追踪 LiveVoice/Host/SDK 调用，不重新读取 Hermes 或两个外部 PR 快照。
+上述 Hermes SHA、插件 SHA 和 PR 编号是继承的静态分析边界，不代表最新版本，
+也不是本轮外部实现验证。LiveVoice 旧 Task/Work 提取保留了大量原实现，详见
+[迁移来源实测](../evidence/DEEP_INTEGRATION_ORIGINS_20260913.json)；其存入 SDK
+不能等同于已采用 Controller/Team 的管理能力。当前新清理只消除被代码证明无
+生产调用的旧 carrier/模型/备用寿命路径，以及前端重复配置复制，未统一三方协议。

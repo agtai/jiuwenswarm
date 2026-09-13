@@ -906,28 +906,18 @@ class AgentManagerProjectBindingResolver:
         *,
         authority_resolver: ServerSessionProjectAuthorityResolver,
         agent_manager: Any,
-        service: Any,
         model_resolver: P3ModelResolver,
         principal: AuthenticatedPrincipal,
         clock: Callable[[], str] = utc_now,
     ) -> None:
         self._authority_resolver = authority_resolver
         self._agent_manager = agent_manager
-        self._service = service
         self._model_resolver = model_resolver
         self._principal = principal
         self._clock = clock
         self._close_lock = asyncio.Lock()
         self._close_requested = False
         self._closed = False
-
-    async def prepare_startup(self) -> int:
-        """Recover carrier facts before the formal Core reconciles its outbox."""
-
-        reconcile = getattr(self._service, "reconcile_task_statuses", None)
-        if not callable(reconcile):
-            return 0
-        return int(await reconcile())
 
     async def resolve(
         self, spec: FormalTaskSpec, *, for_dispatch: bool
@@ -1112,7 +1102,6 @@ class AgentManagerProjectBindingResolver:
                 attempt_executor_factory = acquire_attempt_executor
         try:
             binding = ProjectExecutionBinding(
-                service=self._service,
                 execution_agent=execution_agent,
                 project_executor=project_executor,
                 effective_execution_root=effective_root,
@@ -1169,29 +1158,6 @@ class AgentManagerProjectBindingResolver:
             if self._closed:
                 return
             cleanup_failures: list[Exception] = []
-            scheduler_stopped = self._service is None
-            stop_scheduler = getattr(self._service, "stop_scheduler", None)
-            if callable(stop_scheduler):
-                try:
-                    await stop_scheduler(interrupt_running=True)
-                    scheduler_stopped = True
-                except Exception as exc:  # noqa: BLE001 -- release remaining owners
-                    cleanup_failures.append(exc)
-                    logger.warning(
-                        "[LiveVoiceP3] carrier scheduler shutdown failed: %s", exc
-                    )
-            clear_contexts = getattr(
-                self._service, "clear_scheduled_task_execution_contexts", None
-            )
-            if not scheduler_stopped and callable(clear_contexts):
-                try:
-                    clear_contexts()
-                except Exception as exc:  # noqa: BLE001 -- release Agent regardless
-                    cleanup_failures.append(exc)
-                    logger.warning(
-                        "[LiveVoiceP3] carrier execution-context cleanup failed: %s",
-                        exc,
-                    )
             cleanup = getattr(
                 self._agent_manager, "cleanup_live_voice_formal_task_agents", None
             )
@@ -5326,7 +5292,6 @@ def create_p3_composition_from_environment(
         binding_resolver = AgentManagerProjectBindingResolver(
             authority_resolver=authority_resolver,
             agent_manager=agent_manager,
-            service=None,
             model_resolver=model_resolver,
             principal=principal,
         )

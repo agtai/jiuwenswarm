@@ -7,7 +7,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     InputCommitState,
     ScopeRef,
 )
-from jiuwenswarm.server.runtime.formal_tasks.voice_task_bridge import (
+from tests.support.live_voice.legacy_voice_task_bridge import (
     TaskIntent,
     VoiceTaskBridge,
     VoiceTaskBridgeViolation,

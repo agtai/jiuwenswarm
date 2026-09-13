@@ -15,7 +15,7 @@ from tests.support.live_voice.fake_verticals import (
     FakeTrackAvailability,
     FakeVerticalViolation,
 )
-from jiuwenswarm.server.runtime.formal_tasks.voice_task_bridge import (
+from tests.support.live_voice.legacy_voice_task_bridge import (
     TaskIntent,
     VoiceTaskBridgeViolation,
 )

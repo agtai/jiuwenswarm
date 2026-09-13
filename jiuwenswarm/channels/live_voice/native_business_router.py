@@ -297,11 +297,10 @@ class NativeBusinessRouter:
 
     async def _executor(self, route):
         from jiuwenswarm.channels.live_voice.agent_conversation_runtime import AgentConversationRuntime
+        self.works()  # Every producer belongs to the resident Host service.
         scope = route.binding.scope
 
         def current_key():
-            if self._work_service is None:
-                return scope
             from jiuwenswarm.runtime.session import RuntimeSessionState
             if self._work_service.closing or self._work_service.closed:
                 raise NativeBusinessViolation("NATIVE_WORK_HOST_UNAVAILABLE", code=ErrorCode.UNAVAILABLE)
@@ -317,10 +316,9 @@ class NativeBusinessRouter:
             retained = self._executors.get(key)
             if retained is not None:
                 return retained[0]
-            if self._work_service is not None:
-                await self._work_service.retire_previous_generations_locked(scope, key[1])
-                if current_key() != key:
-                    raise NativeBusinessViolation("NATIVE_WORK_SESSION_GENERATION_CHANGED", code=ErrorCode.STALE)
+            await self._work_service.retire_previous_generations_locked(scope, key[1])
+            if current_key() != key:
+                raise NativeBusinessViolation("NATIVE_WORK_SESSION_GENERATION_CHANGED", code=ErrorCode.STALE)
             if len(self._executors) >= 32:
                 raise NativeBusinessViolation("NATIVE_WORK_SCOPE_CAPACITY", code=ErrorCode.UNAVAILABLE)
             facade = await self.registry._agent_manager.get_agent(
@@ -332,18 +330,16 @@ class NativeBusinessRouter:
             pin = getattr(self.registry._agent_manager, "pin_agent", None)
             if callable(pin):
                 pin(facade)
-            identity_source = scope.to_dict() if self._work_service is None else {
+            identity_source = {
                 "scope": scope.to_dict(), "session_generation": key[1],
             }
             identity = hashlib.sha256(canonical_json_bytes(identity_source)).hexdigest()
-            producer = facade
-            if self._work_service is not None:
-                from jiuwenswarm.server.runtime.agent_adapter.runtime_formal import RuntimeFormalAgentFacade
-                producer = RuntimeFormalAgentFacade(
-                    runtime=self.registry._runtime, agent=facade, scope=scope,
-                    agent_channel_id="live_voice_native_work", mode="agent",
-                    project_dir=route.native_p3_authority.context.file_path,
-                )
+            from jiuwenswarm.server.runtime.agent_adapter.runtime_formal import RuntimeFormalAgentFacade
+            producer = RuntimeFormalAgentFacade(
+                runtime=self.registry._runtime, agent=facade, scope=scope,
+                agent_channel_id="live_voice_native_work", mode="agent",
+                project_dir=route.native_p3_authority.context.file_path,
+            )
             runtime = AgentConversationRuntime(scope=scope, instance_id="native-work-service:" + identity,
                 facade=producer, enabled=True, max_concurrency=4, max_requests=128)
             try:
@@ -764,17 +760,5 @@ class NativeBusinessRouter:
             read.cancel()
         if reads:
             await asyncio.gather(*reads, return_exceptions=True)
-        if self._work_owner is not None and self._work_service is None:
-            await self._work_owner.close()
-        if self._work_service is not None:
-            # Speech subscriptions release their view. Work and its actual
-            # producer pool remain with the Host until explicit work cancel or
-            # AgentRuntime shutdown.
-            return
-        for scope, (runtime, facade) in tuple(self._executors.items()):
-            result = await runtime.close(timeout_seconds=1.0)
-            if getattr(result, "closed", False) or runtime.snapshot().closed:
-                unpin = getattr(self.registry._agent_manager, "unpin_agent", None)
-                if callable(unpin):
-                    unpin(facade)
-                del self._executors[scope]
+        # This channel owns only reads/presentation subscriptions. The Host
+        # alone closes Work and its producer pool, even on partial activation.

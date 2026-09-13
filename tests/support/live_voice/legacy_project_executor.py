@@ -3,7 +3,15 @@
 """Historical scheduler adapter retained solely for compatibility regression tests."""
 from __future__ import annotations
 
-from openjiuwen.core.application.tasks.project_executor import (Any, ErrorCode, ExecutorDeliveryResult, ExecutorObservation, ExecutorResolution, FORMAL_PROJECT_EXECUTOR_ID, FormalAttemptState, FormalTaskViolation, Mapping, OutboxKind, PROJECT_CODE_PIPELINE, PersistentAttemptRecord, PersistentOutboxItem, PersistentTaskRecord, ProjectExecutionBinding, ProjectExecutionBindingResolver, TaskAdjustmentDeliveryResult, TaskAdjustmentSettlement, TaskAdjustmentState, TerminalOutcome, _EXECUTION_TARGET_FIELDS, _ReleaseOnce, _expected_contract, _path_key, _text, utc_now)
+from openjiuwen.core.application.tasks.project_executor import (Any, ErrorCode, ExecutorDeliveryResult, ExecutorObservation, ExecutorResolution, FORMAL_PROJECT_EXECUTOR_ID, FormalAttemptState, FormalTaskViolation, Mapping, OutboxKind, PROJECT_CODE_PIPELINE, PersistentAttemptRecord, PersistentOutboxItem, PersistentTaskRecord, ProjectExecutionBinding as _SdkProjectExecutionBinding, ProjectExecutionBindingResolver, TaskAdjustmentDeliveryResult, TaskAdjustmentSettlement, TaskAdjustmentState, TerminalOutcome, _EXECUTION_TARGET_FIELDS, _ReleaseOnce, _expected_contract, _path_key, _text, utc_now)
+
+
+from dataclasses import dataclass
+
+@dataclass(frozen=True, slots=True)
+class ProjectExecutionBinding(_SdkProjectExecutionBinding):
+    """Only historical scheduler tests retain the removed carrier reference."""
+    service: Any = None
 
 
 class ProjectCodeExecutorAdapter:

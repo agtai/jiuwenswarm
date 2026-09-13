@@ -12,7 +12,7 @@ from tests.support.live_voice.executor_port import (
     ExecutorPortViolation,
     ExecutorState,
 )
-from jiuwenswarm.server.runtime.formal_tasks.task_core import DispatchIntent, TaskSpec
+from tests.support.live_voice.legacy_task_core import DispatchIntent, TaskSpec
 
 
 def intent(instruction: str = "work") -> DispatchIntent:
