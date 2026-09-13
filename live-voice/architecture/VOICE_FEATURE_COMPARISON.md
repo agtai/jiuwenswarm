@@ -6,11 +6,11 @@
 
 ## 展示版：保留接入边界，再展开关键职责
 
-**Gateway 应当恢复为主介绍中的独立模块。** 它决定媒体经过哪里、Provider 连接由谁维护、业务请求怎样进入宿主、音频和控制如何返回。把它藏进“媒体输入输出”，会让听众误以为浏览器直连 Realtime，或误以为所有音频都先进入 AgentServer。
+**Gateway 接入层应保留为主介绍中的独立模块。** 它决定媒体经过哪里、Provider 连接由谁维护、业务请求怎样进入宿主、音频和控制如何返回。把它藏进“媒体输入输出”，会让听众误以为浏览器直连 Realtime，或误以为所有音频都先进入 AgentServer。
 
-推荐采用两层颗粒度：先用一张图交代**浏览器、Gateway、云端语音服务、Host/AgentServer，以及 Agent 执行底座**；再沿数据流介绍其中的职责模块。前四项是运行位置或服务边界，AgentCore 是执行依赖，Work/Task 则是宿主内的业务模块；图中用容器区分，不把它们说成同一种独立服务。
+推荐采用两层颗粒度：顶层介绍**浏览器端、Gateway 接入层、Realtime 语音能力、Host/AgentServer**；Realtime 内部标出本地适配器与云端模型，Host 内部展开会话、业务、执行三组责任。职责分组与实际部署位置分别说明，AgentCore 则作为执行底座介绍，不把它们说成同一种独立服务。
 
-### 主介绍必须保留哪些模块
+### 主介绍需要交代的职责（可按下方分组合讲）
 
 | 介绍模块 | 必须讲清的责任与数据 | 与原索引的关系 |
 |---|---|---|
@@ -26,54 +26,80 @@
 
 **Host/AgentServer 也必须介绍，但作为上述宿主模块的容器。** 在当前本地部署中，它是本机业务后端，不是云端语音模型。它承载会话准入、业务路由、Work、Task 和项目执行等责任，并连接共享 Agent 执行能力。Gateway 与 Host 分开运行；Work、Task、AgentCore 并不因此各自成为独立网络服务。
 
-### 展示用模块图：部署边界和职责同时可见
+### 合并介绍的规则：能力可以分组，运行位置与责任仍要注明
+
+**M1 + M2 统一叫“浏览器端”。** 首次介绍不再拆成两个模块框，内部说明操作与展示、录音与播放、控制与回执即可。M2 原来还包含服务端媒体传输；这部分留在 Gateway，不能因改名而声称全部媒体代码都在浏览器。
+
+**“G 同源控制与媒体路由”改称“Gateway 接入层”。** 同源指页面、API 和媒体 WebSocket 使用同一页面来源；控制是激活、结束、通知拉取等请求，媒体路由是为正确会话建立音频连接并转送数据。它是访问和传输机制，不是理解语音或执行业务的模型。对外不用把“同源”放进模块名称。
+
+**Gateway 接入层与 Native Engine 可以分开讲。** 前者负责接入、连接、媒体和请求转发；后者负责连接 Realtime、转换 Provider 事件、回填业务结果和执行语音取消等控制。当前 Native Engine 实际运行在 Gateway 进程中，拆成两个职责框不意味着需要新部署一个服务。
+
+**Native Engine + 云端 Realtime 可以合称“Realtime 语音能力”。** 内部保留“本地适配器 ↔ 云端模型”这条边：模型听说和生成内容，适配器把它接入 LiveVoice 协议。功能介绍可以合并，分析网络、成本、时延、故障或更换 Provider 时再展开；不能把二者说成同一份代码或同一个运行位置。
+
+### Native Engine 当前支持范围
+
+| 问题 | 当前代码事实 |
+|---|---|
+| 已接哪些 Native Provider？ | 生产装配创建 `OpenAIRealtimeNativeInteractionEngine`，内部使用 `OpenAIRealtimeSession`；未接第二个厂商的 Native 实现 |
+| 是否固定某一个 GPT 型号？ | 模型名通过 `LIVE_VOICE_NATIVE_REALTIME_MODEL` 配置，当前默认及已部署选择为 `gpt-realtime-2.1-mini`。可配置名字不证明每个型号都兼容或已验证 |
+| 能否只改 URL 接其他 Realtime？ | 当前不能。Session 校验只接受官方 `https://api.openai.com/v1`，并使用 OpenAI 事件和控制协议 |
+| 代码有扩展点吗？ | 有 factory 注入和内部事件/准入边界；当前装配和部分类型仍绑定 OpenAI。新增 Provider 需要适配事件、业务调用、取消与呈现等语义，再接配置与验证 |
+| 仓库里的 Qwen/JoyAI 算支持吗？ | 它们属于多模态插件的另一条实现，未接进此 Native Engine。Cascade 也不是第二个 Native Realtime Provider |
+
+源码：[引擎选择](../../jiuwenswarm/channels/live_voice/native_interaction_config.py)、[实际工厂装配](../../jiuwenswarm/gateway/channel_manager/web/app_web_handlers.py)、[OpenAI Native Engine](../../jiuwenswarm/channels/live_voice/openai_realtime_native_engine.py)、[Session 与端点校验](../../jiuwenswarm/channels/live_voice/openai_realtime_session.py)。这是当前代码的支持范围，不是外部模型可用性清单。
+
+### AgentServer 内部按同一原则分成三组
+
+| 展示分组 | 内部职责 | 为什么这样分，哪些区别要保留 |
+|---|---|---|
+| 会话与呈现协调 | M4 轮次准入、旧响应失效、打断协调、通知播报、播放账本与语音历史准入 | 可合并介绍；它判断哪些内容有效、哪些已被报告播放。Native Engine 负责执行 Provider 控制，Host 负责自己的会话与呈现准入，二者协作 |
+| 业务路由与工作管理 | M5 路由/事实查询；M6 Work；M8 正式 Task | 可放在同一大组，但必须画出 Work/Task 分支。Router 校验并分流，Work 管当前入口的分析/查询，Task 管正式交付及执行尝试；不能合称一套相同生命周期 |
+| Agent 与项目执行 | M7 共享 Agent 执行入口及 AgentCore 依赖；M9 项目执行器 | 可合并为执行层。Agent 使用模型和工具执行；项目执行器在正式任务路径上增加项目基线、文件影响和恢复责任。Work 不必经过项目执行器 |
+
+历史、Work 日志、Task Store 等按拥有者归入这三组，不再各画一个业务模块。它们保存不同事实，不能合并成一个“聊天历史”概念。`ProductCompositionRegistry` 负责装配、入口和生命周期协调，首次介绍纳入 Host 即可，不必另列一个与 Work/Task 并列的模块。
+
+特别区分：**Task 系统不执行每个文件操作，Agent 执行层不决定整个 Task 的持久生命周期；停止一句语音不等于取消已经受理的 Work/Task。** 可以减少展示框的数量，不能省掉这些行为含义。
+
+### 展示用模块图：四个顶层部分，必要处展开内部职责
 
 ```mermaid
 flowchart TB
-  subgraph Browser["浏览器"]
-    UI["M1 交互：操作、文字、结果"]
-    Audio["M2 媒体：采集、播放、播放回执"]
+  B["浏览器端：操作与展示、采集与播放、回执（M1 + M2 客户端）"]
+  G["Gateway 接入层：控制转发、连接与媒体路由"]
+  subgraph Realtime["Realtime 语音能力：本地适配 + 云端模型"]
+    E["Native Engine（M3 适配器，运行在 Gateway）"]
+    P["云端 Realtime 模型"]
+    E <-->|音频、转写、业务调用与模型控制| P
   end
-  subgraph Gateway["Gateway 接入服务"]
-    G["G 同源控制与媒体路由"]
-    E["M3 Native Engine：Realtime 适配"]
+  subgraph Host["AgentServer / Host"]
+    S["会话与呈现协调（M4）"]
+    subgraph Business["业务路由与工作管理"]
+      R["路由与已有事实查询（M5）"]
+      W["Work：分析 / 查询（M6）"]
+      T["Task：正式交付生命周期（M8）"]
+    end
+    subgraph Execution["Agent 与项目执行"]
+      X["项目执行器（M9）"]
+      A["共享 Agent 执行 / AgentCore 能力（M7）"]
+    end
   end
-  P["云端 Realtime：听说、转写、业务调用"]
-  subgraph Host["Host / AgentServer：宿主业务与会话服务"]
-    S["M4 会话、打断、通知与呈现"]
-    R["M5 业务路由 / 已有事实查询"]
-    W["M6 Work 服务"]
-    T["M8 正式 Task 系统"]
-    X["M9 项目执行器"]
-    A["M7 共享 Agent 执行入口"]
-    H["会话历史、Work 日志、Task 与执行记录"]
-  end
-  Core["AgentCore / 配置的 AgentModel 与工具能力"]
-  UI <-->|激活、控制、状态与文字| G
-  Audio <-->|输入音频 / 下行音频| G
-  G <--> E
-  E <-->|音频、转写、模型事件| P
-  E <-->|轮次准入、取消、呈现控制| S
-  E -->|结构化业务调用，经准入| R
-  R -->|只读分析 / 查询| W
+  B <-->|控制、媒体、文字与状态| G
+  G <-->|音频与传输交付| E
+  E <-->|会话准入、呈现与取消控制| S
+  E -->|业务调用，经准入| R
+  R -->|已有事实| S
+  R -->|分析 / 查询| W
   R -->|正式交付| T
   W <-->|执行与输出| A
-  T <-->|任务命令 / 执行事实| X
-  X <-->|执行与输出| A
-  A <--> Core
-  R -->|已有事实| S
-  W -->|回执、进度、结果| S
-  T -->|回执、进度、结果| S
-  S -->|播报 / 结果回填| E
-  Audio -->|播放回执，经 Gateway| G
-  G -->|播放确认| S
-  S --> H
-  W --> H
-  T --> H
-  H -->|历史 / 状态| G
+  T <-->|执行命令与事实| X
+  X <-->|Agent 执行与输出| A
+  W -->|回执、进度与结果| S
+  T -->|回执、进度与结果| S
+  S -->|结果回填与播报协调| E
+  G <-->|激活、播放回执、状态及历史等| S
 ```
 
-图中的共享存储框代表几类记录，并非同一张表或同一个数据库。AgentCore 框表示依赖关系，并非另一个必经网络跳点。Work 和 Task 调用各自的 Agent 入口；并非每个请求都经过全部模块，也不是所有音频帧都先经过 Host。
+这是职责分组图：四个顶层部分为浏览器端、Gateway 接入层、Realtime 语音能力、AgentServer。**Realtime 分组横跨 Gateway 进程和云端；AgentCore 是执行依赖，不是另一个必经网络服务。** 实际部署仍是浏览器、Gateway、AgentServer 与外部模型服务。图中 Work 与 Task 是分支，普通实时对话不必进入业务执行。
 
 ### Gateway 与同层级边界：三方横向对齐
 
@@ -91,7 +117,7 @@ flowchart TB
 
 - **M1 可以简讲，浏览器不能删。** 用一句话说明操作与结果展示，仍要保留采集、播放、文字展示和回执的客户端位置。
 - **Gateway、Host、云端语音模型必须出现在主图。** 否则无法解释传输、权限、延迟、断连恢复以及本地问题和模型问题的区别。
-- **M4、M5、M6、M7、M8、M9 必须交代独立责任。** 可用每个模块一句话控制时长；不能用一个“业务执行”框替代全部含义。
+- **M4–M9 可以按 Host 的三组能力介绍，但必须交代内部责任。** Work/Task 保留分支，Task 管理与项目/Agent 执行保留上下游关系；不要求每个类或子模块都占一个顶层框。
 - **历史与结果记录必须交代保存条件。** 业务完成、聊天展示、浏览器播放确认是不同事实；不必展开表结构。
 - 配置鉴权、会话/项目绑定、协议校验、诊断与恢复作为横向责任简讲，分别指出谁校验、谁记录、谁恢复；不必逐项讲字段和函数。
 - 组件名、采样参数、WebSocket 握手细节、数据库表和恢复算法可留到技术问答。视频源、Hermes 多入口/唤醒等差异按主题补充。
@@ -401,7 +427,7 @@ Hermes 和插件都能通过普通 Agent 文件/执行工具读取或修改文�
 
 ## 9. 可直接对外介绍的版本
 
-先讲“浏览器 → Gateway → Realtime，以及独立的 Host 业务后端”，再展开会话呈现、路由、Work、Agent、Task 和项目执行器。每个模块讲清一句责任与一条输入输出，不必念类名。
+先讲“浏览器端 → Gateway 接入层 → Realtime 语音能力，以及独立的 Host 业务后端”。Realtime 内部是本地 Native Engine 与云端模型；Host 内部分会话呈现、业务管理、执行三组，再说明 Work/Task 分支和 Agent/项目执行职责。每组讲清责任和输入输出，不必念类名。
 
 > LiveVoice 的浏览器负责操作、录音、播放和结果展示；Gateway 负责媒体接入与控制转发，并运行连接云端 Realtime 的适配器。Realtime 负责听说、转写和提出业务调用，普通对话可以直接回复。Host 是独立的本地业务后端：会话呈现模块管理轮次、打断和播放事实，业务路由将请求交给已有事实查询、只读 Work 或正式 Task。Work 管分析工作的生命周期，共享 Agent 使用配置的 AgentModel 和工具执行；Task 管正式交付，项目执行器处理项目与文件副作用。结果经会话协调回填 Realtime，再通过 Gateway 回浏览器播放；业务结果、聊天记录和播放确认分别管理。
 >
@@ -415,7 +441,7 @@ Hermes 和插件都能通过普通 Agent 文件/执行工具读取或修改文�
 
 | 对象 | 本次依据 | 流程和代码索引 |
 |---|---|---|
-| LiveVoice | 本次本地源码 f9cee727；生产集成 5cb5303d，含通知序号恢复修复 | [LiveVoice 模块介绍](LIVE_VOICE_MODULE_GUIDE.md)及本文本地源码链接 |
+| LiveVoice | 本次核对 a8cd1259（生产代码同 f9cee727）；含通知序号恢复修复 | [LiveVoice 模块介绍](LIVE_VOICE_MODULE_GUIDE.md)及本文本地源码链接 |
 | Hermes | NousResearch/hermes-agent@e151d0b3458e136729fe498b566deb795ffb6a42 | [Hermes 流程及固定 SHA 源码链接](HERMES_VOICE_CODE_FLOW.md) |
 | PR #2813 | 本地镜像合入 df5f89646227b05c6cbd90e1a0debe729ab2b26e | [基础流程](JIUWENSWARM_DUPLEX_PR2813_FLOW.md) |
 | PR #5301 | 本地镜像合入 b83923ae1f8cf0a315ce1f580e016edf48a02c2d | [增量流程](JIUWENSWARM_DUPLEX_PR5301_FLOW.md) |
