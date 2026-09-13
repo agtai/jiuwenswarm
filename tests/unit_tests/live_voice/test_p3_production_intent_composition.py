@@ -54,10 +54,8 @@ from jiuwenswarm.server.runtime.formal_tasks.p3_product_confirmation import (
     ProductP3ConfirmationForwarder,
 )
 from openjiuwen.core.application.tasks.persistent_task_core import PersistentTaskCore
-from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
-    DirectProjectCodeExecutorAdapter,
-    FORMAL_PROJECT_EXECUTOR_ID,
-)
+from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (DirectProjectCodeExecutorAdapter)
+from openjiuwen.core.application.tasks.project_executor import (FORMAL_PROJECT_EXECUTOR_ID)
 from jiuwenswarm.server.runtime.formal_tasks.production_task_classifier import (
     ProductionTaskIntentClassifier,
 )

@@ -52,10 +52,8 @@ from jiuwenswarm.channels.live_voice.product_composition_registry import (
     AgentServerProductCompositionRegistry,
     ProductCompositionSettings,
 )
-from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
-    DirectProjectCodeExecutorAdapter,
-    ProjectExecutionBinding,
-)
+from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (DirectProjectCodeExecutorAdapter)
+from openjiuwen.core.application.tasks.project_executor import (ProjectExecutionBinding)
 from openjiuwen.core.application.tasks.task_store import SqliteTaskStore
 from jiuwenswarm.server.runtime.formal_tasks.voice_task_policy import (
     FormalTaskInvocation,

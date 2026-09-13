@@ -194,9 +194,7 @@ def _settle_trace_tasks(context: Context, product_trace: dict[str, object]) -> N
                 "'completed', 'completed', NULL, NULL)",
                 (attempt_id, task_id, str(context.fixture.resolve())),
             )
-            from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
-                _AttemptOwnershipLock,
-            )
+            from openjiuwen.core.application.tasks.project_executor import (_AttemptOwnershipLock)
 
             ownership = _AttemptOwnershipLock.try_acquire(context.fixture, attempt_id)
             assert ownership is not None

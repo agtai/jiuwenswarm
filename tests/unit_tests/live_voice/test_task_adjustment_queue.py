@@ -399,7 +399,7 @@ async def test_real_direct_files_and_core_continue_late_change_without_duplicate
                 assert original_requirements in request.params["query"]
                 assert original_text in request.params["query"]
                 assert (root / "行程.md").read_text(encoding="utf-8") == original_text
-                from jiuwenswarm.server.runtime.agent_adapter.background_task_checkpoint import current_background_task_checkpoint
+                from openjiuwen.core.application.tasks.execution_checkpoint import current_background_task_checkpoint
                 from openjiuwen.core.application.tasks.file_effect_plan import FileEffectPlanError
                 plan = current_background_task_checkpoint(request.session_id).file_plan
                 assert plan is not None, "continuation keeps the existing file-effect boundary"

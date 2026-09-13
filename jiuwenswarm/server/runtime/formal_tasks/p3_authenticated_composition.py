@@ -104,14 +104,8 @@ from jiuwenswarm.server.runtime.authority.product_authority import (
 )
 from jiuwenswarm.server.runtime.presentation.presentation_ledger import TaskPresentationDelivery
 from jiuwenswarm.server.runtime.formal_tasks.product_p3_text_adapter import ProductP3AuthorizedQuery
-from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
-    AttemptProjectExecutorLease,
-    DirectProjectCodeExecutorAdapter,
-    DirectProjectManagedBaselineReader,
-    DirectStreamObserver,
-    FORMAL_PROJECT_EXECUTOR_ID,
-    ProjectExecutionBinding,
-)
+from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (DirectProjectCodeExecutorAdapter)
+from openjiuwen.core.application.tasks.project_executor import (AttemptProjectExecutorLease, DirectProjectManagedBaselineReader, DirectStreamObserver, FORMAL_PROJECT_EXECUTOR_ID, ProjectExecutionBinding)
 from jiuwenswarm.server.runtime.formal_tasks.production_task_intent import (
     AuthenticatedTaskFact,
     ProductionIntentOrigin,

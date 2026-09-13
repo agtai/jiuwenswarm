@@ -140,7 +140,7 @@ async def test_adopted_adjustment_invalidates_writes_but_allows_reads_and_new_ex
 
 @pytest.mark.asyncio
 async def test_tool_uses_only_current_executor_checkpoint(tmp_path):
-    from jiuwenswarm.server.runtime.agent_adapter.background_task_checkpoint import background_task_checkpoint, file_effect_plan_tool
+    from openjiuwen.core.application.tasks.execution_checkpoint import background_task_checkpoint, file_effect_plan_tool
     owner = session(tmp_path)
     tool = file_effect_plan_tool()
     async def adopt(_): pass
@@ -228,7 +228,7 @@ async def test_isolated_restore_yields_event_loop_and_finishes_before_release(tm
 @pytest.mark.parametrize("declared,actual", [("replace", "delete"), ("delete", "replace"),
                                            ("replace", "replace"), ("delete", "delete"), ("create", "create")])
 def test_formal_apply_checks_operation_before_any_project_write(tmp_path, monkeypatch, declared, actual):
-    from jiuwenswarm.server.runtime.formal_tasks import project_code_executor as module
+    from openjiuwen.core.application.tasks import project_executor as module
     from openjiuwen.core.application.tasks.file_effect_plan import PlannedFileEffect
     from tests.unit_tests.live_voice.test_project_code_executor import _git_project, _git
     root = tmp_path / "formal"
@@ -291,7 +291,7 @@ async def test_real_facade_sdk_tool_registration_and_pre_write_boundary(tmp_path
     from jiuwenswarm.agents.harness.common.rails.stream_event_rail import JiuSwarmStreamEventRail
     from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponseChunk
     from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
-    from jiuwenswarm.server.runtime.agent_adapter.background_task_checkpoint import (
+    from openjiuwen.core.application.tasks.execution_checkpoint import (
         background_task_checkpoint, current_background_task_checkpoint,
     )
 

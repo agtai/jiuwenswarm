@@ -32,12 +32,8 @@ from openjiuwen.core.application.tasks.formal_task_models import (
     PersistentOutboxItem,
     ResolvedTaskContext,
 )
-from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
-    DirectProjectCodeExecutorAdapter,
-    FORMAL_PROJECT_EXECUTOR_ID,
-    PROJECT_CODE_PIPELINE,
-    ProjectExecutionBinding,
-)
+from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (DirectProjectCodeExecutorAdapter)
+from openjiuwen.core.application.tasks.project_executor import (FORMAL_PROJECT_EXECUTOR_ID, PROJECT_CODE_PIPELINE, ProjectExecutionBinding)
 
 
 def _direct_requirements(*, dispatch_version: str = "v1") -> TaskExecutionRequirements:

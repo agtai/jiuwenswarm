@@ -12,7 +12,7 @@ import pytest
 from jiuwenswarm.common.schema.native_task_source import NativeTaskSource, NativeTaskSourceError
 from jiuwenswarm.channels.live_voice.native_business_contract import NativeBusinessAction, NativeBusinessProposal
 from openjiuwen.core.application.tasks.formal_task_models import FormalTaskSpec, TaskAdjustmentRequest
-from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import DirectProjectCodeExecutorAdapter
+from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (DirectProjectCodeExecutorAdapter)
 from openjiuwen.core.application.tasks.task_store import SqliteTaskStore
 from tests.unit_tests.live_voice.test_native_interaction_runtime import (
     active_owner, turn_commit, input_transcript, delegate_proposal,
@@ -360,7 +360,7 @@ async def test_direct_worker_injects_create_and_applied_adjustment_sources(tmp_p
     from jiuwenswarm.common.schema.agent import AgentResponseChunk
     from jiuwenswarm.common.schema.live_voice_contract_v2 import TerminalOutcome
     from openjiuwen.core.application.tasks.persistent_task_core import PersistentTaskCore
-    from jiuwenswarm.server.runtime.agent_adapter.background_task_checkpoint import current_background_task_checkpoint
+    from openjiuwen.core.application.tasks.execution_checkpoint import current_background_task_checkpoint
     from tests.unit_tests.live_voice.test_persistent_task_core import _create, _adjust, NOW
     from tests.unit_tests.live_voice.test_project_code_executor import (
         _DirectProjectExecutor, _Resolver, _direct_binding, _git_project, _wait_direct_settled,

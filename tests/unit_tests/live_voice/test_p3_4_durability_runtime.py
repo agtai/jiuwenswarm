@@ -47,11 +47,8 @@ from jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition import
     AuthenticatedPrincipal,
     ServerSessionProjectAuthorityResolver,
 )
-from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
-    DirectProjectCodeExecutorAdapter,
-    DirectProjectManagedBaselineReader,
-    _AttemptOwnershipLock,
-)
+from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (DirectProjectCodeExecutorAdapter)
+from openjiuwen.core.application.tasks.project_executor import (DirectProjectManagedBaselineReader, _AttemptOwnershipLock)
 from openjiuwen.core.application.tasks.task_store import SqliteTaskStore
 from tests.unit_tests.live_voice.test_persistent_task_core import (
     EXPIRY,
@@ -75,7 +72,7 @@ def _durability_binding(store: SqliteTaskStore, task_id: str, attempt_id: str):
 
 
 def _enable_file_plan(executor):
-    from jiuwenswarm.server.runtime.agent_adapter.background_task_checkpoint import current_background_task_checkpoint
+    from openjiuwen.core.application.tasks.execution_checkpoint import current_background_task_checkpoint
     original_stream = executor.process_background_code_task_stream
     async def planned_stream(request):
         owner = current_background_task_checkpoint(request.session_id).file_plan
@@ -299,7 +296,7 @@ async def test_direct_d2_public_dispatch_commits_checkpoint_and_intent_before_ap
     assert adapter.capability_profiles()[-1].durability_level == "D2"
     seen_before_apply: list[tuple[int, tuple[type[object], ...]]] = []
 
-    from jiuwenswarm.server.runtime.formal_tasks import project_code_executor
+    from openjiuwen.core.application.tasks import project_executor as project_code_executor
 
     real_apply = project_code_executor._apply_attempt_patch
 
@@ -459,7 +456,7 @@ async def test_core_operator_recovery_uses_fresh_direct_quiescence_and_linked_at
         historical_binding
     )
     if native_source:
-        from jiuwenswarm.server.runtime.formal_tasks import project_code_executor
+        from openjiuwen.core.application.tasks import project_executor as project_code_executor
         state = project_code_executor._decode_d2_checkpoint_state(historical_checkpoints.records[-1].state_bytes)
         before_counts = restarted._durability_store.counts()
         before_tree = project_code_executor._project_tree_fingerprint(project)
@@ -758,7 +755,7 @@ async def test_core_operator_recovery_uses_fresh_direct_quiescence_and_linked_at
             claim_token=forged_claim[0],
             claim_generation=forged_claim[1],
         )
-    from jiuwenswarm.server.runtime.formal_tasks import project_code_executor
+    from openjiuwen.core.application.tasks import project_executor as project_code_executor
 
     real_apply = project_code_executor._apply_attempt_patch
     real_linked_reserve = restarted._journal.reserve_completion
@@ -840,7 +837,7 @@ async def test_core_operator_recovery_uses_fresh_direct_quiescence_and_linked_at
     assert recovery_apply_calls == 1
     assert (project / "result.txt").read_text(encoding="utf-8") == "done"
     if native_source:
-        from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import _decode_d2_checkpoint_state
+        from openjiuwen.core.application.tasks.project_executor import (_decode_d2_checkpoint_state)
         plans = []
         for attempt_id in (producer.attempt_id, linked.attempt_id, second_linked.attempt_id):
             branch = _durability_binding(restarted._durability_store, task.task_id, attempt_id)
@@ -878,7 +875,7 @@ async def test_direct_restart_reconciles_crash_after_apply_without_duplicate_cal
     real_append = store.append_durability_effect_fact
     apply_calls = 0
 
-    from jiuwenswarm.server.runtime.formal_tasks import project_code_executor
+    from openjiuwen.core.application.tasks import project_executor as project_code_executor
 
     real_apply = project_code_executor._apply_attempt_patch
 
@@ -978,7 +975,7 @@ async def test_direct_ambiguous_observation_requires_manual_without_second_call(
     real_append = store.append_durability_effect_fact
     apply_calls = 0
 
-    from jiuwenswarm.server.runtime.formal_tasks import project_code_executor
+    from openjiuwen.core.application.tasks import project_executor as project_code_executor
 
     real_apply = project_code_executor._apply_attempt_patch
 

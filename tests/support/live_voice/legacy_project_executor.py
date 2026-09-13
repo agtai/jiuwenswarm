@@ -3,34 +3,7 @@
 """Historical scheduler adapter retained solely for compatibility regression tests."""
 from __future__ import annotations
 
-from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
-    Any,
-    ErrorCode,
-    ExecutorDeliveryResult,
-    ExecutorObservation,
-    ExecutorResolution,
-    FORMAL_PROJECT_EXECUTOR_ID,
-    FormalAttemptState,
-    FormalTaskViolation,
-    Mapping,
-    OutboxKind,
-    PROJECT_CODE_PIPELINE,
-    PersistentAttemptRecord,
-    PersistentOutboxItem,
-    PersistentTaskRecord,
-    ProjectExecutionBinding,
-    ProjectExecutionBindingResolver,
-    TaskAdjustmentDeliveryResult,
-    TaskAdjustmentSettlement,
-    TaskAdjustmentState,
-    TerminalOutcome,
-    _EXECUTION_TARGET_FIELDS,
-    _ReleaseOnce,
-    _expected_contract,
-    _path_key,
-    _text,
-    utc_now,
-)
+from openjiuwen.core.application.tasks.project_executor import (Any, ErrorCode, ExecutorDeliveryResult, ExecutorObservation, ExecutorResolution, FORMAL_PROJECT_EXECUTOR_ID, FormalAttemptState, FormalTaskViolation, Mapping, OutboxKind, PROJECT_CODE_PIPELINE, PersistentAttemptRecord, PersistentOutboxItem, PersistentTaskRecord, ProjectExecutionBinding, ProjectExecutionBindingResolver, TaskAdjustmentDeliveryResult, TaskAdjustmentSettlement, TaskAdjustmentState, TerminalOutcome, _EXECUTION_TARGET_FIELDS, _ReleaseOnce, _expected_contract, _path_key, _text, utc_now)
 
 
 class ProjectCodeExecutorAdapter:

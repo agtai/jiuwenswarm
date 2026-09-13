@@ -12,7 +12,7 @@ from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAge
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, AgentCallbackEvent
 
 from jiuwenswarm.agents.harness.common.rails.stream_event_rail import JiuSwarmStreamEventRail
-from jiuwenswarm.server.runtime.agent_adapter.background_task_checkpoint import (
+from openjiuwen.core.application.tasks.execution_checkpoint import (
     background_task_checkpoint, current_background_task_checkpoint,
     BackgroundReadProgress,
 )

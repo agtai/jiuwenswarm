@@ -1431,7 +1431,7 @@ def test_background_profile_detaches_progressive_discovery_but_keeps_file_plan_t
     from openjiuwen.harness.prompts import PromptSection, SystemPromptBuilder
     from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
     from openjiuwen.harness.schema.config import DeepAgentConfig
-    from jiuwenswarm.server.runtime.agent_adapter.background_task_checkpoint import file_effect_plan_tool
+    from openjiuwen.core.application.tasks.execution_checkpoint import file_effect_plan_tool
     from jiuwenswarm.server.runtime.agent_adapter.interface_code import JiuwenSwarmCodeAdapter
 
     async def scenario():

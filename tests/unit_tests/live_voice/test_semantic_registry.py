@@ -33,9 +33,7 @@ from jiuwenswarm.channels.live_voice.product_composition_registry import (
     AgentServerProductCompositionRegistry,
     ProductCompositionSettings,
 )
-from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
-    DirectProjectCodeExecutorAdapter,
-)
+from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (DirectProjectCodeExecutorAdapter)
 from tests.unit_tests.live_voice.test_p3_authenticated_composition import (
     _harness,
     _scope,

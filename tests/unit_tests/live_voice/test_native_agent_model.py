@@ -23,9 +23,7 @@ from jiuwenswarm.server.runtime.agent_adapter.p3_model_resolution import ServerM
 from jiuwenswarm.server.runtime.formal_tasks.p3_production_intent_composition import (
     production_model_binding_fingerprint,
 )
-from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
-    DirectProjectCodeExecutorAdapter,
-)
+from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (DirectProjectCodeExecutorAdapter)
 from tests.unit_tests.live_voice.test_p3_authenticated_composition import (
     NOW,
     TOKEN,

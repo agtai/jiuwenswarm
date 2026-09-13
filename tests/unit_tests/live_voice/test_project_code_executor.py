@@ -1,6 +1,7 @@
+from __future__ import annotations
+from jiuwenswarm.server.runtime.formal_tasks import project_code_executor as host_project_executor
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-from __future__ import annotations
 
 from tests.support.live_voice.legacy_project_executor import ProjectCodeExecutorAdapter
 
@@ -22,7 +23,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from jiuwenswarm.server.runtime.formal_tasks import project_code_executor
+from openjiuwen.core.application.tasks import project_executor as project_code_executor
 
 from jiuwenswarm.common.schema.agent import AgentResponseChunk
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
@@ -61,17 +62,8 @@ from openjiuwen.core.application.tasks.executor_capabilities import (
 from jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition import (
     AgentManagerProjectBindingResolver,
 )
-from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
-    AttemptProjectExecutorLease,
-    DirectProjectCodeExecutorAdapter,
-    FORMAL_PROJECT_EXECUTOR_ID,
-    FORMAL_RUNTIME_SUPPORT_POLICY,
-    PROJECT_CODE_ARTIFACT_KIND,
-    PROJECT_CODE_EFFECT_POLICY,
-    PROJECT_CODE_EXECUTOR,
-    PROJECT_CODE_PIPELINE,
-    ProjectExecutionBinding,
-)
+from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (DirectProjectCodeExecutorAdapter)
+from openjiuwen.core.application.tasks.project_executor import (AttemptProjectExecutorLease, FORMAL_PROJECT_EXECUTOR_ID, FORMAL_RUNTIME_SUPPORT_POLICY, PROJECT_CODE_ARTIFACT_KIND, PROJECT_CODE_EFFECT_POLICY, PROJECT_CODE_EXECUTOR, PROJECT_CODE_PIPELINE, ProjectExecutionBinding)
 from openjiuwen.core.application.tasks.task_store import SqliteTaskStore
 from jiuwenswarm.server.runtime.agent_adapter import interface as agent_interface
 from jiuwenswarm.server.runtime.agent_manager import AgentManager
@@ -3079,7 +3071,7 @@ async def test_production_resolver_manager_real_facade_executes_exact_d0_root(
             from openjiuwen.core.foundation.llm import AssistantMessage, ToolCall, ToolMessage
             callback = self._stream_event_rail.background_model_checkpoint
             assert callback is not None
-            from jiuwenswarm.server.runtime.agent_adapter.background_task_checkpoint import current_background_task_checkpoint
+            from openjiuwen.core.application.tasks.execution_checkpoint import current_background_task_checkpoint
             owner = current_background_task_checkpoint(request.session_id)
             original_adopt = owner.adopt
             adoptions = []
@@ -4189,7 +4181,7 @@ def test_attempt_deadline_is_absolute_and_heartbeat_expires_at_exact_boundary(
         before_content=project_code_executor._project_content_fingerprint(project),
         before_head=_git(project, "rev-parse", "HEAD"),
         protected_support=project_code_executor._target_support_fingerprints(project),
-        governance=project_code_executor._runtime_support_governance(project),
+        governance=host_project_executor._runtime_support_governance(project),
         owner_id="owner-1",
         now=accepted_at,
         runtime_deadline_at=deadline,
@@ -4245,7 +4237,7 @@ def test_attempt_deadline_migrates_from_last_durable_legacy_lease(
         before_content=project_code_executor._project_content_fingerprint(project),
         before_head=_git(project, "rev-parse", "HEAD"),
         protected_support=project_code_executor._target_support_fingerprints(project),
-        governance=project_code_executor._runtime_support_governance(project),
+        governance=host_project_executor._runtime_support_governance(project),
         owner_id="legacy-owner",
         now="2026-08-18T10:00:00Z",
     )
@@ -4303,7 +4295,7 @@ def test_reserve_completion_at_deadline_cannot_publish_or_apply_result(
         before_content=project_code_executor._project_content_fingerprint(project),
         before_head=before_head,
         protected_support=project_code_executor._target_support_fingerprints(project),
-        governance=project_code_executor._runtime_support_governance(project),
+        governance=host_project_executor._runtime_support_governance(project),
         owner_id="owner-1",
         now="2026-08-18T10:00:00Z",
         runtime_deadline_at=deadline,
@@ -5046,7 +5038,7 @@ async def test_restart_reuses_deadline_even_when_heartbeat_renewed_later_lease(
         before_content=project_code_executor._project_content_fingerprint(project),
         before_head=before_head,
         protected_support=project_code_executor._target_support_fingerprints(project),
-        governance=project_code_executor._runtime_support_governance(project),
+        governance=host_project_executor._runtime_support_governance(project),
         owner_id="dead-process",
         now="2026-08-18T10:00:00Z",
         runtime_deadline_at=deadline,
@@ -5108,7 +5100,7 @@ async def test_successor_never_recovers_or_deletes_while_predecessor_process_own
         before_content=project_code_executor._project_content_fingerprint(project),
         before_head=before_head,
         protected_support=project_code_executor._target_support_fingerprints(project),
-        governance=project_code_executor._runtime_support_governance(project),
+        governance=host_project_executor._runtime_support_governance(project),
         owner_id="predecessor-process",
         now="2020-01-01T00:00:00.000000Z",
     )
@@ -5123,7 +5115,7 @@ async def test_successor_never_recovers_or_deletes_while_predecessor_process_own
         (
             "import sys",
             "from pathlib import Path",
-            "from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (",
+            "from openjiuwen.core.application.tasks.project_executor import (",
             "    _AttemptOwnershipLock, _create_attempt_worktree",
             ")",
             "root = Path(sys.argv[1])",
@@ -5837,7 +5829,7 @@ async def test_missing_journal_stays_fail_closed_without_every_exact_fact(
 @pytest.mark.parametrize("lose_settlement", [False, True])
 async def test_model_boundary_waits_for_admitted_adjustments_before_next_model(tmp_path, lose_settlement):
     from openjiuwen.core.application.tasks.persistent_task_core import PersistentTaskCore
-    from jiuwenswarm.server.runtime.agent_adapter.background_task_checkpoint import current_background_task_checkpoint
+    from openjiuwen.core.application.tasks.execution_checkpoint import current_background_task_checkpoint
     from tests.unit_tests.live_voice.test_persistent_task_core import NOW, _adjust, _create
 
     class Store(SqliteTaskStore):
@@ -5921,7 +5913,7 @@ async def test_model_boundary_waits_for_admitted_adjustments_before_next_model(t
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancel_after_adoption", [False, True])
 async def test_cancel_at_model_checkpoint_prevents_next_model_and_result(tmp_path, cancel_after_adoption):
-    from jiuwenswarm.server.runtime.agent_adapter.background_task_checkpoint import current_background_task_checkpoint
+    from openjiuwen.core.application.tasks.execution_checkpoint import current_background_task_checkpoint
 
     class BoundaryAgent(_DirectProjectExecutor):
         def __init__(self, project):

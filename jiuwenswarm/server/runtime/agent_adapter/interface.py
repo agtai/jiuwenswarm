@@ -1462,7 +1462,7 @@ class JiuWenSwarm:
         file_checkpoint_callback = None
         checkpoint = None
         try:
-            from .background_task_checkpoint import current_background_task_checkpoint
+            from openjiuwen.core.application.tasks.execution_checkpoint import current_background_task_checkpoint
 
             checkpoint = current_background_task_checkpoint(background_request.session_id)
             if checkpoint is not None:
@@ -1485,7 +1485,7 @@ class JiuWenSwarm:
                     raise RuntimeError("BACKGROUND_TASK_CHECKPOINT_ALREADY_BOUND")
                 checkpoint_rail.background_model_checkpoint = checkpoint_callback
                 if checkpoint.file_plan is not None:
-                    from .background_task_checkpoint import file_effect_plan_tool
+                    from openjiuwen.core.application.tasks.execution_checkpoint import file_effect_plan_tool
                     from openjiuwen.core.single_agent.rail.base import ToolCallInputs
 
                     async def file_checkpoint_callback(ctx):

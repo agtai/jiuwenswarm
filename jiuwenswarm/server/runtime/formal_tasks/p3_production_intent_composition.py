@@ -53,7 +53,7 @@ from jiuwenswarm.server.runtime.formal_tasks.production_task_intent import (
     TrustedConfirmationConsumptionReceipt,
     TrustedProductionOriginReceipt,
 )
-from jiuwenswarm.server.runtime.formal_tasks.task_core import AttemptState, TaskState
+from openjiuwen.core.application.tasks.formal_task_models import FormalAttemptState as AttemptState, FormalTaskState as TaskState
 from openjiuwen.core.application.tasks.task_store import SqliteTaskStore
 
 

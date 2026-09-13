@@ -15,9 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from scripts.live_voice import p3_wave2_real_evidence_producer as producer
-from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
-    DirectStreamObservation,
-)
+from openjiuwen.core.application.tasks.project_executor import (DirectStreamObservation)
 from scripts.live_voice.p3_wave2_real_evidence_producer import (
     ClosedEvidenceFailure,
     ObservationCollector,

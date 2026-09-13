@@ -9,9 +9,7 @@ from openjiuwen.core.single_agent.rail.base import ToolCallInputs
 from jiuwenswarm.agents.harness.common.rails.stream_event_rail import (
     JiuSwarmStreamEventRail,
 )
-from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
-    _closed_direct_stream_observation,
-)
+from openjiuwen.core.application.tasks.project_executor import (_closed_direct_stream_observation)
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
     JiuWenSwarmDeepAdapter,
 )

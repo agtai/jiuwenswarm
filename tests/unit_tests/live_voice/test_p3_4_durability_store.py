@@ -48,9 +48,7 @@ from openjiuwen.core.application.tasks.formal_task_models import (
     PersistedExecutorSelection,
 )
 from openjiuwen.core.application.tasks.persistent_task_core import PersistentTaskCore
-from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
-    FORMAL_PROJECT_EXECUTOR_ID,
-)
+from openjiuwen.core.application.tasks.project_executor import (FORMAL_PROJECT_EXECUTOR_ID)
 from openjiuwen.core.application.tasks.task_store import SqliteTaskStore
 from tests.unit_tests.live_voice.test_persistent_task_core import (
     NOW,

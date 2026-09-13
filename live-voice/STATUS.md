@@ -87,13 +87,17 @@ support has been discussed, not implemented.
 ### Continuation boundary
 
 
-**Current migration (2026-09-13):** move reusable persistent Task authority and
-durability contracts to the matching AgentCore `hx/0912_livevoice` branch;
-JiuwenSwarm consumes that SDK and retains project/application/voice adapters.
-Work implementation and UI policy remain unchanged. The
-[migration record](reviews/AGENTCORE_TASK_MIGRATION_20260913.md) owns compatibility,
-capability mapping, verification and the two local commits. Existing databases,
-model configuration and running services are not changed by this source migration.
+**Current unification (2026-09-13):** user accepted Task create/cancel/adjust/query/
+result and Work execution in session `web_1a09ba51ef2_c737a98beaa0`, then authorized
+Task completion first, Work convergence second, and architecture/code accounting.
+The [execution record](reviews/TASK_WORK_UNIFICATION_20260913.md) owns the bounded
+implementation and evidence. SDK owns Task execution, storage, attempt recovery,
+file effects and verified results; Host supplies project/Agent/application policy
+and Voice supplies speech/presentation. Work implementation remains unchanged
+during the Task stage. Modules merge M4+M5 and M7+M9 in final documentation.
+One commit per affected repository per stage; no remote update. Preserve existing
+data, model and timeout settings; prior physical acceptance is not a new latency
+guarantee or closure of the separately retained stale-announcement issue.
 
 **Current repair (2026-09-13):** restore Native notification sequencing after
 Gateway authority expiry and serialize browser refresh with notification polling.

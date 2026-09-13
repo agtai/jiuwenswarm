@@ -190,11 +190,8 @@ from jiuwenswarm.server.runtime.presentation.task_progress_return import (
 from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
     FormalContextSnapshot,
 )
-from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
-    DirectProjectCodeExecutorAdapter,
-    FORMAL_PROJECT_EXECUTOR_ID,
-    ProjectExecutionBinding,
-)
+from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (DirectProjectCodeExecutorAdapter)
+from openjiuwen.core.application.tasks.project_executor import (FORMAL_PROJECT_EXECUTOR_ID, ProjectExecutionBinding)
 from openjiuwen.core.application.tasks.task_store import (
     SqliteTaskStore,
     TaskDurabilityDiagnosticSnapshot,

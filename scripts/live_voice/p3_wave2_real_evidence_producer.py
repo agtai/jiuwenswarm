@@ -101,7 +101,7 @@ class ObservationCollector:
 
     def __call__(self, observation: object) -> None:
         try:
-            from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
+            from openjiuwen.core.application.tasks.project_executor import (
                 DirectStreamObservation,
             )
 
@@ -798,7 +798,7 @@ def _direct_authority_snapshot(
     project_root: Path,
     attempt_ref: str,
 ) -> _DirectAuthoritySnapshot:
-    from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
+    from openjiuwen.core.application.tasks.project_executor import (
         _attempt_worktree_paths,
         _worktree_registered,
     )

@@ -28,7 +28,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     canonical_json_bytes,
 )
 
-from jiuwenswarm.server.runtime.formal_tasks.task_core import AttemptState, TaskState
+from openjiuwen.core.application.tasks.formal_task_models import FormalAttemptState as AttemptState, FormalTaskState as TaskState
 from jiuwenswarm.server.runtime.formal_tasks.voice_task_policy import (
     FORMAL_TASK_MUTATION_OPERATIONS,
     FORMAL_TASK_QUERY_OPERATIONS,

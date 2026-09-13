@@ -122,12 +122,8 @@ from jiuwenswarm.server.runtime.agent_adapter.p3_model_resolution import (
     ServerModelCatalogResolver,
 )
 from openjiuwen.core.application.tasks.persistent_task_core import PersistentTaskCore
-from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
-    DirectProjectCodeExecutorAdapter,
-    DirectProjectManagedBaselineReader,
-    FORMAL_PROJECT_EXECUTOR_ID,
-    ProjectExecutionBinding,
-)
+from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (DirectProjectCodeExecutorAdapter)
+from openjiuwen.core.application.tasks.project_executor import (DirectProjectManagedBaselineReader, FORMAL_PROJECT_EXECUTOR_ID, ProjectExecutionBinding)
 from jiuwenswarm.server.runtime.formal_tasks.production_task_classifier import (
     ProductionTaskIntentClassifier,
 )

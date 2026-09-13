@@ -25,8 +25,8 @@ from jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition import
     ServerSessionProjectAuthorityResolver,
 )
 from openjiuwen.core.application.tasks.persistent_task_core import PersistentTaskCore
-from jiuwenswarm.server.runtime.formal_tasks import project_code_executor
-from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import DirectProjectCodeExecutorAdapter
+from openjiuwen.core.application.tasks import project_executor as project_code_executor
+from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (DirectProjectCodeExecutorAdapter)
 from openjiuwen.core.application.tasks.task_store import SqliteTaskStore
 from tests.unit_tests.live_voice.test_p3_4_durability_runtime import _create_selected_task
 from tests.unit_tests.live_voice.test_persistent_task_core import EXPIRY, NOW, _scope

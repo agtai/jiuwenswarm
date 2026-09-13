@@ -8,7 +8,9 @@ The old deterministic in-memory implementation lives in tests/support/live_voice
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import StrEnum
+from openjiuwen.core.application.tasks.formal_task_models import (
+    FormalTaskState as TaskState, FormalAttemptState as AttemptState,
+)
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ErrorCode,
@@ -25,18 +27,8 @@ class TaskCoreViolation(ValueError):
         self.code = code
 
 
-class TaskState(StrEnum):
-    ACCEPTED = "accepted"
-    RUNNING = "running"
-    BLOCKED = "blocked"
-    DECISION_REQUIRED = "decision_required"
-    TERMINAL = "terminal"
 
 
-class AttemptState(StrEnum):
-    ACCEPTED = "accepted"
-    RUNNING = "running"
-    TERMINAL = "terminal"
 
 
 @dataclass(frozen=True, slots=True)

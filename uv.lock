@@ -2678,7 +2678,7 @@ wheels = [
 
 [[package]]
 name = "openjiuwen"
-version = "0.1.17+livevoice.1"
+version = "0.1.17+livevoice.2"
 source = { editable = "../agent-core" }
 dependencies = [
     { name = "aiofiles" },
