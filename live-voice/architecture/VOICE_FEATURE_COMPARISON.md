@@ -66,15 +66,11 @@
 flowchart TB
   B["浏览器端：操作与展示、采集与播放、回执（M1 + M2 客户端）"]
   G["Gateway 接入层：控制转发、连接与媒体路由"]
-  subgraph Realtime["Realtime 语音能力：本地适配 + 云端模型"]
-    E["Native Engine（M3 适配器，运行在 Gateway）"]
-    P["云端 Realtime 模型"]
-    E <-->|音频、转写、业务调用与模型控制| P
-  end
+  E["Realtime 语音能力：Native Engine + 云端模型（M3）"]
   subgraph Host["AgentServer / Host"]
-    S["会话与呈现协调（M4）"]
+    S["语音会话与播放状态管理（M4）"]
     subgraph Business["业务路由与工作管理"]
-      R["路由与已有事实查询（M5）"]
+      R["业务分流与状态 / 结果查询（M5）"]
       W["Work：分析 / 查询（M6）"]
       T["Task：正式交付生命周期（M8）"]
     end
@@ -99,7 +95,45 @@ flowchart TB
   G <-->|激活、播放回执、状态及历史等| S
 ```
 
-这是职责分组图：四个顶层部分为浏览器端、Gateway 接入层、Realtime 语音能力、AgentServer。**Realtime 分组横跨 Gateway 进程和云端；AgentCore 是执行依赖，不是另一个必经网络服务。** 实际部署仍是浏览器、Gateway、AgentServer 与外部模型服务。图中 Work 与 Task 是分支，普通实时对话不必进入业务执行。
+这是职责分组图：四个顶层部分为浏览器端、Gateway 接入层、Realtime 语音能力、AgentServer。**Realtime 在展示图中只占一个模块框；内部 Native Engine 运行在 Gateway，模型运行在云端。AgentCore 是执行依赖，不是另一个必经网络服务。** 实际部署仍是浏览器、Gateway、AgentServer 与外部模型服务。图中 Work 与 Task 是分支，普通实时对话不必进入业务执行。
+
+### Host 模块用具体问题解释，并注明代码来源
+
+**M5 是“已有事实查询”，不是“实时查询”。** 建议展示名为“业务分流与状态/结果查询”。例如“刚才的任务完成了吗”，它读取当前授权范围内已保存的 Task/Work 状态和结果；“读取文件并分析”才发起 Work，“修改并保存文件”交给正式 Task。M5 校验请求并调用相应服务，不自己生成业务答案，也不是一个联网搜索模型。`context.get` 还会读取允许的会话历史、工作事实和模型配置等上下文。
+
+**M4 建议称“语音会话与播放状态管理”。** 它回答：当前是哪一轮、哪些模型输出仍有效、插话后哪些旧输出要失效、任务结果何时安排播报，以及浏览器确认播放到了哪里。比如回答只播了一半就被打断：不能因为模型生成完了，就记成已完整播放。它管理语音时序和呈现事实，既不是另一个回答模型，也不管理 Work/Task 的业务完成。实际停止声音由浏览器/媒体层执行，Provider 取消由 Native Engine 执行，Host 负责对应准入与事实协调。
+
+| 对比 | Work（M6） | 正式 Task（M8） |
+|---|---|---|
+| 当前 Voice 入口用途 | 只读分析、读取与查询，例如分析现有文件 | 正式交付，例如修改并保存项目文件 |
+| 管理对象 | 一次分析工作及其状态、版本、更新、取消、结果 | 一个持久任务及其执行尝试、命令投递、调整、结果和恢复事实 |
+| 实际执行 | 借用共享 Agent 执行能力 | 通过项目执行器调用 Agent，并核对项目文件副作用 |
+| 中断恢复 | Work 日志可恢复事实；执行结局不明可记 UNKNOWN，不自动重放 Agent | 保存 Task/Attempt、命令和副作用信息，按状态核对恢复；也不是保证任意失败都能自动续跑 |
+| 来源与当前归属 | LiveVoice 开发出的工作管理能力，后续以 HostWorkService 等归入 JiuwenSwarm Runtime | LiveVoice 开发出的正式任务体系，后续迁入 JiuwenSwarm `server/runtime/formal_tasks` |
+
+**这两套具体服务都不是 AgentCore 原生的 Work/Task 二选一接口。** AgentCore 提供底层 Agent/工具等能力，JiuwenSwarm 原有 AgentRuntime 提供宿主执行与会话基础；本分支的 Work/正式 Task 管理是在这些能力上增加的。JiuwenSwarm 或 AgentCore 中其他名为 task/work 的对象、普通任务页面或后台执行，不应直接等同于这里的两套协议。
+
+**M9 与 M7 的区别是“项目责任”与“Agent 执行能力”。** M7 将请求交给配置好的 AgentModel 和工具，接收输出并处理执行取消等；M9 在正式 Task 路径上准备正确项目与基线，调用 M7，再核对文件影响、应用结果与失败恢复事实。M9 并不替代 Agent，也不是第二个独立推理模型。
+
+```text
+分析文件：M5 → M6 Work → M7 Agent 执行 → Work 结果
+修改文件：M5 → M8 Task → M9 项目执行器 → M7 Agent 执行
+                              ↑                 ↓
+                         文件影响与执行事实 ← 执行输出
+                              ↓
+                         M8 Task 保存权威结果
+```
+
+| 模块 | 历史来源与当前实现归属 |
+|---|---|
+| M4 语音会话与播放状态 | 来自 LiveVoice；语音特定协调留在 channel，通用呈现账本等归入 Host。不能因在 AgentServer 执行就说它是上游原生能力 |
+| M5 Native 业务路由 | LiveVoice 的业务接入适配，当前在 `channels/live_voice`，调用宿主服务 |
+| M6 Work、M8 正式 Task、M9 项目执行器 | LiveVoice 增加/发展，后迁入宿主；HostWorkService 的共享所有权封装在集成时增加 |
+| M7 Agent 执行 | 复用原有 AgentRuntime、Agent/模型/工具底座；Voice 所需的受控适配和部分专用执行入口是新增或改造的，不能把整条路径都说成上游原有 |
+
+来源核对：所采用官方 develop `8c7bfecd` 中已有 `AgentRuntime`，没有这里的 `HostWorkService`、`PersistentTaskCore`、`NativeInteractionRuntimeOwner`、`DirectProjectCodeExecutorAdapter` 类。集成前 `cedb4e1b` 的 Native Work、Task Core、项目执行器和 Native 会话实现位于 `server/live_voice`；`5cb5303d` 将共享责任迁入宿主并接既有 Runtime。详见[集成记录](../reviews/SHARED_RUNTIME_INTEGRATION_20260913.md)。该结论限定这次集成的具体模块与固定基线，不是宣称上游没有任何工作/任务能力。
+
+**“现在由 JiuwenSwarm 管理”不等于“上游原来就有”，也不等于其他语音入口已经改用同一实现。** 模块图说明当前职责；上述来源说明哪些是复用底座，哪些是本分支新增后共享化。
 
 ### Gateway 与同层级边界：三方横向对齐
 
@@ -116,7 +150,7 @@ flowchart TB
 ### 什么可以简讲，什么不能删
 
 - **M1 可以简讲，浏览器不能删。** 用一句话说明操作与结果展示，仍要保留采集、播放、文字展示和回执的客户端位置。
-- **Gateway、Host、云端语音模型必须出现在主图。** 否则无法解释传输、权限、延迟、断连恢复以及本地问题和模型问题的区别。
+- **Gateway、Host、Realtime 语音能力必须出现在主图。** 否则无法解释传输、权限、延迟、断连恢复以及本地问题和模型问题的区别。
 - **M4–M9 可以按 Host 的三组能力介绍，但必须交代内部责任。** Work/Task 保留分支，Task 管理与项目/Agent 执行保留上下游关系；不要求每个类或子模块都占一个顶层框。
 - **历史与结果记录必须交代保存条件。** 业务完成、聊天展示、浏览器播放确认是不同事实；不必展开表结构。
 - 配置鉴权、会话/项目绑定、协议校验、诊断与恢复作为横向责任简讲，分别指出谁校验、谁记录、谁恢复；不必逐项讲字段和函数。
@@ -441,7 +475,7 @@ Hermes 和插件都能通过普通 Agent 文件/执行工具读取或修改文�
 
 | 对象 | 本次依据 | 流程和代码索引 |
 |---|---|---|
-| LiveVoice | 本次核对 a8cd1259（生产代码同 f9cee727）；含通知序号恢复修复 | [LiveVoice 模块介绍](LIVE_VOICE_MODULE_GUIDE.md)及本文本地源码链接 |
+| LiveVoice | 本次核对 ec7d4f64（生产代码同 f9cee727）；含通知序号恢复修复 | [LiveVoice 模块介绍](LIVE_VOICE_MODULE_GUIDE.md)及本文本地源码链接 |
 | Hermes | NousResearch/hermes-agent@e151d0b3458e136729fe498b566deb795ffb6a42 | [Hermes 流程及固定 SHA 源码链接](HERMES_VOICE_CODE_FLOW.md) |
 | PR #2813 | 本地镜像合入 df5f89646227b05c6cbd90e1a0debe729ab2b26e | [基础流程](JIUWENSWARM_DUPLEX_PR2813_FLOW.md) |
 | PR #5301 | 本地镜像合入 b83923ae1f8cf0a315ce1f580e016edf48a02c2d | [增量流程](JIUWENSWARM_DUPLEX_PR5301_FLOW.md) |
