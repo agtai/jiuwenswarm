@@ -806,6 +806,7 @@ async def test_business_session_seeds_json_facts_and_only_explicit_tool():
         assert {tool["name"] for tool in update["tools"]} == {
             "jiuwen_bound_context_get", "jiuwen_bound_task_list", "jiuwen_bound_task_status", "jiuwen_bound_task_result",
             "jiuwen_bound_task_create", "jiuwen_bound_task_create_successor", "jiuwen_bound_task_adjust", "jiuwen_bound_task_cancel",
+            "jiuwen_bound_task_details", "jiuwen_bound_task_approve", "jiuwen_bound_task_reject",
             "jiuwen_bound_work_start", "jiuwen_bound_work_list", "jiuwen_bound_work_get", "jiuwen_bound_work_update", "jiuwen_bound_work_cancel",
         }
         assert update["tool_choice"] == "auto"

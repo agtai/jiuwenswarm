@@ -551,7 +551,12 @@ class NativeBusinessRouter:
                         facts = {"status": "observed"}
                     elif self._atlas_host is not None:
                         await self._require_context_authority(route)
-                        facts = await self._atlas_host.execute(route.binding, delegate)
+                        if delegate.business.operation in {"task.approve", "task.reject"}:
+                            facts = await self._atlas_host.execute(route.binding, delegate, snapshot=selection.payload())
+                        else:
+                            facts = await self._atlas_host.execute(route.binding, delegate)
+                    elif delegate.business.operation in {"task.approve", "task.reject", "task.details"}:
+                        facts = {"status": "rejected", "reason": "ATLAS_HOST_REQUIRED"}
                     elif delegate.business.operation.startswith("task."):
                         from .native_task_source import SOURCE_OPERATIONS
                         with ProfileSpan("native.task_source_wait"):

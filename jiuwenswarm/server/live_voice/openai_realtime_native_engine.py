@@ -59,6 +59,7 @@ from jiuwenswarm.server.live_voice.native_business_instructions import (
     TASK_ACCEPTED_INSTRUCTIONS as _TASK_ACCEPTED_INSTRUCTIONS,
     TASK_OBSERVATION_INSTRUCTIONS as _TASK_OBSERVATION_INSTRUCTIONS,
     WORK_RESULT_INSTRUCTIONS as _WORK_NOTIFICATION_INSTRUCTIONS,
+    ATLAS_APPROVAL_INSTRUCTIONS as _ATLAS_APPROVAL_INSTRUCTIONS,
     TASK_ADJUSTMENT_RESULT_INSTRUCTIONS as _TASK_NOTIFICATION_INSTRUCTIONS,
     ARGUMENT_CORRECTION_SUFFIX as _BUSINESS_ARGUMENT_CORRECTION_INSTRUCTIONS,
     CORRECTION_EXHAUSTED_SUFFIX as _BUSINESS_ARGUMENT_CORRECTION_EXHAUSTED,
@@ -986,7 +987,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             _identity(event[key], reason="NATIVE_WORK_EVENT_INVALID", field_name=key)
         if (type(event["revision"]) is not int or not 0 < event["revision"] <= MAX_SAFE_INTEGER
                 or type(event["state"]) is not str
-                or event["state"] not in ({"applied", "rejected"} if task_event else {"completed", "failed", "cancelled", "unknown"})):
+                or event["state"] not in ({"applied", "rejected"} if task_event else {"completed", "failed", "cancelled", "unknown", "awaiting_approval"})):
             raise OpenAIRealtimeNativeInteractionError("NATIVE_WORK_EVENT_INVALID", "Work event revision or state is invalid")
         if event["reason"] is not None:
             _identity(event["reason"], reason="NATIVE_WORK_EVENT_INVALID", field_name="reason")
@@ -1149,9 +1150,11 @@ class OpenAIRealtimeNativeInteractionEngine:
         source = next((item for item in context.get("works", [])
                        if item.get("work_id") == work["work_id"]
                        and item.get("revision") == work["revision"]), {})
+        if not source and str(work["work_id"]).startswith("atlas:task:"):
+            source = next((item for item in context.get("tasks", []) if item.get("task_id") == work["work_id"]), {})
         return [self._business_facts_snapshot({
             "native_work_result": work,
-            "original_work_request": source.get("instruction"),
+            "original_work_request": source.get("instruction") or source.get("request_text"),
         })[0]["item"]]
 
     @staticmethod
@@ -1918,6 +1921,7 @@ class OpenAIRealtimeNativeInteractionEngine:
                             "input": self._work_response_input(work),
                             "max_output_tokens": self._max_output_tokens,
                             "instructions": (_TASK_NOTIFICATION_INSTRUCTIONS if "task_id" in work
+                                             else _ATLAS_APPROVAL_INSTRUCTIONS if work["state"] == "awaiting_approval"
                                              else _WORK_NOTIFICATION_INSTRUCTIONS),
                         }})
                     self._work_seen[work["event_id"]] = hashlib.sha256(canonical_json_bytes(work)).digest()

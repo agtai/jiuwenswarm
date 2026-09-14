@@ -23,6 +23,9 @@ _OPERATIONS = {
     "task.list": ("context_id",),
     "task.status": ("context_id", "target_id"),
     "task.result": ("context_id", "target_id"),
+    "task.details": ("context_id", "target_id"),
+    "task.approve": ("context_id", "target_id", "expected_revision"),
+    "task.reject": ("context_id", "target_id", "expected_revision"),
     "task.create": ("context_id", "name", "instruction"),
     "task.create_successor": ("context_id", "target_id", "expected_revision", "name", "instruction"),
     "task.adjust": ("context_id", "target_id", "expected_revision", "adjustment"),
@@ -41,6 +44,9 @@ _SERVER_CONTEXT_ABSENT = object()
 _ACTION_FIELDS = ("context_id", "target_id", "expected_revision", "name", "instruction", "adjustment")
 _MAX_ARGUMENT_UTF8_BYTES = 16_384
 _DESCRIPTIONS = {
+    "task.details": "Atlas only: read the exact task's pending approval, full retained operation history and final answer when the user asks for details, steps, price changes or how the result was obtained. Do not poll or automatically narrate operations. State when history is truncated; never invent missing details.",
+    "task.approve": "Atlas only: approve the exact currently pending purchase after the user explicitly agrees to the disclosed merchant, product and total. Copy the latest target ID and revision from context. A question, silence or a requested modification is not approval. Receipt confirms approval, not purchase completion.",
+    "task.reject": "Atlas only: reject the exact currently pending purchase when the user explicitly declines. Use the latest target ID and revision. This does not cancel an already placed order.",
     "context.get": "Read server facts, target IDs or revisions only when required information is missing or stale; then continue the necessary call. Do not repeat an acknowledgment for this dependent lookup or use it to recheck an exact receipt.",
     "task.list": "Read the background Task overview when requested. Use this instead of one status call per Task; report only the returned observations.",
     "task.status": "Read the observed state of an exact background Task. Use its server ID, never a title or guessed ID. Report the state at the observation time without inferring completion or adjustment success.",

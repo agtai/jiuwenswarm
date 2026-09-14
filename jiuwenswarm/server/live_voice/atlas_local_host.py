@@ -23,6 +23,18 @@ class AtlasLocalHost:
     def __init__(self, pairing_file):
         self._path = Path(pairing_file)
         self._pins = {}
+        self._approval_events = {}
+
+    @staticmethod
+    def _pending(call):
+        pending = call.get("pending")
+        if pending is None:
+            return None
+        if (type(pending) is not dict or pending.get("kind") != "confirm"
+                or any(type(pending.get(key)) is not str or not pending[key]
+                       for key in ("interactionId", "message", "receiptId", "preparedActionHash"))):
+            return None  # Older/non-purchase questions remain in the Atlas UI.
+        return json.loads(json.dumps(pending))
 
     @classmethod
     def configured(cls):
@@ -96,13 +108,18 @@ class AtlasLocalHost:
             terminal = phase in {"completed", "failed", "aborted", "withdrawn", "unknown"}
             outcome = {"aborted": "cancelled", "withdrawn": "cancelled"}.get(phase, phase)
             target = "atlas:" + call_id
+            final = call.get("answer") or call["text"]
+            pending = self._pending(call) if phase == "waiting_for_user" else None
             common = {"execution_owner": "atlas", "atlas_turn_id": call["turnId"], "atlas_mandate_id": call["mandateId"],
-                      "phase": phase, "result_text": call["text"] if terminal else None, "files": call["files"],
+                      "request_text": call["requestText"],
+                      "phase": phase, "result_text": final if terminal else None, "files": call["files"],
+                      **({"pending": pending} if pending else {}),
                       "result_truncated": call["textTruncated"]}
             if call_id.startswith("task:"):
                 tasks.append({**common, "task_id": target, "name": call["requestText"][:80], "revision_number": revision,
                               "state": "terminal" if terminal else "running", "outcome": outcome if terminal else None,
-                              "supported_operations": ["task.status", "task.result"]})
+                              "supported_operations": ["task.status", "task.result", "task.details"]
+                              + (["task.approve", "task.reject"] if pending else [])})
                 # This identifies the Atlas execution for Native delivery. It is
                 # not a Swarm Task adjustment and must not claim applied/rejected.
                 identity = {"work_id": target}
@@ -111,8 +128,20 @@ class AtlasLocalHost:
                               "instruction": call["requestText"], "state": outcome if terminal else "running",
                               "execution_settled": terminal, "reason": "awaiting_atlas_user" if phase == "waiting_for_user" else None})
                 identity = {"work_id": target}
+            if pending:
+                key = (binding.session_id, target, pending["interactionId"], pending["preparedActionHash"])
+                if key not in self._approval_events:
+                    if len(self._approval_events) >= 128:
+                        raise NativeBusinessViolation("ATLAS_APPROVAL_CAPACITY")
+                    self._approval_events[key] = {**identity,
+                        "event_id": "atlas-approval-" + hashlib.sha256(json.dumps(key).encode()).hexdigest(),
+                        "revision": revision, "state": "awaiting_approval",
+                        "result_text": json.dumps({"request": call["requestText"],
+                            "approval": {key: pending[key] for key in ("message", "money", "merchant") if key in pending}}, ensure_ascii=False),
+                        "reason": "ATLAS_APPROVAL_REQUIRED"}
+                events.append(self._approval_events[key])
             if terminal:
-                text = call["text"]
+                text = final
                 if len(text.encode("utf-8")) > 131072:
                     text = text.encode("utf-8")[:131072].decode("utf-8", errors="ignore")
                 events.append({**identity, "event_id": "atlas-result-" + hashlib.sha256(
@@ -124,8 +153,36 @@ class AtlasLocalHost:
         return {"history": result["history"], "tasks": tasks, "works": works, "events": events,
                 **({"capabilities": result["capabilities"]} if "capabilities" in result else {})}
 
-    async def execute(self, binding, delegate):
+    async def execute(self, binding, delegate, *, snapshot=None):
         action = delegate.business
+        if action.operation in {"task.details", "task.approve", "task.reject"}:
+            if not action.target_id.startswith("atlas:task:"):
+                return {"status": "rejected", "reason": "ATLAS_TARGET_NOT_FOUND"}
+            call_id = action.target_id[len("atlas:"):]
+            current = await self._call(binding, "observe", {"callId": call_id})
+            if action.operation == "task.details":
+                return {"status": "observed", "task_id": action.target_id, "phase": current["status"],
+                        "pending": self._pending(current), "operations": current.get("operations", []),
+                        "operations_truncated": current.get("operationsTruncated", False),
+                        "answer": current.get("answer"), "files": current["files"]}
+            observed = next((task for task in (snapshot or {}).get("tasks", [])
+                             if task.get("task_id") == action.target_id), {})
+            pending = self._pending(current)
+            if (current["revision"] != action.expected_revision or pending is None
+                    or current["status"] != "waiting_for_user" or observed.get("pending") != pending
+                    or observed.get("revision_number") != action.expected_revision):
+                return {"status": "rejected", "reason": "ATLAS_APPROVAL_STALE"}
+            # The exact snapshot's question/hash must still be held. The callback
+            # rechecks interaction identity and the gate owns prepared-action validation.
+            try:
+                result = await self._call(binding, "decide", {"callId": call_id,
+                    "interactionId": pending["interactionId"], "approved": action.operation == "task.approve"})
+            except Exception:
+                return {"status": "unknown", "reason": "ATLAS_DECISION_OUTCOME_UNKNOWN"}
+            if result.get("decision") != {"interactionId": pending["interactionId"], "approved": action.operation == "task.approve"}:
+                return {"status": "unknown", "reason": "ATLAS_DECISION_RECEIPT_MISMATCH"}
+            return {"status": "approved" if action.operation == "task.approve" else "rejected_by_user",
+                    "task_id": action.target_id, "phase": result["status"], "purchase_completed": False}
         if action.operation in {"task.create", "work.start"}:
             call_id = action.operation.split(".")[0] + ":" + delegate.source_identity
             text = delegate.request_text

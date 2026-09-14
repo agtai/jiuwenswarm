@@ -421,7 +421,7 @@ def _validate_business_context_result(result: dict[str, object]) -> dict[str, ob
                 raise ValueError("work revision is invalid")
             if task_event and not any(task.get("task_id") == event["task_id"] and task.get("revision_number") == event["revision"] for task in context["tasks"]):
                 raise ValueError("Task adjustment has no matching visible revision")
-            if event["state"] not in ({"applied", "rejected"} if task_event else {"completed", "failed", "cancelled", "unknown"}):
+            if event["state"] not in ({"applied", "rejected"} if task_event else {"completed", "failed", "cancelled", "unknown", "awaiting_approval"}):
                 raise ValueError("work event is not terminal")
             if event["result_text"] is not None and (
                 type(event["result_text"]) is not str

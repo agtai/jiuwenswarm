@@ -23,12 +23,12 @@ NATIVE_BUSINESS_TOOL_NAME = "jiuwen_business"
 NATIVE_BUSINESS_OPERATIONS = frozenset({
     "context.get", "task.list", "task.status", "task.result", "task.create",
     "task.create_successor", "task.adjust", "task.cancel", "work.start",
-    "work.list", "work.get", "work.update", "work.cancel",
+    "work.list", "work.get", "work.update", "work.cancel", "task.details", "task.approve", "task.reject",
 })
 _FIELDS = frozenset({"operation", "context_id", "target_id", "expected_revision",
                      "name", "instruction", "adjustment"})
 _COLLECTION = frozenset({"context.get", "task.list", "task.create", "work.list", "work.start"})
-_REVISION_REQUIRED = frozenset({"task.adjust", "task.cancel", "task.create_successor", "work.update", "work.cancel"})
+_REVISION_REQUIRED = frozenset({"task.adjust", "task.cancel", "task.create_successor", "work.update", "work.cancel", "task.approve", "task.reject"})
 _TEXT_ARGUMENTS = {
     "task.create": frozenset({"name", "instruction"}),
     "task.create_successor": frozenset({"name", "instruction"}),
@@ -119,9 +119,11 @@ class NativeBusinessAction:
 
     @property
     def mutates(self) -> bool:
-        return self.operation in {"task.create", "task.create_successor", "task.adjust", "task.cancel", "work.update", "work.cancel"}
+        return self.operation in {"task.create", "task.create_successor", "task.adjust", "task.cancel", "work.update", "work.cancel", "task.approve", "task.reject"}
 
     def task_proposal(self) -> ProductionTaskIntentProposal:
+        if self.operation in {"task.details", "task.approve", "task.reject"}:
+            raise NativeBusinessViolation("ATLAS_HOST_REQUIRED")
         if not self.operation.startswith("task."):
             raise NativeBusinessViolation("NATIVE_BUSINESS_NOT_TASK")
         arguments = {key: getattr(self, key) for key in _TEXT_ARGUMENTS.get(self.operation, ())}

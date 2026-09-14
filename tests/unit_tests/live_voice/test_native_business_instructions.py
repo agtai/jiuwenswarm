@@ -42,7 +42,7 @@ def test_effective_variants_preserve_shared_truth_language_and_requested_detail(
 def test_tool_descriptions_reference_only_the_actual_catalog(bound):
     tools = native_business_tools(bound_context=bound)
     names = {tool["name"] for tool in tools}
-    assert len(names) == 13
+    assert len(names) == 16
     for tool in tools:
         mentioned = set(re.findall(r"jiuwen_[a-z_]+", tool["description"]))
         assert mentioned <= names

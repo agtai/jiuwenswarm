@@ -30,6 +30,9 @@ SCENARIOS = {
     "task.list": {},
     "task.status": {"target_id": "task-a"},
     "task.result": {"target_id": "task-a"},
+    "task.details": {"target_id": "atlas:task:a"},
+    "task.approve": {"target_id": "atlas:task:a", "expected_revision": 4},
+    "task.reject": {"target_id": "atlas:task:a", "expected_revision": 4},
     "task.create": {"name": "Report", "instruction": "Read the source and write the report."},
     "task.create_successor": {"target_id": "task-a", "expected_revision": 4, "name": "Successor", "instruction": "Extend the report."},
     "task.adjust": {"target_id": "task-a", "expected_revision": 4, "adjustment": "下午五点出发，保留其他要求。"},
@@ -90,7 +93,10 @@ def test_every_operation_retains_authoritative_proposal_carrier_and_source(opera
     ) == carrier
     with pytest.raises(ValueError, match="Native business proposals require"):
         NativeInteractionProposal.from_dict(carrier.to_dict())
-    if operation.startswith("task."):
+    if operation in {"task.details", "task.approve", "task.reject"}:
+        with pytest.raises(NativeBusinessViolation, match="ATLAS_HOST_REQUIRED"):
+            actual.business.task_proposal()
+    elif operation.startswith("task."):
         task = actual.business.task_proposal()
         assert _validate_arguments(task.operation, task.arguments) is None
 
@@ -98,7 +104,7 @@ def test_every_operation_retains_authoritative_proposal_carrier_and_source(opera
 def test_tool_catalog_covers_existing_operations_without_legacy_or_unused_arguments():
     tools = native_business_tools()
     assert set(SCENARIOS) == NATIVE_BUSINESS_OPERATIONS
-    assert len(tools) == len(SCENARIOS) == 13
+    assert len(tools) == len(SCENARIOS) == 16
     assert {tool["name"] for tool in tools} | {"jiuwen_business"} | NATIVE_BOUND_BUSINESS_FUNCTION_NAMES == NATIVE_BUSINESS_FUNCTION_NAMES
     for tool in tools:
         operation = tool["name"].removeprefix("jiuwen_").replace("_", ".", 1)
