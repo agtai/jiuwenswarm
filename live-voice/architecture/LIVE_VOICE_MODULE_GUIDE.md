@@ -1,5 +1,9 @@
 # LiveVoice：模块、运行位置与数据流
 
+> 最新 `.8` 工作树：Work 通过既有 TaskManager 注册/执行/取消，运行于 Host 的 Runner 根任务组；WorkStore 继续持有业务耐久事实。原生 Task 完成不等于 Work 成功，也不生成正式 Task 卡片。同步调度回执和启动回调收尾增强已被现有 BackgroundTask 与 Work 使用。
+> 当前同口径净增：Voice **112334** / Host **48028** / SDK **34134**，合计 **194496**；本批 **+78**，较初始累计 **−1184**。SDK 当前受影响文件36440行含2306行原生基线，不得全算新增。[当前逐文件统计](../evidence/DEEP_NATIVE_TASK_MANAGER_COUNTS_20260914.json)、[当前模块分桶](../evidence/DEEP_NATIVE_TASK_MANAGER_MODULES_20260914.json)。后文较早数字和 `.7` 是历史阶段。
+> AgentServer 仍是应用与执行依赖的运行容器。M4+M5、M7+M9 保持合并；Hermes 和多模态方案仍沿用原固定版本静态证据，未重新核验。本批干净 wheel 安装后 24 项原生/SQLite 场景通过，全部 1016 个 Host / 2409 个 SDK Python 文件与源码一致；整体融合仍 PARTIAL。
+
 > 2026-09-14 当前工作树：配套 SDK `.7`。Work 编排由 `AgentRuntime → Runner.get_root_task_group → root.start_soon` 管理；WorkStore 的耐久事实仍为业务权威。独立 producer/cleanup 未结算时保留容量且不发布成功。TaskManager 注册管理及完整 Task/Work 融合仍未完成。
 > 最新相同口径：Voice **112334**、Host **48028**、SDK **34056**，合计净增 **194418**；本批 **+70**（Host 适配 +13、SDK 所有权/结算增强 +57），累计较初始 **−1262**。后文各阶段数字为历史快照。[逐文件统计](../evidence/DEEP_WORK_NATIVE_OWNER_COUNTS_20260914.json)、[合并模块统计](../evidence/DEEP_WORK_NATIVE_OWNER_MODULES_20260914.json)。
 > AgentServer 是宿主运行容器，持有应用服务并装配 Runner；不是另一个执行引擎。M4+M5、M7+M9 保持合并展示。外部 Hermes/多模态版本未重新核验，原静态证据边界不变；本批不证明性能优势。配套 wheel 安装后 12 项真实 Runner/SQLite 场景通过；1016 个 Host、2409 个 SDK Python 文件与当前源码逐字节一致。
@@ -25,7 +29,7 @@ flowchart TB
   subgraph H["AgentServer / Host：JiuwenSwarm 应用后端"]
     C["语音会话与业务协调 M4+M5<br/>轮次、打断、播放事实、业务分流与来源校验"]
     W["工作管理 M6+M8<br/>Work 分析 / Task 正式项目任务<br/>Host 装配，AgentCore 持有通用生命周期"]
-    R["AgentCore Runner 根任务组<br/>持有 Work 编排寿命，等待物理执行及清理"]
+    R["AgentCore Runner 根任务组 / TaskManager<br/>注册、执行与取消 Work 编排，等待物理执行及清理"]
     W -->|WorkRuntime 通过 Host 获取既有 root| R
     X["Agent 与项目执行 M7+M9<br/>Host 绑定 Agent、模型和权限<br/>AgentCore 执行底座与项目副作用管理"]
     C <-->|受理、状态、调整、取消、结果| W

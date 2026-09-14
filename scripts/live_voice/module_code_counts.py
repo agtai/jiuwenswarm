@@ -7,6 +7,8 @@ from pathlib import Path
 def module(path):
     name = Path(path).name
     if path.startswith('openjiuwen/'):
+        if '/common/logging/' in path:
+            return 'shared'
         if name in {'contracts.py', 'source.py', '__init__.py', 'execution_control.py', 'execution_observation.py', 'observation.py'}:
             return 'shared'
         if '/durability/' in path or name in {'project_executor.py', 'file_effect_plan.py', 'execution_checkpoint.py', 'executor_capabilities.py'}:

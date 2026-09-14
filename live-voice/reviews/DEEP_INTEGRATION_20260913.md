@@ -1493,3 +1493,96 @@ This closes only this native-root/settlement batch, not the overall goal.
 Paired SDK commit: `0420563d08a84ef207bce1f0c6b6aa569db69f54`
 (`fix(work): bind orchestration to native owner and retain physical settlement`),
 version `.7`; this Host commit supplies its owner, pin, integration test and evidence.
+
+
+### Native Task callback ownership audit (2026-09-14, in progress, Tier 2)
+
+After the Work root integration, inspect native TaskManager/BackgroundTask
+creation and completion before reusing registry ownership. Native Task.execute
+runs its RUNNING callback outside the try/finally that publishes completion and
+restores context. Two real Task tests reproduce FAILED exceptions leaving status
+RUNNING, no done event, leaked task context and an unclosed, unstarted coroutine.
+This is a native lifecycle gap, not evidence that native reuse is impossible.
+Owned repair: put start callbacks under the existing lifecycle settlement and
+close the body if startup aborts before awaiting it. Preserve callback error
+propagation/catch policy and ordinary body execution. No new status framework,
+Task/Work table, authorization policy or Voice timeout. Verify failure, external
+cancellation, zero body effects and native manager regressions. BackgroundTask
+creation-callback readiness remains a separate unresolved seam; no claim that
+this repair alone integrates Task/Work management.
+
+
+Native Task startup repair: the existing TaskManager suite plus two new failure
+cases passed (60 total, 6.42s); the final three startup cases, including external
+cancellation, passed (1.63s). Independent read-only review found no concrete
+blocker in this bounded repair. It does not make Task.cancel usable while its
+start callback is pending; the native cancel scope is installed later.
+
+The next creation seam is now experimentally confirmed using a real native
+TaskManager, AsyncCallbackFramework and AbortError (no fake dispatch): the
+TASK_CREATED callback can fail after the body starts, caller receives no
+BackgroundTask handle, and the actual task still completes with its result.
+See DEEP_NATIVE_TASK_CREATION_AUDIT_20260914.json. Therefore a creation exception
+cannot be treated as proof of zero dispatch. Moving callbacks before scheduling
+would change callback ordering/consumer behavior; it is not silently applied.
+Keep this native-management batch uncommitted while determining a compatible
+ownership solution; the previous .7 paired commits remain the last closed batch.
+
+
+### Native TaskManager integration (2026-09-14, .8 working tree)
+
+Work now calls the existing TaskManager.create_task inside the Host-owned Runner
+root. The native registry, coroutine execution, cancellation scope and task events
+manage that orchestration. Its parent task identity is explicitly detached from
+the Voice caller; a real cascade_cancel probe confirms caller closure does not
+cancel accepted Work. The existing completion Future is only an asyncio waiting
+adapter, not another execution state or durable result ledger. WorkStore remains
+the business authority for revision/CAS, UNKNOWN/no replay and physical settlement.
+A native coroutine may finish while the durable Work outcome is UNKNOWN: these
+are distinct facts, and native task entries never create formal product Task cards.
+
+The existing native Task lifecycle now covers failed/cancelled start callbacks,
+closes unstarted coroutines and restores task context. TaskManager's optional
+synchronous on_scheduled receipt retains the actual Task before asynchronous
+creation callbacks; their existing order and exception propagation are unchanged.
+The existing synchronous BackgroundTask helper uses it, so already-returned
+handles no longer hang after creation failure. The asynchronous create helper
+still raises creation errors as before; Work retains ownership through the receipt.
+No separate native task registry or new scheduler framework was added.
+
+Real Work integration exposed logging's deepcopy of AbortError failing while
+handling the original exception. Existing BaseLogEvent serialization now excludes
+only the exception object from deepcopy, retaining its prior string/error fields
+and deep-copying all other data. Native callback failure before Work starts has
+zero body effects; failure after start produces UNKNOWN and holds capacity through
+cleanup; a late observer failure does not erase an already settled real result.
+
+Verification: 84 SDK/native/message-queue/SQLite tests passed (6.81s), followed by
+the updated two root/native cancellation cases (1.61s) and three callback cases
+(1.64s). Host Work regressions: 38 passed (10.23s). Counts overlap. Independent
+read-only review found no concrete blocker in the current integration. Ruff passed
+with existing ASYNC109 API-parameter warnings excluded; no timeout policy changed.
+Pair build/install and final documentation checks remain pending before commit.
+
+Same accounting: Voice 112334, Host 48028, SDK 34134, combined net194496;
+this batch +78 (existing native enhancements +40, Work ownership adapter +38),
+1184 fewer than initial195680. Native files now counted contain 2306 baseline
+lines in total, not new code; current SDK affected-file total36440 is not its net
+addition. No relocation or bulk duplicate deletion is claimed. Logging belongs
+to shared module attribution; M4+M5 and M7+M9 remain merged. Task/Work business
+management and broader full-goal closure remain incomplete.
+
+
+Final .8 paired validation: clean Host/SDK source snapshots built and installed
+without dependency resolution. All 1016 Host / 2409 SDK Python files match both
+snapshots and current source bytes; 24 installed native/SQLite/Host scenarios
+passed, including the actual native registry cancellation and callback-failure
+paths. Explicit nonempty Voice parent context and native cascade_cancel leave
+Work alive. No fresh Provider, physical audio or OS restart is claimed. The
+asynchronous create helper's original error propagation is deliberately retained;
+Work and the synchronous helper now retain the scheduled task when it matters.
+This closes this native-management execution boundary only, not the full goal.
+
+Paired SDK commit `.8`: `c46c9b2ba5ec026e8c3f1459542d46f079ea0dd6`
+(`refactor(work): execute through native task management with retained ownership`).
+This Host commit supplies the matching dependency pin and reviewed source/installed-pair evidence.

@@ -1,0 +1,33 @@
+{
+  "sdk_boundary": {
+    "passed": 84,
+    "seconds": 6.81
+  },
+  "updated_native_cancel": {
+    "passed": 2,
+    "seconds": 1.61
+  },
+  "updated_callback_failure": {
+    "passed": 3,
+    "seconds": 1.64
+  },
+  "host_work": {
+    "passed": 38,
+    "seconds": 10.23
+  },
+  "installed_pair_passed": 24,
+  "counts_overlap": true,
+  "sha256": {
+    "openjiuwen/core/application/tasks/work_runtime.py": "c0b12d56de32989b0696411d8fab4eca8163da9059f28171443e770249e58114",
+    "openjiuwen/core/common/task_manager/task.py": "9cc02eca6485c8cfac7cbdfb2f5ebdd4beafdb7a92cdd10772a74d0840d58963",
+    "openjiuwen/core/common/task_manager/manager.py": "b19a9a99b77dd37f683eb94e3e2ae55f4a1b80c59ab4b9cc122aea9c1e0e0774",
+    "openjiuwen/core/common/background_tasks.py": "1ed8d9e08459b369632261a6cff58a540f324a6a6512924f392a219f8f941fbc",
+    "openjiuwen/core/common/logging/events.py": "098b2bb54e56105c14ecad8056314bc622da07fa3f4291b02dd59f2a428b80c3",
+    "tests/integration_tests/application_tasks/test_work_native_task_ownership.py": "53a9aff4be2570d5bb405cdb50d3815c52e879f24738274e6d38311534678a59",
+    "tests/unit_tests/core/common/test_task_start_callback_lifecycle.py": "103afae7dd7065e0b47f75387f22e7bf725abc25297ec4ad4867c92191facc96",
+    "tests/unit_tests/core/common/test_background_task_creation_ownership.py": "ba2fd4e07764ea7f0c7f4033579808f1080f136e476ee52a15d2cc814bed5c7e",
+    "tests/unit_tests/core/common/test_log_exception_serialization.py": "e315471905cfc605ee4a912af040010b787619aa7c680bc04351d9a7217ad67d"
+  },
+  "lint": "ruff passes with pre-existing ASYNC109 excluded; git diff --check passes",
+  "review": "Independent read-only integration review found no concrete blocker; not full-goal closure."
+}

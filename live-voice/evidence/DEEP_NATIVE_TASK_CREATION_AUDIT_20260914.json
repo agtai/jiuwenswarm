@@ -1,0 +1,12 @@
+{
+  "entry": "create_background_task -> TaskManager.create_task -> TASK_CREATED callback",
+  "callback_framework": "real AsyncCallbackFramework / AbortError",
+  "returned_handle": false,
+  "caller_error": "AbortError",
+  "producer_calls": [
+    "body_started"
+  ],
+  "retained_native_status": "completed",
+  "native_result": "actual_result",
+  "conclusion": "Creation callback rejection occurs after native execution starts; caller receives no BackgroundTask handle. Not safe to equate create exception with zero dispatch."
+}

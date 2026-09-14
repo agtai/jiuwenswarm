@@ -1,0 +1,43 @@
+{
+  "version": "0.1.17+livevoice.8",
+  "python_files_byte_identical_to_snapshot_and_current_source": {
+    "jiuwenswarm": 1016,
+    "openjiuwen": 2409
+  },
+  "passed": 24,
+  "checks": [
+    "test_independent_cleanup_keeps_sqlite_unsettled_and_capacity_reserved",
+    "test_independent_cleanup_keeps_sqlite_unsettled_and_capacity_reserved",
+    "test_independent_cleanup_keeps_sqlite_unsettled_and_capacity_reserved",
+    "test_independent_cleanup_keeps_sqlite_unsettled_and_capacity_reserved",
+    "test_independent_cleanup_keeps_sqlite_unsettled_and_capacity_reserved",
+    "test_native_owner_lost_before_execution_never_starts_producer_or_replays",
+    "test_native_owner_lost_before_execution_never_starts_producer_or_replays",
+    "test_native_root_can_outlive_caller_group_like_durable_work",
+    "test_native_root_can_outlive_caller_group_like_durable_work",
+    "test_native_handle_retains_cleanup_but_durable_unknown_is_separate",
+    "test_work_orchestration_native_cancel_keeps_physical_reservation",
+    "test_work_orchestration_native_cancel_keeps_physical_reservation",
+    "test_native_callback_failure_retains_work_truth_without_stopping_root",
+    "test_native_callback_failure_retains_work_truth_without_stopping_root",
+    "test_native_callback_failure_retains_work_truth_without_stopping_root",
+    "test_managed_host_work_uses_real_runner_root_and_survives_caller_cancel",
+    "test_failed_start_callback_settles_without_starting_body",
+    "test_failed_start_callback_settles_without_starting_body",
+    "test_cancel_during_start_callback_settles_without_body_effects",
+    "test_native_cancel_handle_works_while_start_callback_is_pending",
+    "test_created_callback_error_retains_actual_completed_task",
+    "test_cancel_before_registration_closes_body_and_completes_handle",
+    "test_error_serialization_preserves_exception_and_original_metadata",
+    "test_error_serialization_preserves_exception_and_original_metadata"
+  ],
+  "wheels": {
+    "openjiuwen-0.1.17+livevoice.8-py3-none-any.whl": "86a8549f7011e117870d6b1c420540d20a2d403141a454720463da54d7ec6c12",
+    "workswarm-0.2.5b1-py3-none-any.whl": "a6a46faad283a5422c5879a2637e8f6ec198861abfcfa8f3b32b33c8ed36ac49"
+  },
+  "limits": [
+    "Existing third-party dependencies; no fresh resolution.",
+    "Controlled execution; real native TaskManager/Runner and SQLite.",
+    "External checkpointer/extensions isolated; no physical Voice/Provider or OS restart."
+  ]
+}
