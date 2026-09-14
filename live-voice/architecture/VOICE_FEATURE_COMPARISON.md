@@ -82,6 +82,11 @@ Hermes 另有 Chained：客户端录音 → STT → 普通 Agent turn → 流式
 | Agent 与项目执行 M7+M9 | Host AgentRuntime/Agent adapter 绑定配置；SDK 底座执行；正式 Task 增加项目基线、文件影响、checkpoint/durability、结果校验 | 普通 Hermes Agent/模型/工具，回复进入现有 turn 和历史 | execute_core_agent → E2A CHAT_SEND → AgentServer 普通 Agent/工具；画面通过附件归一化 | 两个 Jiuwen 方案复用同一底座，这是最接近“相同源码”的部分；LiveVoice 增加正式项目执行契约。插件不是调用 LiveVoice facade，Hermes 也不是 AgentCore |
 | 历史与结果（归各模块，不另画框） | Task/Work 完成事实、聊天文字、音频呈现分别保存；已听记录依据播放回执 | 普通 Agent 历史、客户端 transcript/commentary 游标；未见对应 Host 音频 ACK 账本 | TaskFullDuplexRuntime 先写 UI/历史再按连接播放；JoyAI commitAndSpeak 先提交文字再决定 TTS | 都有历史，但“生成/展示”不是“已经播放”。LiveVoice 的 ACK 也只证明客户端报告播放进度，不证明人类确实听懂 |
 
+本地恢复证据边界：Task/Work 的持久结果、接受回执恢复和原答复展示恢复须分别判断。
+当前 P2 路径在重建后丢失已生成的 Agent 展示内容；该缺口尚未修复，不能以本地
+checkpoint/ACK 机制概括为全部答复可恢复，也不能据此推断 Native 或外部方案行为。
+参见[当前审计](../reviews/DEEP_INTEGRATION_20260913.md#reproduced-gap-and-scope-decision-2026-09-14)。
+
 ## 4. 每个关键差异怎样解释
 
 **媒体与 Provider。** LiveVoice 聚焦语音；插件持续输入抽样图像，因此增加媒体源、帧调度和画面上下文。Hermes Live 的浏览器到 Provider WebRTC 与 LiveVoice 的 Gateway 音频转发路径不同；Chained 和 JoyAI 各有独立 STT/TTS 边界。不能只凭“全双工”三个字判断首音、打断或成本优劣。

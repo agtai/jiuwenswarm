@@ -117,7 +117,12 @@ Current unified-input joint tests cover real SQLite Task creation/confirmation,
 replay/conflict, project rejection, Voice close followed by completion, and
 running cancellation while the original dialogue completes normally. These use
 controlled model/authority/lower-Agent dependencies. The broader Host/Voice
-registry audit and remaining spoken-notification oracles remain open.
+registry audit remains open. Revoked task.create feedback
+and ACK history have current replacement evidence. P2 create/status recovery
+restores acceptance without restoring already-generated Agent presentation after
+Registry/runtime reconstruction; the proposal to persist unheard output awaits
+the user's storage/scope decision. This is not evidence of a Native Realtime
+recovery defect. See the presentation recovery section of the current audit.
 The frontend lifecycle child places the formal Task reader under Host ChatPanel,
 using the existing webClient and formalTaskStore. Voice consumes its snapshot
 with a synchronous notification fence; it no longer constructs, closes or polls

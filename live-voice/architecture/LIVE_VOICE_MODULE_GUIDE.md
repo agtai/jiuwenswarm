@@ -210,6 +210,10 @@ Registry 的当前输入受理由宿主 SqliteUnifiedCommittedInputJournal 的 f
 原语义 commit 与 Agent 执行投影分开：Agent 只能使用当前正式上下文的内容。
 旧 pending 行缺少身份元数据时拒绝执行，旧 completed 行仍可读且不回填。
 这是既有受理 owner 的恢复增强，不是另起输入管理框架；不声称自动恢复 CR 历史。
+代码审计复现了更具体的边界：P2 Agent 答复只在内存保存展示内容，重建后可恢复
+接受回执但未恢复原答复；直接澄清另有 journal 展示检查点。Native delegate 使用
+`native_result_only=True` 的独立结果路径，此 P2 证据不能推广为 Native 故障。
+详见[展示恢复审计](../reviews/DEEP_INTEGRATION_20260913.md#reproduced-gap-and-scope-decision-2026-09-14)。
 
 模型配置直接复用 Host `get_default_models(get_config())` 的格式兼容、环境变量
 回退和 AgentOS 目录；AgentServer 删除了其后不可达的重复回退。正式任务仍由

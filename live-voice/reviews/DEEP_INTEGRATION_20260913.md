@@ -1722,3 +1722,104 @@ The SDK source was rebuilt after restoring standalone exception compatibility;
 only the final .9 wheel SHA in evidence is accepted. Full goal remains partial.
 
 Pair: SDK `05faf6123365ec2aa6942efbe25dde3b3176b691` (`refactor(tasks): run formal project attempts through native task management`), .9; the Host commit containing this record is its companion. Final standalone cancellation/acquisition recheck:2 passed (9.28s), overlapping the earlier21. No push or history rewrite.
+
+
+### Presentation recovery closure audit (2026-09-14, Tier 1)
+
+Prior progress text overstated remaining permission/spoken-ACK debt: the real
+revoked task.create test already replaced that retired oracle, as recorded above.
+Two presentation crash tests still assume lexical/demo creation, a fake Core and
+an in-memory idempotent history writer. Their intended obligations are durable
+effect identity, no replay, recovered presentation and exactly-once acknowledged
+history. The current real SQLite semantic recovery test covers direct clarification
+presentation, but create/status currently stop at recovered receipt/effect identity.
+Extend that test to real recovered Agent receipt/status presentation and history
+ACK before retiring the old oracles. Owned surfaces are test/review/status only;
+no product policy, Voice timing, database schema or production-count change.
+Acceptance: same response/unit identity, no new model/Agent/Task execution, no
+assistant history before ACK, exact history once after ACK/replayed ACK, and wrong
+generation ACK cannot mutate history. Reconstruction is not full OS crash evidence.
+
+
+#### Reproduced gap and scope decision (2026-09-14)
+
+The Tier 1 assumption above was disproved. The expanded real-SQLite test first
+reported 4 failed / 6 passed (82.44 s): create/status presentation was absent after
+Registry/runtime reconstruction, with or without the original ACK. A refined
+create/rebuild/unacknowledged test explicitly consumes the actual original Agent
+presentation before reconstruction, then still fails (1 failed, 9 deselected,
+35.04 s). This proves loss of already-generated presentation, not merely an
+expectation that an accepted Agent has finished. The refined complete matrix has
+not been rerun. Both old presentation oracles remain; no coverage deletion or
+recovery-complete claim is justified. WIP tests are deliberately not committed as
+a completed repair.
+
+Actual route: Registry._run_unified_agent_submit checkpoints acceptance and
+response/round identity in unified_foreground_effects. AgentConversationRuntime
+constructs the original chat.final unit/content but keeps it in memory. Recovery
+returns the saved acceptance payload without restoring this output. Direct
+clarification has a separate persisted authoritative-presentation recovery path.
+SessionFormalHistoryWriter stores only CR-admitted acknowledged text; it cannot
+supply never-ACKed output. P2 generation storage contains fences, not content.
+Independent read-only review reached the same conclusion; it ran no tests.
+
+The reproduced path is unified committed input -> P2 Agent presentation, including
+its current frontend P2 owner, not proof of a Native Realtime recovery defect.
+Native delegation sets native_result_only=True and takes execute_native_delegate /
+finish_text instead of _run_unified_agent_submit. This finding must not be used to
+change Native timeout, buffering or latency policy. Current Native end-to-end
+recovery has not been newly verified by these tests.
+
+A possible repair would be Tier 3, because it adds durable presentation facts:
+- Reuse the existing foreground-effect recovery_json, not another table/store.
+  Retain only the actual validated final text, original response/unit identity,
+  UTF-8 range/digest and explicit format version, bound to the exact accepted
+  request fingerprint and execution owner. Acceptance and generated output remain
+  distinct facts; append-only/idempotent promotion must reject conflicts.
+- Restore that exact unit through the existing CR/presentation ledger on an
+  authenticated same-input retry, with current scope and generation fencing.
+  Never execute Agent/Tools again, synthesize text from Task state, relabel Agent
+  output as server.authoritative, or put unacknowledged text into formal history.
+- Existing exact acknowledged history may establish history already written.
+  The accepted-ACK/history-write-failure window needs a defined checkpoint order;
+  missing ACK cannot be inferred from a sent notification.
+- Existing rows without output stay truthfully unavailable. There is no migration
+  that can reconstruct their missing text. Preserve the original accepted Task.
+
+This proposal changes storage of previously memory-only, possibly unheard Agent
+text. The current recovery_json bound is 65,536 UTF-8 bytes; the existing module
+has no discovered retention/purge path. Overflow behavior and retention therefore
+cannot be silently invented or borrowed from the shorter clarification limit.
+Before implementing this expanded persistence behavior, obtain the user's scope
+choice under section four of their request (changed product/security/consumer
+semantics). This is a user-authority boundary, not a generic skill approval gate.
+Until decided, no production/schema/latency changes are made for this gap.
+
+Current production accounting remains Voice112101 / Host48048 / SDK34307,
+combined194456, or1224 below the initial195680. This audit does not remove production
+code and is not credited as additional integration. Host944a506614ae and
+SDK05faf6123365 remain the last completed pair; SDK has no upstream. Full-goal
+requirements disposition and broader Host/Voice consolidation remain open.
+
+
+#### Current documentation/source correspondence
+
+A subsequent read-only recheck confirms WorkRuntime._admit persists its business
+snapshot before scheduling TaskManager.create_task under the provided root;
+DirectProjectCodeExecutorAdapter uses that manager for _run_attempt. Host wiring
+is runtime/service.py:get_background_task_group/ensure_background_task_group,
+server/agent_ws_server.py -> P3 factory and runtime/work/service.py. Controller
+get_state/load_state instead copies session indexes; its scheduler's cancel path
+is not application durable effect settlement. No new equivalence is inferred from
+method names. The frontend ChatPanel still owns FormalTaskSessionProvider, which
+uses the existing webClient/formalTaskStore; Voice consumes useFormalTaskSession.
+This is source correspondence, not a new runtime acceptance run.
+
+Corrected the SDK development guide's stale top-level claims (unimplemented Work
+native ownership, Host-owned executor algorithm and .4 current version), and
+marked .7/.8 intermediate pending-build prose historical. The module guide and
+feature comparison now explicitly distinguish the reproduced P2 output gap from
+Native and external implementations. No external source was rechecked. These are
+documentation corrections; production accounting, package versions and the last
+runtime verification remain unchanged. Pending presentation tests are excluded
+from documentation commits and remain visible WIP, not silently removed/xfail-ed.
