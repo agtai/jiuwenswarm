@@ -1098,8 +1098,11 @@ async def test_direct_adjustment_and_queries_give_one_toolless_agent_current_app
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cause", ["CONFLICT", "TIMEOUT", "INTERNAL"])
-async def test_failed_adjustment_presentation_distinguishes_rejection_from_unknown(semantic_runtime, monkeypatch, cause):
+@pytest.mark.parametrize("operation,cause", [
+    ("task.adjust", cause) for cause in ("CONFLICT", "TIMEOUT", "INTERNAL")
+] + [("task.status", "CONFLICT"), ("task.cancel", "CONFLICT")])
+async def test_failed_task_receipt_preserves_truth_and_has_no_attempt_measurement(semantic_runtime, monkeypatch, operation, cause):
+    import jiuwenswarm.channels.live_voice.product_composition_registry as module
     from jiuwenswarm.common.schema.live_voice_contract_v2 import ErrorCode
     from openjiuwen.core.application.tasks.formal_task_models import FormalTaskViolation
     from openjiuwen.core.application.tasks.persistent_task_core import _failure
@@ -1109,12 +1112,19 @@ async def test_failed_adjustment_presentation_distinguishes_rejection_from_unkno
     }))["task_id"]
     core = s.harness.composition._core
     await core.drain_outbox()
-    execute = core.execute
+    before = core.store.get_task(task_id, _scope())
+    records = []
+    monkeypatch.setattr(module, "emit_runtime_l0_milestone", lambda **kwargs: records.append(kwargs))
+    fault_calls = []
+    execute = core.query if operation == "task.status" else core.execute
     def fail(command, authorization, *, now, **kwargs):
+        if operation == "task.status" and command.query_type != "task.status":
+            return execute(command, authorization, now=now, **kwargs)
+        fault_calls.append(command)
         if cause != "CONFLICT":
             assert execute(command, authorization, now=now, **kwargs).ok
         return _failure(command, FormalTaskViolation("CONTROLLED_FAILURE", "controlled failure", ErrorCode(cause)), observed_at=now)
-    monkeypatch.setattr(core, "execute", fail)
+    monkeypatch.setattr(core, "query" if operation == "task.status" else "execute", fail)
     spoken = []
     present = s.registry._present_unified_text
     async def capture(**kwargs):
@@ -1122,19 +1132,37 @@ async def test_failed_adjustment_presentation_distinguishes_rejection_from_unkno
         return await present(**kwargs)
     monkeypatch.setattr(s.registry, "_present_unified_text", capture)
     assert (await s.registry.handle_p2_activate(params=p2_params(), request_id="failure-active", session_id="session-1", channel_id="web")).ok
-    s.program = lambda data: model_output(data, operation="task.adjust", target=task_id, arguments={"adjustment": "今晚仅检查。"})
+    s.program = lambda data: model_output(data, operation=operation, target=task_id, arguments={
+        "task.adjust": {"adjustment": "今晚仅检查。"},
+        "task.status": {"query_kind": "status"},
+        "task.cancel": {},
+    }[operation])
     params = voice_final("failure-adjust", "设备核查今晚只做检查。")
     result = await s.registry.handle_unified_submit(params=params, request_id="failure-adjust", session_id="session-1", channel_id="web")
     assert result.ok, result.payload
-    expected = "服务器已拒绝这次操作，没有执行该请求。" if cause == "CONFLICT" else "服务器尚未确认这次操作的结果，不能确定是否生效。"
-    assert spoken == [expected]
+    assert len(fault_calls) == 1
+    # The existing query adapter reports failed queries as UNAVAILABLE; mutation
+    # receipts retain their rejection/unknown disposition. Neither grants identity.
+    expected = "服务器已拒绝这次操作，没有执行该请求。" if cause == "CONFLICT" and operation != "task.status" else "服务器尚未确认这次操作的结果，不能确定是否生效。"
+    if operation != "task.cancel":
+        assert spoken == [expected]
+    measured = [r for r in records if r["milestone"] == module.L0Milestone.COMMITTED_SUBMIT_ACCEPTED]
+    assert len(measured) == 1
+    assert measured[0]["binding"].task_id is None
+    assert measured[0]["binding"].attempt_id is None
+    if cause == "CONFLICT":
+        assert core.store.get_task(task_id, _scope()) == before
     events = core.store.events(task_id, _scope())
     assert len([event for event in events if event.event_type == "task.adjust_requested"]) == (0 if cause == "CONFLICT" else 1)
     replay = await s.registry.handle_unified_submit(params=params, request_id="failure-adjust", session_id="session-1", channel_id="web")
-    assert replay.payload == result.payload and spoken == [expected]
+    assert replay.payload == result.payload
+    assert len(fault_calls) == 1
+    if operation != "task.cancel":
+        assert spoken == [expected]
     assert core.store.events(task_id, _scope()) == events
     assert not s.harness.executor.adjustments and not s.harness.executor.cancels
-    assert s.manager.agent.calls == 0
+    assert s.manager.agent.calls == (1 if operation == "task.cancel" else 0)
+    assert all(not execution.allow_tools for execution in s.manager.agent.executions)
 
 
 @pytest.mark.asyncio
@@ -1486,10 +1514,15 @@ async def test_frozen_semantics_survive_registry_rebuild_and_changed_task_set(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["task.status", "task.adjust", "task.cancel"])
-@pytest.mark.parametrize("measurement_available", [True, False])
+@pytest.mark.parametrize("operation,measurement_available,receipt_shape", [
+    (operation, available, "canonical")
+    for operation in ("task.status", "task.adjust", "task.cancel")
+    for available in (True, False)
+] + [(operation, True, "different-attempt")
+     for operation in ("task.status", "task.adjust", "task.cancel")]
+  + [("task.adjust", True, "malformed")])
 async def test_unified_task_measurement_keeps_exact_receipt_and_admission_clock(
-    semantic_runtime, monkeypatch, operation, measurement_available
+    semantic_runtime, monkeypatch, operation, measurement_available, receipt_shape
 ):
     import jiuwenswarm.channels.live_voice.product_composition_registry as module
 
@@ -1517,12 +1550,33 @@ async def test_unified_task_measurement_keeps_exact_receipt_and_admission_clock(
         target=task_id,
         reference=next(iter(data["context"]["pending"]), None),
     )
-    records, handler_times = [], []
+    records, handler_times, snapshots = [], [], []
+    if operation == "task.status" and receipt_shape == "different-attempt":
+        read_snapshot = s.harness.composition.read_task_control_snapshot
+        async def later_snapshot(**kwargs):
+            facts = await read_snapshot(**kwargs)
+            snapshots.append(facts)
+            # Controlled post-query authority projection, not a real Store retry.
+            # Distinct from both initial selection and handler receipt identity.
+            return {**facts, "attempt_id": "controlled-current-attempt"}
+        monkeypatch.setattr(s.harness.composition, "read_task_control_snapshot", later_snapshot)
     original = s.harness.composition.handle_production_resolution
 
     async def observed_handler(**kwargs):
         handler_times.append(time.monotonic() * 1000)
-        return await original(**kwargs)
+        result = await original(**kwargs)
+        assert result.ok, result.payload
+        if receipt_shape == "canonical":
+            return result
+        payload = dict(result.payload["result"])
+        if receipt_shape == "malformed":
+            payload.pop("adjustment_id")
+        elif operation == "task.status":
+            payload["task"] = {**payload["task"], "attempt_id": "controlled-returned-attempt"}
+            payload["attempt"] = {**payload["attempt"], "attempt_id": "controlled-returned-attempt"}
+        else:
+            payload["attempt_id"] = "controlled-returned-attempt"
+        return replace(result, payload={**result.payload, "result": payload})
 
     monkeypatch.setattr(
         s.harness.composition, "handle_production_resolution", observed_handler
@@ -1546,19 +1600,38 @@ async def test_unified_task_measurement_keeps_exact_receipt_and_admission_clock(
         session_id="session-1",
         channel_id="web",
     )
-    assert result.ok, result.payload
+    invalid_adjustment = operation == "task.adjust" and receipt_shape != "canonical"
+    if invalid_adjustment:
+        assert not result.ok, result.payload
+        assert result.payload["error"]["reason"] == "SEMANTIC_CONTROL_RESULT_INVALID"
+        assert s.manager.agent.calls == 0
+    else:
+        assert result.ok, result.payload
+    assert len(handler_times) == 1
     commit_records = [
         r
         for r in records
         if r["milestone"] == module.L0Milestone.COMMITTED_SUBMIT_ACCEPTED
     ]
-    assert len(commit_records) == (1 if measurement_available else 0)
-    if measurement_available:
+    assert len(commit_records) == (1 if measurement_available and not invalid_adjustment else 0)
+    if measurement_available and not invalid_adjustment:
         record = commit_records[0]
         assert record["binding"].task_id == task_id
-        assert record["binding"].attempt_id == task.attempt_id
+        # Status is presented from the subsequent authoritative snapshot;
+        # cancellation is measured from its immutable returned receipt.
+        expected_attempt = (
+            "controlled-returned-attempt"
+            if operation == "task.cancel" and receipt_shape == "different-attempt"
+            else "controlled-current-attempt"
+            if operation == "task.status" and receipt_shape == "different-attempt"
+            else task.attempt_id
+        )
+        assert record["binding"].attempt_id == expected_attempt
         assert record["monotonic_ms"] <= handler_times[0]
         assert record["observed_at"] is not None and record["duration_ms"] >= 0
+    if operation == "task.status" and receipt_shape == "different-attempt":
+        assert len(snapshots) == 1
+        assert snapshots[0]["attempt_id"] == task.attempt_id
     current = core.store.get_task(task_id, _scope())
     assert current.attempt_id == task.attempt_id
     if operation == "task.status":
@@ -1570,6 +1643,16 @@ async def test_unified_task_measurement_keeps_exact_receipt_and_admission_clock(
             event.event_type == "task.adjust_requested"
             for event in core.store.events(task_id, _scope(), after_seq=-1)
         )
+
+    events = core.store.events(task_id, _scope())
+    replay = await s.registry.handle_unified_submit(
+        params=voice_final("l0-status", "How is the inventory task progressing?"),
+        request_id="l0-replay", session_id="session-1", channel_id="web",
+    )
+    assert replay.payload == {**result.payload, "request_id": "l0-replay"}
+    assert len(handler_times) == 1
+    assert core.store.events(task_id, _scope()) == events
+    assert not s.harness.executor.adjustments and not s.harness.executor.cancels
 
 
 @pytest.mark.parametrize(

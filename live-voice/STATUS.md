@@ -116,8 +116,10 @@ settlement. The complete deep-integration goal remains open.
 Current unified-input joint tests cover real SQLite Task creation/confirmation,
 replay/conflict, project rejection, Voice close followed by completion, and
 running cancellation while the original dialogue completes normally. These use
-controlled model/authority/lower-Agent dependencies. The broader Host/Voice
-registry audit remains open. Revoked task.create feedback
+controlled model/authority/lower-Agent dependencies. The code-level Host/Voice
+review now traces the retained lifecycle and state owners; current receipt identity
+checks replace obsolete L0 oracles. This does not close presentation recovery or
+claim a new physical product acceptance. Revoked task.create feedback
 and ACK history have current replacement evidence. P2 create/status recovery
 restores acceptance without restoring already-generated Agent presentation after
 Registry/runtime reconstruction; the proposal to persist unheard output awaits

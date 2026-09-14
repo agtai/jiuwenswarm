@@ -45,7 +45,7 @@
 | 项目受理历史消重 09-14 | JiuwenSwarm 应用/共享 | 40,187 | 48,370 | 150,885 |
 | 项目受理历史消重 09-14 | AgentCore 新增 | 33,812 | 33,872 | 34,017 |
 
-本轮三部分净增量合计从 **195,680** 降至 **195,295**，减少 **385** 行：
+首批 checkpoint／旧实现清理冻结阶段，三部分净增量合计从 **195,680** 降至 **195,295**，减少 **385** 行：
 Voice −99、Host −377、SDK +91。SDK 的 34,017 行受影响文件中包含既有
 `agent_callback_manager.py` 的 145 行基线，不能把整个文件算成新增；该原生文件
 本轮净增 60 行。新增文件行数和净增量因此不再相等。
@@ -178,8 +178,8 @@ Voice **112,825**、Host **48,370**、SDK **33,872**。本批生产净−259行�
 移交宿主，不计为已消灭的重复算法；真正移除的是Voice独立生命周期入口和第二份
 React任务快照。宿主store复用原有实现，没有新Task状态机/持久化/执行器。
 验收证明无Voice消费者仍可读取、轮询及保留原RPC，而非以目录变化证明融合。
-见[当前逐文件清单](../evidence/DEEP_FRONTEND_HOST_20260914.json)和
-[当前模块分桶](../evidence/DEEP_FRONTEND_HOST_MODULES_20260914.json)。
+见[前端宿主收敛阶段逐文件清单](../evidence/DEEP_FRONTEND_HOST_20260914.json)和
+[前端宿主收敛阶段模块分桶](../evidence/DEEP_FRONTEND_HOST_MODULES_20260914.json)。
 
 - [Task 阶段逐文件清单](../evidence/TASK_UNIFIED_CODE_COUNTS_20260913.json)：Task 阶段已冻结。
 - [Work 阶段逐文件清单](../evidence/WORK_UNIFIED_CODE_COUNTS_20260913.json)：包含每文件基线/当前、增删与 SHA-256。
@@ -203,10 +203,10 @@ python scripts/live_voice/module_code_counts.py live-voice/evidence/WORK_UNIFIED
 | 合计 | **−385** | 以上为本轮相对起始提交变化，不是相对官方基线总量。 |
 
 大量下沉代码仍然保留。[迁移来源逐项对照](../evidence/DEEP_INTEGRATION_ORIGINS_20260913.json)
-按原始提交文件与当前SDK文件逐行精确匹配（`SequenceMatcher(autojunk=False)`）：
-project_executor 当前6,209行中5,789行匹配原Host来源；Task Store当前13,898行中
-13,140行匹配；PersistentTaskCore当前1,562行中1,497行匹配；WorkRuntime当前860行中
-686行匹配。这是文本沿袭证据，不能解释为整份文件新增或逐行语义等价。
+在首批清理冻结阶段，按原始提交文件与该阶段 SDK 文件逐行精确匹配（`SequenceMatcher(autojunk=False)`）：
+该阶段 project_executor 的6,209行中5,789行匹配原Host来源；Task Store 的13,898行中
+13,140行匹配；PersistentTaskCore 的1,562行中1,497行匹配；WorkRuntime 的860行中
+686行匹配。这些不是 .9 当前文件行数；当前总量和逐文件证据见页首。这是文本沿袭证据，不能解释为整份文件新增或逐行语义等价。
 
 Controller/Team管理未被机械合入：它们缺少本应用要求的outbox/attempt/effect事务、
 Work revision/CAS/UNKNOWN及取消实际结算保证。保留这些扩展的依据是具体语义，
@@ -216,9 +216,9 @@ Work revision/CAS/UNKNOWN及取消实际结算保证。保留这些扩展的依�
 
 - [实施前](../evidence/DEEP_INTEGRATION_BEFORE_20260913.json)
 - [实施后](../evidence/DEEP_INTEGRATION_AFTER_20260913.json)
-- [当前模块分桶](../evidence/DEEP_INTEGRATION_MODULES_20260913.json)
+- [首批清理阶段模块分桶](../evidence/DEEP_INTEGRATION_MODULES_20260913.json)
 - [09-14 Work宿主执行逐文件清单](../evidence/DEEP_WORK_HOST_20260914.json)
-- [09-14 最新模块分桶](../evidence/DEEP_WORK_HOST_MODULES_20260914.json)
+- [09-14 Work 宿主执行阶段模块分桶](../evidence/DEEP_WORK_HOST_MODULES_20260914.json)
 - [Registry消重后的逐文件清单](../evidence/DEEP_REGISTRY_20260914.json)
 - [Registry消重后的最新模块分桶](../evidence/DEEP_REGISTRY_MODULES_20260914.json)
 

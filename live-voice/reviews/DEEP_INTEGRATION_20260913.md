@@ -99,17 +99,20 @@ unplanned writes. Independent review covers this new coherent boundary. This is
 an enhancement to the current native callback owner, not a new scheduler or
 callback framework. Ordinary registered callbacks retain their error policy.
 
-## Final code audit details and retained semantic boundaries
+## Current code audit details and retained semantic boundaries
+
+Lifecycle rows below reflect the paired .9 implementation. Earlier experiments
+and numerical stages in the following log retain their original evidence scope.
 
 ### Task / Work / native management
 
 | Concern | Actual entry and authority | Decision and evidence boundary |
 |---|---|---|
 | Task creation / adjustment / cancellation | PersistentTaskCore command admission → SqliteTaskStore transaction → dispatch outbox → ProjectCodeExecutorAdapter | Retain one durable application Task authority. Controller `TaskManager.get_state` serializes its in-memory indexes; adding a Controller Task would require a second state synchronization. There is no native equivalent of the existing command + attempt + outbox + effect transaction. |
-| Attempts / adjustment adoption | project_executor `_run` → Host `process_background_code_task_stream` → existing Code adapter and SDK Agent; native scoped TaskCheckpointRail adopts at model boundary | Actual Agent loop reused. Removed Host dynamic callback registry; native callback manager enhanced, no new Agent loop or task scheduler. Keep request/attempt root, capability selection and immutable execution context fences. |
-| Task execution lifetime | ProjectExecutionBinding.execution_agent/project_executor, attempt AgentManager lease, SDK worktree cleanup | Removed LegacyProjectTaskService protocol/constructor carrier and Host legacy startup/shutdown branches. This is a paired development API change in .4; old scheduler fixtures remain only in tests. |
+| Attempts / adjustment adoption | project_executor `_run_attempt` → Host `process_background_code_task_stream` → existing Code adapter and SDK Agent; native scoped TaskCheckpointRail adopts at model boundary | Actual Agent loop reused. Removed Host dynamic callback registry; native callback manager enhanced, no new Agent loop or task scheduler. Keep request/attempt root, capability selection and immutable execution context fences. |
+| Task execution lifetime | AgentServer → P3 factory → AgentRuntime.ensure_background_task_group → existing Runner root → common TaskManager.create_task → project_executor._run_attempt | Native Task owns the actual attempt coroutine and lifecycle events; synchronous on_scheduled transfers ownership and finalizer covers failure before coroutine entry. Removed legacy service carrier and separate Host lifecycle branches. Journal/effect transactions and physical thread cleanup remain domain guarantees. Caller cancellation cannot cancel accepted background work; native interruption is not user cancellation. Standalone consumers use the same algorithm through the compatible asyncio mode, not a second executor. |
 | Team assignment / dependencies | `agent_teams/tools/database/task_dao.py` start_task/claim_task/cancel_task | Partial overlap. Native DAO CAS owns Team member assignment, pending status and dependency release, not work revisions or application effect attempts. No current dependency/Team assignment requirement; do not create unrelated Team rows or duplicate status. |
-| Work creation / query / revision / cancellation | HostWorkService.work_runtime → SDK WorkRuntime.start/update/query/cancel → SqliteWorkStore.save | Keep SDK Work authority and Host-scoped service. Revisions/CAS, UNKNOWN/no replay, cancellation settlement and occupied capacity are necessary. Removed router's unreachable generationless/direct-facade and standalone-close alternatives. |
+| Work creation / query / revision / cancellation | HostWorkService → SDK WorkRuntime → common TaskManager.create_task under the Host Runner root; SqliteWorkStore.save owns durable revisions | Native Task runs the actual Work orchestration. WorkStore retains revision/CAS, UNKNOWN/no replay and physical settlement; native completion cannot replace a durable business result. Removed Voice runtime/Bridge allocation, unreachable generationless fallback and standalone Host-close alternatives. Background ownership survives Voice close. Standalone SDK mode uses the same Work algorithm without requiring a Host Runner. |
 | Scheduling distinction | Controller TaskScheduler.execute_task/cancel_task; Harness NativeHarness.launch_async_tool → AsyncToolRuntime | Controller publishes session task events and marks CANCELED before physical coroutine settlement; Harness completion is injected best-effort into the owning model round. Neither is a durable Work outcome or heard-audio fact. Keep distinct execution modes, not a short/long split. Work does not automatically create a formal Task card. |
 | Work Agent producer | HostWorkService.get_executor → HostWorkAgentExecutor → existing JiuWenSwarmRoundHarness → RuntimeFormalAgentFacade → AgentRuntime.stream_owned → RuntimeSessionCoordinator | 09-14 removes Work's AgentConversationRuntime/ConversationRuntimeLoop/Bridge allocation. Host admission, Agent pin and generation remain. SDK WorkRuntime owns durable state; Harness owns actual producer, exact cancel and cleanup. The result collector requires one nonempty final and COMPLETED; cancellation with failed cleanup remains UNKNOWN. This closes this execution seam, not all management overlap. |
 | Recovery / results | SDK durability readers/effects/checkpoint, TaskResultReader; Work restored snapshots | Retain exact-byte/index/file-application journal and manifest verification. Checkpointer KV serialization and default DB engine do not replace multi-file effects + rollback/unknown guarantees. Real temporary Git/SQLite tests cover existing oracles; no irreversible schema migration performed. |
@@ -1953,3 +1956,67 @@ This proves detection of broken replay, not that wrong-target execution occurred
 the independent journal guard still prevented it. An unmodified fresh-process
 control passed (10.85s). Production files were not patched. Ruff and scoped diff
 checks pass; production accounting remains unchanged.
+
+#### Failed formal receipt measurement correspondence (Tier 1, test-only)
+
+Expanded the existing adjustment failure test into
+`test_failed_task_receipt_preserves_truth_and_has_no_attempt_measurement`.
+The original CONFLICT/TIMEOUT/INTERNAL adjustment cases remain; status and cancel
+CONFLICT cases exercise the actual Registry/confirmation/Core adapter over real
+SQLite, with controlled Core failure injection and lower Agent. Each asserts the
+fault was reached once, replay does not invoke it again, committed-input measurement
+has no Task/attempt identity, rejected state is unchanged, and no adjustment or
+cancellation reaches the executor. Unknown adjustment cases deliberately commit
+once before returning failure and preserve that event on replay. Tool-free cancel
+feedback is permitted by the existing Agent-owned presentation contract.
+
+Initial run: four passed, status failed because the injection patched execute
+while queries actually use Core.query. After correcting that entry, four passed
+and status exposed a fixture expectation mismatch: the existing query adapter
+wraps errors as UNAVAILABLE, while mutations retain their error disposition.
+The test records this existing difference without changing production error
+semantics. Final five cases pass (12.15s); Ruff and diff checks pass. This does
+not prove Provider/audio behavior or close all three historical L0 oracles.
+Those tests remain until advanced-attempt and malformed-return obligations are
+fully mapped. No production line change or additional old-test deletion.
+
+Exact test source SHA-256: `6974f49365d230aa92873e779b0a966c6cd6ba8fe811dbe6d7b9ca85ff0d6969`.
+Sanitized-result provenance (raw logs remain in the local temporary directory):
+
+- livevoice-failed-receipt-measurement.log: `20eaaf983d31647a88e498de88c6a1d17e4490075b7f76f92fe17c4b079d9a30`
+- livevoice-failed-receipt-measurement-v2.log: `b2887bfc78a0abdab3137029b19a347fcc9830fb37b843809d5cedcaf622e79f`
+- livevoice-failed-receipt-measurement-final.log: `08841b8deaf88a4bcf0c4f587deb99442f9590ba6ad4972879252fb9ffd59a5a`
+
+#### Receipt identity wiring closure (Tier 1, test-only)
+
+The ten current Registry measurement cases retain six canonical/measurement-off
+scenarios and add changed status/cancel/adjust receipts plus a malformed adjustment.
+Real Core runs first; only its returned receipt is controlled. Cancel measurement
+uses the returned attempt. Adjustment with a different attempt or missing ID is
+rejected with SEMANTIC_CONTROL_RESULT_INVALID: no Agent or misleading committed
+measurement, and retry preserves the already-accepted operation without dispatching
+it twice. The test distinguishes persisted acceptance from a successful response.
+
+Independent review identified an initially weak status assertion: initial selection
+and final Store snapshot had the same attempt. The corrected test uses distinct
+initial selection, returned receipt and controlled post-read snapshot identities,
+asserting the final measurement follows the latter. This is actual Registry wiring
+over a real Store read with a controlled projection, not evidence of real retry.
+A test-process mutation omitting the fresh assignment fails at returned/current
+identity mismatch; normal control passes. The cancel stale-identity mutation also
+fails at its intended assertion, and normal control passes. No repository production
+file was edited for either mutation.
+
+The three old L0 tests are now removed after the replacement checks. The original
+status/cancel identity obligations are preserved; the old permissive adjustment
+receipt expectation is superseded by current exact receipt/fresh-state validation.
+Final affected discovery:337 cases, not337 passes. Both presentation-crash oracles
+and their separate WIP remain. [Exact checks, source/log hashes and limits](../evidence/DEEP_RECEIPT_ORACLE_MAPPING_20260914.json).
+
+The complete-goal read-only review also verified actual TaskManager.create_task
+entries for formal attempts and Work. Current audit lifecycle rows now state this
+reuse directly; accounting labels earlier counts and source-matching results as
+frozen stages. Domain transaction/UNKNOWN/physical-cleanup and played-ACK facts
+still have separate semantic reasons. No blanket claim that all Controller/Team
+management is unified is made. P2 presentation persistence remains the outstanding
+user scope decision; this review does not expand physical product acceptance.

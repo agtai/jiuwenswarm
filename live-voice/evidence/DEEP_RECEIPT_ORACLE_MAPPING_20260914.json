@@ -1,0 +1,44 @@
+{
+  "parent_host": "9a3f93b28b7b62bde865220d286e21ac59fc44cc",
+  "sdk_head": "7c81d886d15b87a5ba9b2d899cbd5259fb7d5e5e",
+  "scope": "Test-only current formal receipt measurement wiring; documentation correspondence. No production behavior change.",
+  "source_sha256": {
+    "tests/unit_tests/live_voice/test_semantic_registry.py": "4787a25f4b9e4915b3d2e26e135efa43bff5af7ac261b433822a4feb4b3a93ce",
+    "tests/unit_tests/live_voice/test_product_composition_registry.py": "5fadf6382b6e0821249fe1c8bbbc85130c122ae7e989a2b4131b9862737a0052"
+  },
+  "checks": {
+    "failure_receipts": "5 passed in 12.15s",
+    "receipt_wiring": "10 passed in 28.98s before the sharper distinct fresh-snapshot case",
+    "final_status_case": "1 passed in 9.99s; after mutation fresh-process control 1 passed in 10.74s; overlaps ten",
+    "cancel_mutation": "1 expected failure in 6.11s at stale identity; fresh-process control 1 passed in 9.93s",
+    "status_mutation": "1 expected failure in 4.93s at controlled-returned-attempt != controlled-current-attempt",
+    "discovery": "337 collected in 8.58s after removing three old tests, not a whole-suite pass",
+    "ruff": "Both changed test files passed",
+    "review": "Read-only review approved cancel/adjust replacement and identified initially indistinguishable fresh status identity. Corrected with three distinct identities and mutation/control; no new production issue established."
+  },
+  "removed_tests": [
+    "test_unified_adjust_l0_binding_uses_only_canonical_returned_attempt",
+    "test_unified_status_l0_binding_uses_only_successful_returned_attempt",
+    "test_unified_cancel_l0_binding_uses_only_successful_returned_attempt"
+  ],
+  "logs_sha256": {
+    "livevoice-failed-receipt-measurement.log": "20eaaf983d31647a88e498de88c6a1d17e4490075b7f76f92fe17c4b079d9a30",
+    "livevoice-failed-receipt-measurement-v2.log": "b2887bfc78a0abdab3137029b19a347fcc9830fb37b843809d5cedcaf622e79f",
+    "livevoice-failed-receipt-measurement-final.log": "08841b8deaf88a4bcf0c4f587deb99442f9590ba6ad4972879252fb9ffd59a5a",
+    "livevoice-receipt-identity-wiring.log": "508890dc43e648243ea97d952a7c8e9576e9aac8f2fdc35a4e014b2abb694ac0",
+    "livevoice-receipt-identity-wiring-final.log": "3e69e44f948acc993ba7f72a413ccf4cfd97c0631662a6b0501eed3e5213f63c",
+    "livevoice-receipt-stale-identity-mutation.log": "ce0e39eecd23f31dbcb0344af217cd1b0af05a75df042524684f8a01458d5f04",
+    "livevoice-receipt-stale-identity-control.log": "0d5de2de3831d1c4ed24a27bc598adf58a8b393232169344d1cec70c4eccfdf1",
+    "livevoice-status-fresh-identity.log": "c6cabb13a34046be7f20bd982d41641ed52c894393a53e5ab8e38b1767535542",
+    "livevoice-status-fresh-identity-mutation.log": "4292cc448489f11b5df0239824140ab91b72f5adca0e5dc516954fd5fb3dd429",
+    "livevoice-status-fresh-identity-control.log": "653d939544ecf9dcb85ddbf4d6588aebfbf75bda922b795638855aeffb020ea4",
+    "livevoice-final-l0-discovery.log": "703778ff713e57097b029771d15f54b9563cf4e735137c26a0cc2e2cdfb50595"
+  },
+  "limits": [
+    "Real Registry/Core/SQLite with controlled model, lower Agent and post-call receipt/snapshot changes. Not proof of an actual attempt retry.",
+    "Initial failed runs were fixture errors: wrong query injection entry; existing query error translation; comparison of different RPC request IDs. No production fix.",
+    "P2 presentation recovery WIP excluded; storage decision pending.",
+    "No Provider/audio, OS restart or new packaging evidence.",
+    "Production delta zero; test deletion excluded from ownership counts."
+  ]
+}
