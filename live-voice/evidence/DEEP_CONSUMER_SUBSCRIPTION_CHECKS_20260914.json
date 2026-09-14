@@ -1,0 +1,62 @@
+{
+  "host_baseline": "7a36ac77c9ae1165e896c23b3400b76d098ea965",
+  "sdk_baseline": "cbe90f6233ca4f9dd6e60805a8db86b64941409b",
+  "source_sha256": {
+    "host": {
+      "jiuwenswarm/server/runtime/presentation/task_progress_return.py": "fd2b53ff13b8551345a8ebf03a647d13da326a15a57f6605d6e10f2aad98c683",
+      "tests/unit_tests/live_voice/test_task_progress_return.py": "c19cf1b4439ae926e6f9f00dd0dfc3bf108ded590d91ae59a8a04e7be16adee3",
+      "pyproject.toml": "ad38319eac8730f22cb6d98cb3b51499af4d76c3ffcd1bbc87201a5801e02c6f"
+    },
+    "sdk": {
+      "openjiuwen/core/application/tasks/task_event_subscription.py": "70b9d0f88ade5bbe261538e8dbb3f77d4afde513e9a74c8c27cfc72de9da186b",
+      "pyproject.toml": "5c42c8cd01543b2c7c3b5a3895c12a4558056eaf516f0641591c408b2a6a9868"
+    }
+  },
+  "validation": {
+    "host_before": {
+      "passed": 59,
+      "seconds": 173.46,
+      "exit_code": 0
+    },
+    "new_api_before": "Two Host text/voice scenarios passed; two SDK variants failed with unsupported presentation_class",
+    "host_after_initial_merge": {
+      "passed": 63,
+      "seconds": 179.3,
+      "exit_code": 0,
+      "boundary": "Before the two close-intent refinements; affected paths subsequently rechecked in final focused cases"
+    },
+    "close_findings_red": "Initial start returned True after close; later next_event delivered after close. Both deterministic event-source validation hooks reproduced reviewer findings.",
+    "host_final_focused": {
+      "passed": 10,
+      "seconds": 5.12,
+      "exit_code": 0,
+      "selection": "native_management or close_after_validation or authority_rejection",
+      "file": "tests/unit_tests/live_voice/test_task_progress_return.py"
+    },
+    "sdk_final_existing_modes": {
+      "passed": 68,
+      "seconds": 2.66,
+      "exit_code": 0,
+      "file": "tests/integration_tests/application_tasks/test_task_event_subscription.py"
+    },
+    "review": "Independent complete diff review; initial and page-acceptance close windows fixed and independently re-reviewed; no remaining blocker"
+  },
+  "production_net_change": {
+    "voice": 0,
+    "host": -356,
+    "sdk": 228,
+    "combined": -128
+  },
+  "current_net_added": 194348,
+  "initial_net_added": 195680,
+  "retention": "333-line Host class removed; page/cursor validation and baseline accessor retained as SDK mode code. Queue/auth/lifecycle/snapshot reuse existing TaskEventSubscription. No Task/Work framework, new executor, or database schema.",
+  "compatibility": "SDK .6 additive presentation_class mode; Host pins .6. Existing SDK defaults unchanged. Consumer demand polling/idempotent start/cancel-one-wait retained.",
+  "limits": [
+    "Unit/integration evidence does not claim physical Provider/audio or browser UI",
+    "Full Task/Work/native management goal remains PARTIAL",
+    "Large Host regression ran before final close refinements; ten affected real SQLite tests cover final changes",
+    "SDK unit-path invocation was corrected to actual integration_tests path; no zero-test command counted as validation"
+  ],
+  "sdk_commit": "76c614a1886d7affb98b8c53e97de9e81abdb93a",
+  "paired_installation": "DEEP_CONSUMER_SUBSCRIPTION_PAIR_20260914.json"
+}

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import threading
 from collections import deque
+from contextlib import closing
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import cast
@@ -2868,3 +2870,157 @@ async def test_sink_failure_settles_without_later_delivery() -> None:
     assert calls == 1
     assert bridge.snapshot().text_events == 0
     assert bridge.snapshot().reason_id is TaskProgressReturnReason.TEXT_SINK_FAILED
+
+
+def _consumer_database_dump(store: SqliteTaskStore) -> tuple[str, ...]:
+    with closing(sqlite3.connect(store.database_path)) as connection:
+        return tuple(connection.iterdump())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("presentation_class", ["text", "voice"])
+@pytest.mark.parametrize("use_sdk", [False, True])
+async def test_consumer_reader_native_management_preserves_demand_cancel_and_detach(
+    tmp_path: Path, presentation_class: str, use_sdk: bool,
+) -> None:
+    store, task_id, _ = _authority_task(tmp_path)
+    _advance_authority_task_running(store, task_id)
+    _ack_authority_task_head(store, task_id, presentation_class=presentation_class)
+    scope = _scope(session_id="session-native-consumer")
+    common = dict(
+        authorization=_grant(task_id=task_id, scope=scope), scope=scope,
+        task_id=task_id, queue_capacity=4, validation_capacity=8,
+        poll_interval=0.001, clock=lambda: NOW, consumer_scope=True,
+        presentation_class=presentation_class,
+    )
+    reader = (
+        TaskEventSubscription(source=store, enabled=True, authority_atomic_replay=True, **common)
+        if use_sdk else TaskEventAuthorityProgressSource(store=store, **common)
+    )
+    subscription = reader if use_sdk else reader.subscription
+    before = _consumer_database_dump(store)
+    try:
+        assert await reader.start()
+        assert await reader.start()  # existing consumer idempotent-start contract
+        assert subscription.snapshot().source_reads == 1
+        assert not subscription.snapshot().worker_pending
+        await asyncio.sleep(0.01)
+        assert subscription.snapshot().source_reads == 1  # no autonomous polling
+        pending = asyncio.create_task(reader.next_event())
+        for _ in range(500):
+            if subscription.snapshot().source_reads > 1:
+                break
+            await asyncio.sleep(0.001)
+        assert subscription.snapshot().source_reads > 1
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        assert subscription.snapshot().state.value == "active"
+        assert _consumer_database_dump(store) == before
+        _append_authority_adjustments(store, task_id, count=1)
+        after_business_write = _consumer_database_dump(store)
+        event = await asyncio.wait_for(reader.next_event(), 1)
+        assert event.seq == 4
+        assert subscription.consumer_cursor_baseline().watermark == 3
+        await reader.close()
+        with pytest.raises(StopAsyncIteration):
+            await reader.next_event()
+        assert _consumer_database_dump(store) == after_business_write
+    finally:
+        await reader.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("initial", [True, False])
+async def test_consumer_native_close_after_validation_prevents_queue_allocation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, initial: bool,
+) -> None:
+    store, task_id, _ = _authority_task(tmp_path)
+    reader = TaskEventSubscription(
+        source=store, authorization=_grant(task_id=task_id), scope=_scope(),
+        task_id=task_id, enabled=True, authority_atomic_replay=True,
+        consumer_scope=True, presentation_class="text", clock=lambda: NOW,
+    )
+    if not initial:
+        assert await reader.start()
+        assert (await reader.next_event()).seq == 0
+        _advance_authority_task_running(store, task_id)
+    original = reader._validate_consumer_page
+    errors: list[BaseException] = []
+
+    def request_close() -> None:
+        try:
+            asyncio.run(reader.close())
+        except BaseException as error:
+            errors.append(error)
+
+    def validate_then_close(page, *, initial):
+        original(page, initial=initial)
+        closer = threading.Thread(target=request_close)
+        closer.start()
+        closer.join(timeout=2)
+        assert not closer.is_alive()
+
+    monkeypatch.setattr(reader, "_validate_consumer_page", validate_then_close)
+    before = _consumer_database_dump(store)
+    try:
+        if initial:
+            assert await reader.start() is False
+        else:
+            with pytest.raises(StopAsyncIteration):
+                await reader.next_event()
+        assert len(errors) == 1
+        assert isinstance(errors[0], FormalTaskViolation)
+        assert errors[0].reason == "TASK_EVENT_SUBSCRIPTION_LOOP_MISMATCH"
+        snapshot = reader.snapshot()
+        assert snapshot.state.value == "closed"
+        assert snapshot.queue_allocated is (not initial)
+        assert snapshot.last_seq == (None if initial else 0)
+        assert snapshot.queued_events == 0
+        with pytest.raises(StopAsyncIteration):
+            await reader.next_event()
+        assert _consumer_database_dump(store) == before
+    finally:
+        await reader.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rejection", ["wrong_project", "before_start", "queued", "after_read"])
+async def test_consumer_native_authority_rejection_has_zero_database_effects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rejection: str,
+) -> None:
+    store, task_id, _ = _authority_task(tmp_path)
+    scope = _scope(project_id="other-project") if rejection == "wrong_project" else _scope()
+    now = AFTER_EXPIRY if rejection == "before_start" else NOW
+    reader = TaskEventSubscription(
+        source=store, authorization=_grant(task_id=task_id, scope=scope), scope=scope,
+        task_id=task_id, enabled=True, authority_atomic_replay=True,
+        consumer_scope=True, presentation_class="text", clock=lambda: now,
+    )
+    before = _consumer_database_dump(store)
+    try:
+        if rejection in {"wrong_project", "before_start"}:
+            with pytest.raises(FormalTaskViolation):
+                await reader.start()
+            assert not reader.snapshot().queue_allocated
+        else:
+            assert await reader.start()
+            if rejection == "queued":
+                now = AFTER_EXPIRY
+            else:
+                assert (await reader.next_event()).seq == 0
+                original = store.consumer_progress_authority_page
+
+                def expire_during_read(*args, **kwargs):
+                    nonlocal now
+                    page = original(*args, **kwargs)
+                    now = AFTER_EXPIRY
+                    return page
+
+                monkeypatch.setattr(store, "consumer_progress_authority_page", expire_during_read)
+            with pytest.raises(FormalTaskViolation):
+                await reader.next_event()
+            assert reader.snapshot().last_seq == 0
+        assert _consumer_database_dump(store) == before
+    finally:
+        await reader.close()

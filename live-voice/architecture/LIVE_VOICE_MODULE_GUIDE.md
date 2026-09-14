@@ -209,5 +209,15 @@ Registry 的当前输入受理由宿主 SqliteUnifiedCommittedInputJournal 的 f
 09-14 恢复订阅对应修复：P3 产品订阅直接使用 SDK TaskEventSubscription，
 按 Store 的 task.recovery_accepted 读取 producer_attempt_id；重试仍读取
 retry_of_attempt_id。真实 SQLite 恢复重开和旧 attempt 拒绝已验证，
-订阅没有数据库写入。Host 持久消费分页与 SDK 完整前缀回放的管理收敛仍未完成。
+订阅没有数据库写入。Host 持久消费分页已在后续 `.6` 批次接入同一 SDK 订阅管理器；
+ACK游标验证、按需分页与完整前缀回放仍保留不同交付语义。
 此项未重新核验 Hermes 或多模态外部实现，不改变其既有版本和证据边界。
+
+
+09-14 `.6` 订阅管理实际调用：Host `TaskEventAuthorityProgressSource`
+→ SDK `TaskEventSubscription(presentation_class="text"/"voice")`
+→ 既有 `SqliteTaskStore.consumer_progress_authority_page`。
+普通前缀模式也由同一SDK类管理，Host独立消费者订阅类已删除。
+队列、授权、状态快照和关闭意图共用；分页验证及历史attempt终态区分作为模式保留。
+ACK仍由Host展示/播放事实决定，读取和关闭均不写Task/outbox/消费水位。
+这项仅证明订阅管理收敛，不能推导Controller、Team与Work已全面统一。

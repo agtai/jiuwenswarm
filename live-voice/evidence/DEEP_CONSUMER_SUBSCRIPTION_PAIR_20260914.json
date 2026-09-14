@@ -1,0 +1,47 @@
+{
+  "host": {
+    "tracked_worktree_inputs": 5012,
+    "baseline_commit": "7a36ac77c9ae1165e896c23b3400b76d098ea965"
+  },
+  "sdk": {
+    "tracked_worktree_inputs": 5822,
+    "baseline_commit": "cbe90f6233ca4f9dd6e60805a8db86b64941409b"
+  },
+  "openjiuwen-0.1.17+livevoice.6-py3-none-any.whl": {
+    "sha256": "2a12185d1745096541d1c4ff3f6e6a4337ea188f9588c0d2c9d612b6ab3eefe6"
+  },
+  "workswarm-0.2.5b1-py3-none-any.whl": {
+    "sha256": "7bc4f4a189210360d019e50a23da88b26f5e8cb66ba7ba8d36bce5b9fb4d684a"
+  },
+  "result": "CURRENT_PAIRED_IMPORT_OK",
+  "modules": {
+    "jiuwenswarm.server.runtime.work.service": "jiuwenswarm\\server\\runtime\\work\\service.py",
+    "jiuwenswarm.server.runtime.agent_adapter.runtime_formal": "jiuwenswarm\\server\\runtime\\agent_adapter\\runtime_formal.py",
+    "jiuwenswarm.server.runtime.agent_adapter.jiuwenswarm_round_harness": "jiuwenswarm\\server\\runtime\\agent_adapter\\jiuwenswarm_round_harness.py",
+    "jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition": "jiuwenswarm\\server\\runtime\\formal_tasks\\p3_authenticated_composition.py",
+    "openjiuwen.core.application.tasks": "openjiuwen\\core\\application\\tasks\\__init__.py",
+    "openjiuwen.core.application.tasks.execution_checkpoint": "openjiuwen\\core\\application\\tasks\\execution_checkpoint.py",
+    "openjiuwen.core.single_agent": "openjiuwen\\core\\single_agent\\__init__.py"
+  },
+  "installed_python_files_matched": {
+    "jiuwenswarm": 1016,
+    "openjiuwen": 2409
+  },
+  "sdk_version": "0.1.17+livevoice.6",
+  "host_sdk_requirements": [
+    "openjiuwen==0.1.17+livevoice.6",
+    "openjiuwen==0.1.17+livevoice.6; extra == \"harmony\"",
+    "openjiuwen[postgres,zmq]; extra == \"distribute\"",
+    "openjiuwen[claude]; extra == \"claude\"",
+    "openjiuwen[codex]; extra == \"codex\""
+  ],
+  "scope": "Fresh tracked packaging inputs, no build cache; no-deps target installation uses existing venv third-party dependencies. Isolated Python imports assert all loaded Host/SDK modules come from target. Python package boundary only; no frontend dist, dependency resolution, deployment or Provider acceptance.",
+  "consumer_real_sqlite_cases": 10,
+  "test_sha256": "c19cf1b4439ae926e6f9f00dd0dfc3bf108ded590d91ae59a8a04e7be16adee3",
+  "final_source_sha256": {
+    "jiuwenswarm/server/runtime/presentation/task_progress_return.py": "fd2b53ff13b8551345a8ebf03a647d13da326a15a57f6605d6e10f2aad98c683",
+    "openjiuwen/core/application/tasks/task_event_subscription.py": "70b9d0f88ade5bbe261538e8dbb3f77d4afde513e9a74c8c27cfc72de9da186b"
+  },
+  "sdk_commit": "76c614a1886d7affb98b8c53e97de9e81abdb93a",
+  "build_source": "Tracked working-tree bytes over named baseline commits; final modified-source hashes are checked against the installed pair."
+}

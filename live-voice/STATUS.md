@@ -151,6 +151,16 @@ matching metadata. [Exact-source evidence](evidence/DEEP_CURRENT_PAIR_20260914.j
 records the pair and wheel hashes. Existing third-party dependencies are reused;
 frontend distribution, fresh dependency resolution and deployment are excluded.
 
+The subsequent `.6` subscription batch removes Host's independent durable
+consumer reader and reuses SDK TaskEventSubscription queue, authorization,
+state snapshot and close management. Store consumer pages, ACK watermarks and
+demand polling remain distinct from full-prefix/live-only modes; no Task or
+consumer-state writes occur on reads or close. Existing large-page, retry,
+recovery and delayed-ACK tests pass, with focused cross-thread close and grant
+expiry checks. This closes that subscription-management seam, not the broader
+Task/Work/Controller/Team convergence. The current paired installation evidence
+is [the `.6` consumer pair](evidence/DEEP_CONSUMER_SUBSCRIPTION_PAIR_20260914.json).
+
 The frozen-input recovery child now keeps server generation/context identity in
 the existing Host journal, independently of model records. P3 and unified input
 share a persisted sequence; conflicting unified input cannot advance it. Current

@@ -23,12 +23,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import threading
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Protocol, cast
+from typing import Protocol
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
@@ -49,8 +48,6 @@ from openjiuwen.core.application.tasks.formal_task_models import (
     FormalTaskViolation,
     PersistentTaskEvent,
     TaskAuthorizationGrant,
-    TaskEventConsumerAuthorityPage,
-    TaskEventConsumerCursorBaseline,
     utc_now,
 )
 from jiuwenswarm.server.runtime.presentation.progress_notification_arbiter import (
@@ -68,8 +65,6 @@ from jiuwenswarm.server.runtime.presentation.progress_notification_arbiter impor
 )
 from openjiuwen.core.application.tasks.task_event_subscription import (
     TaskEventSubscription,
-    TaskEventSubscriptionSnapshot,
-    TaskEventSubscriptionState,
 )
 from openjiuwen.core.application.tasks.task_store import SqliteTaskStore
 
@@ -307,341 +302,6 @@ class PreparedTaskProgressSource(Protocol):
     async def close(self) -> None: ...
 
 
-class _ConsumerTaskEventSubscription:
-    """Bounded Store-page reader resumed from one durable presentation cursor."""
-
-    def __init__(
-        self,
-        *,
-        store: SqliteTaskStore,
-        authorization: TaskAuthorizationGrant,
-        scope: ScopeRef,
-        task_id: str,
-        presentation_class: str,
-        queue_capacity: int,
-        validation_capacity: int,
-        poll_interval: float,
-        clock: Callable[[], str],
-    ) -> None:
-        self._store = store
-        self._authorization = authorization
-        self._scope = scope
-        self._task_id = task_id
-        self._presentation_class = presentation_class
-        self._queue_capacity = queue_capacity
-        self._validation_capacity = validation_capacity
-        self._poll_interval = poll_interval
-        self._clock = clock
-        self._state = TaskEventSubscriptionState.NEW
-        self._queue: deque[PersistentTaskEvent] = deque()
-        self._seen_ids: dict[str, bytes] = {}
-        self._seen_sequences: dict[int, bytes] = {}
-        self._validation_order: deque[tuple[str, int]] = deque()
-        self._source_reads = 0
-        self._start_head_seq: int | None = None
-        self._last_read_seq: int | None = None
-        self._segment_start_seq: int | None = None
-        self._attempt_id: str | None = None
-        self._attempt_number: int | None = None
-        self._frozen_head: int | None = None
-        self._terminal_close_seq: int | None = None
-        self._cursor_baseline: TaskEventConsumerCursorBaseline | None = None
-        self._terminal_seen = False
-        self._terminal_delivered = False
-        self._close_reason: str | None = None
-        self._failure: FormalTaskViolation | None = None
-        self._discarded_events = 0
-        self._owner_loop: asyncio.AbstractEventLoop | None = None
-        self._changed: asyncio.Event | None = None
-        self._consumer_lock = asyncio.Lock()
-        self._lifecycle_lock = asyncio.Lock()
-        self._close_lock = threading.RLock()
-        self._close_requested = False
-
-    def _authorize(self) -> None:
-        self._authorization.authorize(
-            scope=self._scope,
-            operation="task.events",
-            command_id=None,
-            target_task_id=self._task_id,
-            required_capabilities=_EVENTS_CAPABILITY,
-            destructive=False,
-            now=self._clock(),
-        )
-
-    def _close_was_requested(self) -> bool:
-        with self._close_lock:
-            return self._close_requested
-
-    def _request_close(self) -> None:
-        with self._close_lock:
-            self._close_requested = True
-            owner_loop = self._owner_loop
-            changed = self._changed
-        if changed is None:
-            return
-        if owner_loop is None or owner_loop is asyncio.get_running_loop():
-            changed.set()
-        elif not owner_loop.is_closed():
-            owner_loop.call_soon_threadsafe(changed.set)
-
-    def _require_owner_loop(self) -> None:
-        if self._owner_loop is not asyncio.get_running_loop():
-            raise FormalTaskViolation(
-                "TASK_EVENT_SUBSCRIPTION_LOOP_MISMATCH",
-                "consumer TaskEvent subscription belongs to another event loop",
-                ErrorCode.CONFLICT,
-            )
-
-    def _validate_page(
-        self,
-        page: TaskEventConsumerAuthorityPage,
-        *,
-        initial: bool,
-    ) -> None:
-        if (
-            type(page) is not TaskEventConsumerAuthorityPage
-            or page.task.task_id != self._task_id
-            or page.presentation_class != self._presentation_class
-            or not _stable_consumer_scope_matches(page.task.scope, self._scope)
-        ):
-            raise FormalTaskViolation(
-                "TASK_EVENT_SOURCE_PROTOCOL_VIOLATION",
-                "consumer TaskEvent page does not bind its authorized Task",
-                ErrorCode.PROTOCOL_VIOLATION,
-            )
-        if initial:
-            return
-        previous_cursor = self._cursor_baseline
-        current_cursor = page.cursor_baseline
-        # The Store page has already atomically verified the durable watermark
-        # against its exact TaskEvent identity.  This subscription therefore
-        # retains only the bounded scalar proof that it read the complete prefix;
-        # requiring the event to remain in the rolling fingerprint window would
-        # reject a legitimate delayed ACK after bounded validation eviction.
-        cursor_advanced_through_read_prefix = (
-            previous_cursor is not None
-            and current_cursor.watermark > previous_cursor.watermark
-            and self._last_read_seq is not None
-            and current_cursor.watermark <= self._last_read_seq
-        )
-        if (
-            page.page_after_seq != self._last_read_seq
-            or previous_cursor is None
-            or current_cursor.watermark < previous_cursor.watermark
-            or (
-                current_cursor.watermark == previous_cursor.watermark
-                and current_cursor != previous_cursor
-            )
-            or (
-                current_cursor.watermark > previous_cursor.watermark
-                and not cursor_advanced_through_read_prefix
-            )
-            or (self._frozen_head is not None and page.head_seq != self._frozen_head)
-        ):
-            raise FormalTaskViolation(
-                "TASK_EVENT_CONSUMER_CURSOR_STALE",
-                "consumer TaskEvent page changed its Attempt or frozen cursor",
-                ErrorCode.STALE,
-            )
-
-    def _accept_page(self, page: TaskEventConsumerAuthorityPage) -> None:
-        accepted: list[PersistentTaskEvent] = []
-        ids = dict(self._seen_ids)
-        sequences = dict(self._seen_sequences)
-        order = deque(self._validation_order)
-        for event in page.events:
-            canonical = canonical_json_bytes(event.to_dict())
-            if event.event_id in ids or event.seq in sequences:
-                raise FormalTaskViolation(
-                    "TASK_EVENT_SOURCE_PROTOCOL_VIOLATION",
-                    "consumer TaskEvent page reused an accepted identity",
-                    ErrorCode.PROTOCOL_VIOLATION,
-                )
-            if len(ids) >= self._validation_capacity:
-                old_event_id, old_seq = order.popleft()
-                ids.pop(old_event_id, None)
-                sequences.pop(old_seq, None)
-            ids[event.event_id] = canonical
-            sequences[event.seq] = canonical
-            order.append((event.event_id, event.seq))
-            accepted.append(event)
-        if len(self._queue) + len(accepted) > self._queue_capacity:
-            raise FormalTaskViolation(
-                "TASK_EVENT_SUBSCRIPTION_BACKPRESSURE",
-                "consumer TaskEvent page exceeds its bounded queue",
-                ErrorCode.UNAVAILABLE,
-            )
-        self._seen_ids = ids
-        self._seen_sequences = sequences
-        self._validation_order = order
-        self._queue.extend(accepted)
-        self._cursor_baseline = page.cursor_baseline
-        self._last_read_seq = (
-            page.events[-1].seq if page.events else page.page_after_seq
-        )
-        self._frozen_head = page.head_seq if page.has_more else None
-        self._terminal_seen = self._terminal_seen or any(
-            event.event_type == "task.terminal" for event in page.events
-        )
-        terminal_head = page.terminal_head_event
-        if terminal_head is not None and terminal_head.seq == page.head_seq:
-            self._terminal_close_seq = terminal_head.seq
-
-    async def start(self) -> bool:
-        async with self._lifecycle_lock:
-            if self._state is not TaskEventSubscriptionState.NEW:
-                return self._state in {
-                    TaskEventSubscriptionState.ACTIVE,
-                    TaskEventSubscriptionState.CLOSED,
-                }
-            self._owner_loop = asyncio.get_running_loop()
-            self._authorize()
-            page = await asyncio.to_thread(
-                self._store.consumer_progress_authority_page,
-                self._task_id,
-                self._scope,
-                presentation_class=self._presentation_class,
-                limit=min(self._queue_capacity, self._validation_capacity),
-            )
-            self._source_reads += 1
-            self._authorize()
-            if self._close_was_requested():
-                self._state = TaskEventSubscriptionState.CLOSED
-                self._close_reason = "detached_before_start"
-                return False
-            self._validate_page(page, initial=True)
-            self._changed = asyncio.Event()
-            self._start_head_seq = page.head_seq
-            self._segment_start_seq = page.start_seq
-            self._attempt_id = page.attempt.attempt_id
-            self._attempt_number = page.attempt.attempt_number
-            self._last_read_seq = page.page_after_seq
-            self._cursor_baseline = page.cursor_baseline
-            self._accept_page(page)
-            if (
-                page.task.state.value == "terminal"
-                and not self._queue
-                and self._last_read_seq >= page.head_seq
-            ):
-                self._state = TaskEventSubscriptionState.CLOSED
-                self._close_reason = "already_consumed_terminal"
-            else:
-                self._state = TaskEventSubscriptionState.ACTIVE
-            return True
-
-    async def next_event(self) -> PersistentTaskEvent:
-        async with self._consumer_lock:
-            self._require_owner_loop()
-            while True:
-                if self._failure is not None:
-                    raise self._failure
-                if self._queue:
-                    self._authorize()
-                    event = self._queue.popleft()
-                    if (
-                        event.seq == self._terminal_close_seq
-                        and event.event_type == "task.terminal"
-                    ):
-                        self._terminal_delivered = True
-                        self._state = TaskEventSubscriptionState.CLOSED
-                        self._close_reason = "terminal_event_delivered"
-                    return event
-                if self._state is TaskEventSubscriptionState.CLOSED:
-                    raise StopAsyncIteration
-                if self._close_was_requested():
-                    self._state = TaskEventSubscriptionState.CLOSED
-                    self._close_reason = "consumer_detached"
-                    raise StopAsyncIteration
-                assert self._last_read_seq is not None
-                self._authorize()
-                try:
-                    page = await asyncio.to_thread(
-                        self._store.consumer_progress_authority_page,
-                        self._task_id,
-                        self._scope,
-                        presentation_class=self._presentation_class,
-                        limit=min(self._queue_capacity, self._validation_capacity),
-                        after_seq=self._last_read_seq,
-                        through_seq=self._frozen_head,
-                    )
-                    self._source_reads += 1
-                    self._authorize()
-                    if self._close_was_requested():
-                        self._state = TaskEventSubscriptionState.CLOSED
-                        self._close_reason = "consumer_detached"
-                        raise StopAsyncIteration
-                    self._validate_page(page, initial=False)
-                    self._accept_page(page)
-                except StopAsyncIteration:
-                    raise
-                except FormalTaskViolation as error:
-                    self._failure = error
-                    self._state = TaskEventSubscriptionState.FAILED
-                    raise
-                if self._queue:
-                    continue
-                if page.task.state.value == "terminal":
-                    self._state = TaskEventSubscriptionState.CLOSED
-                    self._close_reason = "already_consumed_terminal"
-                    raise StopAsyncIteration
-                changed = self._changed
-                assert changed is not None
-                changed.clear()
-                try:
-                    await asyncio.wait_for(changed.wait(), timeout=self._poll_interval)
-                except TimeoutError:
-                    pass
-
-    async def close(self) -> None:
-        self._request_close()
-        async with self._lifecycle_lock:
-            if self._owner_loop is not None:
-                self._require_owner_loop()
-            self._discarded_events += len(self._queue)
-            self._queue.clear()
-            if self._state is not TaskEventSubscriptionState.FAILED:
-                self._state = TaskEventSubscriptionState.CLOSED
-                self._close_reason = self._close_reason or "consumer_detached"
-
-    def snapshot(self) -> TaskEventSubscriptionSnapshot:
-        return TaskEventSubscriptionSnapshot(
-            enabled=True,
-            state=self._state,
-            task_id=self._task_id,
-            start_head_seq=self._start_head_seq,
-            last_seq=self._last_read_seq,
-            queue_capacity=self._queue_capacity,
-            queue_allocated=self._changed is not None,
-            queued_events=len(self._queue),
-            validation_capacity=self._validation_capacity,
-            tracked_events=len(self._seen_ids),
-            worker_pending=False,
-            source_reads=self._source_reads,
-            live_only=False,
-            cursor_replay_supported=True,
-            terminal_event_seen=self._terminal_seen,
-            terminal_event_delivered=self._terminal_delivered,
-            close_reason=self._close_reason,
-            failure_reason=None if self._failure is None else self._failure.reason,
-            failure_code=None if self._failure is None else self._failure.code,
-            discarded_events=self._discarded_events,
-            segment_start_seq=self._segment_start_seq,
-            attempt_id=self._attempt_id,
-            attempt_number=self._attempt_number,
-        )
-
-    def consumer_cursor_baseline(self) -> TaskEventConsumerCursorBaseline:
-        baseline = self._cursor_baseline
-        if baseline is None:
-            raise FormalTaskViolation(
-                "TASK_EVENT_CONSUMER_CURSOR_UNAVAILABLE",
-                "consumer cursor is unavailable before source activation",
-                ErrorCode.CONFLICT,
-            )
-        return baseline
-
-
 class TaskEventAuthorityProgressSource:
     """Concrete Store-owned atomic prefix/cursor source for formal voice progress."""
 
@@ -720,35 +380,19 @@ class TaskEventAuthorityProgressSource:
         self._consumer_scope = consumer_scope
         self._presentation_class = presentation_class
         self._authorization_fingerprint = _authorization_fingerprint(authorization)
-        self._subscription = cast(
-            TaskEventSubscription,
-            (
-                _ConsumerTaskEventSubscription(
-                    store=store,
-                    authorization=authorization,
-                    scope=scope,
-                    task_id=task_id,
-                    presentation_class=cast(str, presentation_class),
-                    queue_capacity=queue_capacity,
-                    validation_capacity=validation_capacity,
-                    poll_interval=float(poll_interval),
-                    clock=clock,
-                )
-                if consumer_scope
-                else TaskEventSubscription(
-                    source=store,
-                    authorization=authorization,
-                    scope=scope,
-                    task_id=task_id,
-                    enabled=True,
-                    queue_capacity=queue_capacity,
-                    validation_capacity=validation_capacity,
-                    poll_interval=float(poll_interval),
-                    authority_atomic_replay=True,
-                    consumer_scope=False,
-                    clock=clock,
-                )
-            ),
+        self._subscription = TaskEventSubscription(
+            source=store,
+            authorization=authorization,
+            scope=scope,
+            task_id=task_id,
+            enabled=True,
+            queue_capacity=queue_capacity,
+            validation_capacity=validation_capacity,
+            poll_interval=float(poll_interval),
+            authority_atomic_replay=True,
+            consumer_scope=consumer_scope,
+            presentation_class=presentation_class,
+            clock=clock,
         )
         scope_fingerprint = hashlib.sha256(
             canonical_json_bytes(scope.to_dict())
@@ -1348,7 +992,7 @@ class TaskProgressReturnBridge:
                     and self._uses_consumer_authority_source()
                 ):
                     subscription = self._subscription
-                    if subscription.__class__ is not _ConsumerTaskEventSubscription:
+                    if subscription.__class__ is not TaskEventSubscription:
                         self._state = TaskProgressReturnState.FAILED
                         self._reason = TaskProgressReturnReason.HANDOFF_REJECTED
                         await self._close_source(binding)
@@ -2181,8 +1825,8 @@ class TaskProgressReturnBridge:
         return (
             prepared is not None
             and prepared.__class__ is TaskEventAuthorityProgressSource
-            and subscription.__class__ is _ConsumerTaskEventSubscription
-            and subscription._terminal_close_seq == event.seq
+            and subscription.__class__ is TaskEventSubscription
+            and subscription.consumer_terminal_closes_stream(event)
         )
 
     def _subscription_matches(self, binding: TaskProgressOriginBinding) -> bool:

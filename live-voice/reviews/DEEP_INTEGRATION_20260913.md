@@ -111,7 +111,7 @@ callback framework. Ordinary registered callbacks retain their error policy.
 | Team assignment / dependencies | `agent_teams/tools/database/task_dao.py` start_task/claim_task/cancel_task | Partial overlap. Native DAO CAS owns Team member assignment, pending status and dependency release, not work revisions or application effect attempts. No current dependency/Team assignment requirement; do not create unrelated Team rows or duplicate status. |
 | Work creation / query / revision / cancellation | HostWorkService.work_runtime → SDK WorkRuntime.start/update/query/cancel → SqliteWorkStore.save | Keep SDK Work authority and Host-scoped service. Revisions/CAS, UNKNOWN/no replay, cancellation settlement and occupied capacity are necessary. Removed router's unreachable generationless/direct-facade and standalone-close alternatives. |
 | Scheduling distinction | Controller TaskScheduler.execute_task/cancel_task; Harness NativeHarness.launch_async_tool → AsyncToolRuntime | Controller publishes session task events and marks CANCELED before physical coroutine settlement; Harness completion is injected best-effort into the owning model round. Neither is a durable Work outcome or heard-audio fact. Keep distinct execution modes, not a short/long split. Work does not automatically create a formal Task card. |
-| Work Agent producer | NativeBusinessRouter._executor → HostWorkAgentExecutor → existing JiuWenSwarmRoundHarness → RuntimeFormalAgentFacade → AgentRuntime.stream_owned → RuntimeSessionCoordinator | 09-14 removes Work's AgentConversationRuntime/ConversationRuntimeLoop/Bridge allocation. Host admission, Agent pin and generation remain. SDK WorkRuntime owns durable state; Harness owns actual producer, exact cancel and cleanup. The result collector requires one nonempty final and COMPLETED; cancellation with failed cleanup remains UNKNOWN. This closes this execution seam, not all management overlap. |
+| Work Agent producer | HostWorkService.get_executor → HostWorkAgentExecutor → existing JiuWenSwarmRoundHarness → RuntimeFormalAgentFacade → AgentRuntime.stream_owned → RuntimeSessionCoordinator | 09-14 removes Work's AgentConversationRuntime/ConversationRuntimeLoop/Bridge allocation. Host admission, Agent pin and generation remain. SDK WorkRuntime owns durable state; Harness owns actual producer, exact cancel and cleanup. The result collector requires one nonempty final and COMPLETED; cancellation with failed cleanup remains UNKNOWN. This closes this execution seam, not all management overlap. |
 | Recovery / results | SDK durability readers/effects/checkpoint, TaskResultReader; Work restored snapshots | Retain exact-byte/index/file-application journal and manifest verification. Checkpointer KV serialization and default DB engine do not replace multi-file effects + rollback/unknown guarantees. Real temporary Git/SQLite tests cover existing oracles; no irreversible schema migration performed. |
 | Event query / subscription | task_store.events/events_page → TaskEventSubscription; Work observation cursor/epoch → Host context RPC | Durable paginated Task event sequence and revision-scoped Work change signal are different from native callback notification. Replacing them with an ephemeral EventBus loses replay/fencing. They project the same authoritative Task/Work rows, not another execution state machine. |
 | SQLite | SqliteTaskStore._transaction; SqliteWorkStore._connection; Host SqliteNativeWorkJournal hooks | BEGIN IMMEDIATE, CAS and command/outbox validation remain in the transaction owner. Host journal adds accepted-input prerequisite/presentation/task-origin tables to that same Work DB; it does not fork Work snapshots. DefaultDbStore supplies an AsyncEngine, without these operations. No second storage facade added just to claim reuse. |
@@ -1320,3 +1320,70 @@ change or deployment. SDK production net +2; current combined net additions
 194,476 versus initial 195,680, reduction 1,204. This repair deletes no duplicate
 production implementation and does not close Task management convergence.
 [Exact-source checks](../evidence/DEEP_RECOVERY_SUBSCRIPTION_CHECKS_20260914.json).
+
+
+### One Task subscription manager, consumer-page mode (2026-09-14, implementation scope)
+
+Tier 2 shared reader lifecycle boundary. Enhance existing SDK TaskEventSubscription
+with optional presentation_class for existing consumer_scope + authority replay;
+delete Host _ConsumerTaskEventSubscription. Reuse SDK authorization, queue,
+snapshot, owner-loop and close/failure handling rather than a new manager/base.
+Retain Store consumer_progress_authority_page as sole cursor/prefix authority.
+Demand polling, frozen pagination, rolling identity bounds, delayed ACK through
+read prefix, cross-session subject/project binding, historical terminal versus
+current terminal and consumed-terminal empty start remain mode semantics. No
+new cursor writes, Task state, outbox, executor, cancellation command or schema.
+Default live-only and full-prefix APIs remain unchanged. Existing consumer wrapper
+start/close compatibility and reader-cancellation behavior must be characterized;
+do not silently change product delivery or authorization policy.
+
+Acceptance: existing real SQLite consumer text/voice paging, >queue history,
+retry/reconnect, delayed ACK after eviction, stale cursor, wrong scope and terminal
+race; SDK existing subscription modes; focused close/authorization/zero-write
+checks. Independent complete-diff review and exact cross-repository installation
+for the additive SDK API. Application presentation/ACK projection remains Host.
+The cursor-specific reducer is retained code and must be reported as such; only
+deleted common lifecycle/queue/state implementation counts as consolidation.
+
+
+Implementation result: Host's 333-line consumer subscription class and alternate
+construction are deleted. Its page/cursor validation (51+42-line method spans)
+and baseline accessor (9 lines) are retained as SDK mode behavior, with queue
+acceptance adapted to the existing SDK queue. Removed duplicate constructor,
+authorization, owner-loop/close coordination, state snapshot and event-delivery
+management are replaced by existing TaskEventSubscription methods, not a new
+base framework. SDK adds 228 net production lines; Host removes 356 net; combined
+net -128. Voice unchanged. Same-basis totals: Voice 112334, Host 48015, SDK 33999,
+combined 194348 (-1332 versus initial195680). No changed native file is wholly
+counted as new. .6 required by the additive presentation_class consumer API.
+
+Baseline 59 Host tests passed (173.46s). Two existing Host demand/cancel tests
+passed before implementation; two direct SDK counterparts failed because the
+API did not exist. The merged Host boundary passed 63 tests (179.30s). Independent
+review then identified close-after-validation windows in both initial and later
+pages. Each was reproduced (start wrongly True / next_event wrongly delivered)
+and repaired using the existing close-intent lock. Final focused 10 tests passed
+(5.12s), including both windows, demand/cancel/idempotent start, wrong project,
+expired grant before start/queued delivery/after Store read, and full SQLite dump
+unchanged by reads/close. No tests claim physical playback or recovered execution
+through terminal. The 63-test regression precedes the close-lock refinements;
+the affected start/page/close paths are rechecked by the final ten, without
+repeating large-history fixture generation. SDK existing modes: 68 regressions.
+Independent re-review confirms both reported windows closed, no remaining blocker.
+
+
+Final pairing: SDK commit 76c614a1886d7affb98b8c53e97de9e81abdb93a;
+this Host commit is its companion. The first .6 wheel predated the later-page
+close refinement and is not final evidence. A fresh final SDK build and isolated
+pair installation reran all ten focused real SQLite scenarios, through installed
+Host and SDK classes, successfully. Every installed Python file matched its
+build input (Host1016/SDK2409); changed production files additionally match final
+worktree hashes. Existing third-party dependencies were reused; no frontend
+bundle, dependency resolution, deployment or physical audio claim. Final SDK
+existing-mode regression: 68 passed in2.66s. Ruff, diff and changed-doc local-link
+checks passed. [Source/test evidence](../evidence/DEEP_CONSUMER_SUBSCRIPTION_CHECKS_20260914.json)
+and [final installed pair](../evidence/DEEP_CONSUMER_SUBSCRIPTION_PAIR_20260914.json).
+
+The prior note that consumer subscription management was unproved is superseded
+for this seam only. Task command/outbox, Work settlement and broader Host/Voice
+lifecycle audits retain their outstanding full-goal requirements; status PARTIAL.
