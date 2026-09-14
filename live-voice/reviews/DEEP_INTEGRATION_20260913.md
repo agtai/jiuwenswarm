@@ -699,3 +699,62 @@ Provider, microphone, playback ACK or artifact-download acceptance is inferred.
 No production changes: the last accounting manifests remain current. Old S6
 voice-origin/notification and broader adjustment evidence are still open; this
 does not make the retired `p2.submit` test green.
+
+### Current paired Python packaging (2026-09-14)
+
+Tier 0 verification-only child: verify the current Host/SDK distribution seam,
+without production changes, dependency upgrades or deployment. Clean temporary
+stages copy tracked packaging inputs from Host `e722644f44b3` and SDK
+`f91bc2d5ea96`; ignored build caches are not copied. Both `python -m build
+--wheel --no-isolation` builds succeed, followed by `uv pip install --no-deps
+--target` of the two wheels. This deliberately reuses existing third-party
+dependencies, and excludes frontend dist and fresh dependency resolution.
+
+An isolated `python -I` process outside the repositories adds only the installed
+target for the pair. It imports Host Work service, formal runtime facade, native
+RoundHarness, authenticated Task composition, SDK application Tasks/checkpoint
+rail and native single-agent modules. Every loaded Host/SDK module is asserted
+under that target, preventing editable-source fallback. All 1,016 installed
+Host and 2,409 SDK Python files match staged input bytes; retired `task_core.py`
+and `legacy_project_task_service.py` are absent. Package metadata constraints
+accept SDK `0.1.17+livevoice.4`. Result: **CURRENT_PAIRED_IMPORT_OK**.
+
+[Exact-source evidence](../evidence/DEEP_CURRENT_PAIR_20260914.json) records
+commits, wheel SHA-256 values, module paths and counts. Import emitted an existing
+invalid-escape SyntaxWarning in SDK browser probes; it did not fail. No source
+or runtime policy changed, and previous production accounting remains current.
+This closes the current Python packaging seam only, not the remaining semantic
+or physical acceptance gaps.
+
+### Current unified running-adjustment joint (2026-09-14)
+
+Tier 1 test-only boundary: extend the current joint ingress scenario to accepted
+running adjustment, using existing SQLite/Core/DirectExecutor and native SDK
+model callbacks. No new production policy, schema, authority or timeout. The
+previous lower Agent only waited then wrote a fixed file, so it could not prove
+adoption. The new controlled lower Agent binds the real current checkpoint via
+TaskCheckpointRail/scoped_agent_rail and calls ReActAgent's model path with a
+real SessionModelContext. Its controlled model asserts the accepted appendix
+requirement is present before returning the adjusted answer.
+
+The real unified ingress creates/confirms one Task, accepts the adjustment and
+replays its request. Voice closes while execution remains blocked. Releasing
+execution adopts the adjustment, writes the corresponding synthetic file and
+returns the matching persisted result. Reopening SQLite proves exactly one
+adjust-requested event, one adjust-applied event, one Task and the same attempt;
+the model runs once. Original README bytes and the existing wrong-scope/stale
+zero-side-effect assertions remain. This fixture explicitly controls the lower
+Agent and its rail installation: it does not independently validate the Host
+adapter's binding implementation, file-tool admission or external Provider/
+artifact quality. Files are written directly by the controlled lower Agent.
+
+Initial run reached the adjusted result but failed the leftover fixed
+`completed` assertion. The expected adjusted result was corrected, then the
+complete joint file passed **4 tests in 20.46s** with scoped Ruff and diff checks.
+Read-only independent review identified that the first fixture discarded the
+model return and hardcoded file/final text. Both now use the actual SDK model
+return content; the affected adjustment mode passed again (**1 passed in
+10.90s**, three unrelated modes deselected), with scoped Ruff/diff checks.
+Production bytes and the current paired-packaging evidence are unchanged.
+Old retired-entry voice-origin/notification coverage and historical Registry
+failures remain open.

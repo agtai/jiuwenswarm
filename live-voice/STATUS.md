@@ -107,13 +107,13 @@ Current unified-input joint tests cover real SQLite Task creation/confirmation,
 replay/conflict, project rejection, Voice close followed by completion, and
 running cancellation while the original dialogue completes normally. These use
 controlled model/authority/lower-Agent dependencies. The broader Host/Voice
-registry audit and remaining old joint adjustment/barge-in oracles remain open.
+registry audit and remaining old joint voice-origin/notification oracles remain open.
 The frontend lifecycle child places the formal Task reader under Host ChatPanel,
 using the existing webClient and formalTaskStore. Voice consumes its snapshot
 with a synchronous notification fence; it no longer constructs, closes or polls
 the reader. Host-only/consumer-detach, polling, stale-session, UNKNOWN replay and
-fail-closed target tests cover this boundary. This does not close the remaining
-project-authority audit, historical backend validation debt or product candidate.
+fail-closed target tests cover this boundary. This does not close historical
+backend validation debt or the product candidate.
 
 Project authority correspondence is now verified against D-120 and accepted R5
 commit ae4b32331501: user edits are authorized snapshot inputs, not blanket
@@ -128,7 +128,19 @@ Task running, duplicated interruption reuses the result, and injected Task
 cancel scope has zero SQLite effects. Both Voice activations close before Task
 completion and saved-result query. Three joint modes pass with real isolated
 history/SQLite/Git and controlled lower Agents; no unplayed assistant history is
-written. The old retired-entry voice-origin/notification test remains unclosed.
+written. A fourth joint mode now adopts an accepted running adjustment through
+the real SDK model callback rail, with one persisted request/application, one
+Task/attempt, replay suppression, and the adjusted file/result after Voice close.
+The lower Agent and its rail binding are controlled; this does not independently
+prove Host adapter rail installation or Provider output. The old retired-entry
+voice-origin/notification test remains unclosed.
+
+The current Python package pair passes clean tracked-source wheel builds and
+temporary target installation; all loaded Host/SDK modules resolve to that
+target, with installed Python bytes matching staged source and SDK constraints
+matching metadata. [Exact-source evidence](evidence/DEEP_CURRENT_PAIR_20260914.json)
+records the pair and wheel hashes. Existing third-party dependencies are reused;
+frontend distribution, fresh dependency resolution and deployment are excluded.
 
 The frozen-input recovery child now keeps server generation/context identity in
 the existing Host journal, independently of model records. P3 and unified input

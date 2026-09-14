@@ -1,0 +1,39 @@
+{
+  "host": {
+    "commit": "e722644f44b38bc871805198fce8b77fa4a03f03",
+    "tracked_inputs": 2905
+  },
+  "sdk": {
+    "commit": "f91bc2d5ea9650781d54db92e7acf2170b09df57",
+    "tracked_inputs": 2883
+  },
+  "openjiuwen-0.1.17+livevoice.4-py3-none-any.whl": {
+    "sha256": "351bc7b4ce17f95f959206548d605588510e724c3160a4acd39c44a10ae14ea7"
+  },
+  "workswarm-0.2.5b1-py3-none-any.whl": {
+    "sha256": "3f2f12ffaa7287a188a8910789bf4f295bf4054ff312d07f653fed081bf3a627"
+  },
+  "result": "CURRENT_PAIRED_IMPORT_OK",
+  "modules": {
+    "jiuwenswarm.server.runtime.work.service": "jiuwenswarm\\server\\runtime\\work\\service.py",
+    "jiuwenswarm.server.runtime.agent_adapter.runtime_formal": "jiuwenswarm\\server\\runtime\\agent_adapter\\runtime_formal.py",
+    "jiuwenswarm.server.runtime.agent_adapter.jiuwenswarm_round_harness": "jiuwenswarm\\server\\runtime\\agent_adapter\\jiuwenswarm_round_harness.py",
+    "jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition": "jiuwenswarm\\server\\runtime\\formal_tasks\\p3_authenticated_composition.py",
+    "openjiuwen.core.application.tasks": "openjiuwen\\core\\application\\tasks\\__init__.py",
+    "openjiuwen.core.application.tasks.execution_checkpoint": "openjiuwen\\core\\application\\tasks\\execution_checkpoint.py",
+    "openjiuwen.core.single_agent": "openjiuwen\\core\\single_agent\\__init__.py"
+  },
+  "installed_python_files_matched": {
+    "jiuwenswarm": 1016,
+    "openjiuwen": 2409
+  },
+  "sdk_version": "0.1.17+livevoice.4",
+  "host_sdk_requirements": [
+    "openjiuwen==0.1.17+livevoice.4",
+    "openjiuwen==0.1.17+livevoice.4; extra == \"harmony\"",
+    "openjiuwen[postgres,zmq]; extra == \"distribute\"",
+    "openjiuwen[claude]; extra == \"claude\"",
+    "openjiuwen[codex]; extra == \"codex\""
+  ],
+  "scope": "Fresh tracked packaging inputs, no build cache; no-deps target installation uses existing venv third-party dependencies. Isolated Python imports assert all loaded Host/SDK modules come from target. Python package boundary only; no frontend dist, dependency resolution, deployment or Provider acceptance."
+}

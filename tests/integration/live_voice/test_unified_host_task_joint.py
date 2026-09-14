@@ -45,6 +45,10 @@ class JointModel:
         elif text == "cancel joint task":
             assert len(data["context"]["tasks"]) == 1
             value = decision(data, "task.cancel", target=data["context"]["tasks"][0]["task_id"], kind="task_id")
+        elif text == "include the accepted appendix":
+            assert len(data["context"]["tasks"]) == 1
+            value = decision(data, "task.adjust", {"adjustment": text},
+                target=data["context"]["tasks"][0]["task_id"], kind="task_id")
         elif text == "confirm the pending task":
             candidates = [p for p in data["context"]["pending"] if p["operation"] == "task.create"]
             assert len(candidates) == 1, candidates
@@ -104,8 +108,57 @@ class JointDialogueAgent(_SlowConversationAdapter):
             raise
 
 
+class JointCheckpointAgent(_DirectAgentFacade):
+    """Controlled lower Agent with a real SDK model callback/adoption boundary."""
+
+    def __init__(self, project):
+        super().__init__(project)
+        self.model_inputs = []
+
+    async def process_background_code_task_stream(self, request):
+        from pathlib import Path
+        from openjiuwen.core.context_engine import ContextEngineConfig
+        from openjiuwen.core.context_engine.context.context import SessionModelContext
+        from openjiuwen.core.foundation.llm import AssistantMessage, UserMessage
+        from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig, AgentCard
+        from openjiuwen.core.single_agent.agent_callback_manager import scoped_agent_rail
+        from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+        from openjiuwen.core.application.tasks.execution_checkpoint import (
+            current_background_task_checkpoint, TaskCheckpointRail,
+        )
+        from jiuwenswarm.common.schema.agent import AgentResponseChunk
+
+        self.requests.append(request)
+        await self.release.setdefault("joint", asyncio.Event()).wait()
+        checkpoint = current_background_task_checkpoint(request.session_id)
+        assert checkpoint is not None
+        recorded = self.model_inputs
+
+        class Model:
+            async def invoke(self, **kwargs):
+                recorded.append([message.content for message in kwargs["messages"]])
+                assert any("include the accepted appendix" in str(text) for text in recorded[-1])
+                return AssistantMessage(content="completed with accepted appendix")
+
+        agent = ReActAgent(AgentCard(id="joint-checkpoint", name="Joint checkpoint", description="test"))
+        agent.configure(ReActAgentConfig(model_name="controlled"))
+        agent._llm = Model()
+        context = SessionModelContext("joint-context", request.session_id,
+            ContextEngineConfig(enable_openrouter_model_context_window_tokens=False),
+            history_messages=[], processors=[])
+        await context.add_messages(UserMessage(content=request.params["query"]))
+        with scoped_agent_rail(TaskCheckpointRail(checkpoint, root_agent=agent,
+                binding_is_current=lambda: not checkpoint.closed,
+                session_identity=lambda ctx: request.session_id)):
+            answer = await agent._call_model(AgentCallbackContext(agent=agent, context=context), context, [])
+        (Path(request.params["project_dir"]) / "RESULT-joint.md").write_text(
+            answer.content + "\n", encoding="utf-8")
+        yield AgentResponseChunk(request.request_id, request.channel_id,
+            payload={"event_type": "chat.final", "content": answer.content}, is_complete=True)
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("finish", ["complete", "cancel", "barge"])
+@pytest.mark.parametrize("finish", ["complete", "cancel", "barge", "adjust"])
 async def test_unified_task_replay_scope_and_voice_close_share_host_lifetime(tmp_path, monkeypatch, finish):
     monkeypatch.setattr("openjiuwen.core.application.tasks.task_store.utc_now", lambda: NOW)
     monkeypatch.setattr("jiuwenswarm.server.runtime.session.session_history.get_agent_sessions_dir",
@@ -113,7 +166,7 @@ async def test_unified_task_replay_scope_and_voice_close_share_host_lifetime(tmp
     project = tmp_path / "project"
     revision = _project(project)
     database = tmp_path / "state" / "task.sqlite3"
-    task_agent = _DirectAgentFacade(project)
+    task_agent = JointCheckpointAgent(project) if finish == "adjust" else _DirectAgentFacade(project)
 
     async def fence():
         assert _git(project, "rev-parse", "HEAD") == revision
@@ -274,6 +327,13 @@ async def test_unified_task_replay_scope_and_voice_close_share_host_lifetime(tmp
             assert any(row["content"] == "continue a new foreground answer" for row in history)
             assert all(row["role"] == "user" for row in history), history
             assert len({row["id"] for row in history}) == len(history)
+        if finish == "adjust":
+            adjusted = await submit("adjust", "include the accepted appendix")
+            assert adjusted.ok, adjusted.payload
+            assert adjusted.payload["result"]["task_id"] == task_id, adjusted.payload
+            replayed = await submit("adjust", "include the accepted appendix")
+            assert replayed.payload == adjusted.payload
+            assert task_agent.model_inputs == []
         if finish == "cancel":
             # Current explicit semantic cancel supplies consent to the normal
             # durable claim; it does not fabricate a second utterance.
@@ -291,7 +351,7 @@ async def test_unified_task_replay_scope_and_voice_close_share_host_lifetime(tmp
         closed = await registry.handle_p2_close(params=_joint_product_p2_params(),
             request_id="close-voice", session_id="session-1")
         assert closed.ok, closed.payload
-        if finish in {"complete", "barge"}:
+        if finish in {"complete", "barge", "adjust"}:
             assert store.get_task(task_id, _scope()).outcome is None
             assert not task_agent.release["joint"].is_set()
             task_agent.release["joint"].set()
@@ -299,7 +359,17 @@ async def test_unified_task_replay_scope_and_voice_close_share_host_lifetime(tmp
             summary = await composition.reconcile_once()
             record = store.get_task(task_id, _scope())
             assert record.outcome is TerminalOutcome.COMPLETED, (record.state, record.attempt_id, summary, store.counts())
-            assert (project / "RESULT-joint.md").read_text() == "completed joint\n"
+            expected = "completed with accepted appendix" if finish == "adjust" else "completed"
+            assert (project / "RESULT-joint.md").read_text() == (
+                expected + "\n" if finish == "adjust" else "completed joint\n")
+            if finish == "adjust":
+                assert len(task_agent.model_inputs) == 1
+                reopened = SqliteTaskStore(database)
+                events = reopened.events(task_id, _scope(), after_seq=-1)
+                assert sum(event.event_type == "task.adjust_requested" for event in events) == 1
+                assert sum(event.event_type == "task.adjust_applied" for event in events) == 1
+                assert reopened.get_task(task_id, _scope()).attempt_id == record.attempt_id
+                assert reopened.counts()["tasks"] == 1
             result = await registry.handle_p3_query(operation="task.result", params={
                 "auth_token": PRODUCT_TOKEN, "session_id": "session-1", "task_id": task_id},
                 request_id="read-completed-result", session_id="session-1")
@@ -307,7 +377,7 @@ async def test_unified_task_replay_scope_and_voice_close_share_host_lifetime(tmp
             assert result.payload["result"]["availability"] == "available", result.payload
             saved = result.payload["result"]["task_result"]
             assert saved["task_id"] == task_id and saved["attempt_id"] == record.attempt_id
-            assert saved["result_text"] == "completed"
+            assert saved["result_text"] == expected
         assert (project / "README.md").read_text() == "baseline\n"
         assert len(task_agent.requests) == 1
     finally:
