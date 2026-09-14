@@ -34,10 +34,11 @@ count does not establish human acceptance.
 
 ## Progress
 
-Stage 1 implementation and scoped checks pass; deployment acceptance remains
-open. Host `ee1eb695` pairs with SDK `b5534de51`. Stage 2 source/timeline investigation has started; no
-Stage 2 behavior repair yet; passive diagnostics are being completed. Stage 3
-has not started.
+Stage 1 scoped checks pass; Host `ee1eb695` pairs with SDK `b5534de51`.
+Host `c58ee065` adds Stage 2 diagnostics and startup error classification.
+The official launcher deployed this pair and passed its real speech/identity
+probes. The subsequent user session provides bounded Stage 3 evidence below;
+overall Task delivery and Voice stability acceptance remain open.
 
 ### Stage 1 evidence
 
@@ -109,3 +110,62 @@ frontend code already treats NOT_FOUND as definitive for an individual request,
 and predecessor reconciliation already handles stale activation generations.
 Therefore adding another generic retry classifier would not establish a fix:
 the page/journal recovery cycle and retained operations still require reproduction.
+
+### September 15 deployed session and scoped follow-up
+
+Session `web_1a0a216a82b_dc64829d305e`, Host `c58ee065`, SDK `b5534de51`.
+Raw evidence stays in local `logs/SESSION_20260915_0043_REVIEW.md`, the service
+log `swarm-20260914-212432.log`, SQLite stores and retained project baselines.
+Times here are local UTC+02:00. This is not a complete product acceptance.
+
+The Shenzhen creation and adjustment share one Task and one execution attempt.
+The 00:43:58 adjustment was adopted at the 00:44:16 model checkpoint; both later
+writes contain the empty afternoon. APPLIED means requirement adoption, not
+completed artifact delivery. The separate Hangzhou Task waited for the project
+executor and was cancelled without an execution attempt. Weather Work completed
+with a saved fetched result. This proves the previous missing Harness callback
+repair worked on this path; running cancellation remains unproved here.
+
+The Shenzhen Task failed at `_attempt_patch` with NO_EFFECTIVE_TARGET_CHANGE:
+both writes equal the pre-existing itinerary after Git line-ending normalization.
+The original file hash matches both predeployment baselines. Empty-diff failure
+is the current executor contract, not another missing adjustment callback.
+Allowing verified existing artifacts as success versus requiring a separate new
+artifact is a pending user product decision. Merely removing the empty-patch
+guard would conflict with artifact collection, apply and durable recovery.
+
+The apparent 21.70 s audio delay is not proof of an admission stall. For the
+generation 18 notification, source event `event_EO9iZQLioX6jiPpT7nSci` arrived
+at 00:45:35.533. Predecessor presentation completed at 00:45:42.158; the prepared
+continuation was promoted at 00:45:42.812. Frame 0 was admitted at 00:45:43.006;
+frame 716 mapped at 00:45:56.963. The 14 seconds between these frame positions
+is consistent with the existing 20 ms sample-credit release in
+`_prepared_delivery_control` / `_release_event`. The last admission RPC took
+26 ms. No timeout, buffer or pacing change is justified by this sample. Separate
+maximum lock/RPC waits and earlier audible stalls remain unresolved.
+
+A bounded Tier 2 feedback repair follows a proven race: a task.cancel proposal
+was waiting for authority revalidation when speech_started arrived at
+00:44:37.208. The source became interrupted at 00:44:37.209; Runtime rejected it
+as NATIVE_DELEGATE_RESPONSE_STALE at 00:44:37.224. Gateway then incorrectly
+published failed after interrupted. Keep the Runtime rejection and zero business
+acceptance; when that exact interaction/generation has a retained barge fence,
+retire the call as interrupted without overwriting its state with failed.
+Other stale generations, foreign interactions and actual conflicts retain their
+failure feedback. Owned surfaces: gateway delegate error handling and focused
+gateway regressions. No change to Task cancellation, durable results, transport,
+authorization, Provider timing or recovery policy. Acceptance requires a delayed
+rejection/barge race, wrong-identity and unrelated-error controls, existing
+accepted-result preservation checks and independent scoped review.
+
+The follow-up passes 12 scoped checks in one process with `--no-cov`: gateway
+barge rejection controls, accepted receipt/Task association preservation,
+reservation ordering and Native cancelled/older-source isolation. Earlier
+overlapping coverage runs produced a shared `.coverage` report error and were
+not credited as complete; the final check does not claim coverage measurement.
+An independent read-only review found no introduced defect (static review,
+without independently verifying the private logs). The production delta is
+10 added / 1 removed lines; there is no new state owner or retry mechanism.
+The deferred result-semantics decision, earlier recovery/audio faults and
+read-scope audit remain open. This follow-up is not yet deployed or physically
+accepted.

@@ -90,7 +90,11 @@ The user authorized the [three-stage repair](reviews/SESSION_REPAIR_20260914.md)
 after testing session `web_1a0a051ff63_fca69639db63`: Task correctness, Voice
 stability, then deployment verification and remaining faults. This supersedes
 older pause/deployment exclusions for these specific repairs. Stage 1 scoped
-checks pass; deployed acceptance and read-scope audit remain open. Multiple
+checks pass; the deployed session confirms adjustment adoption but exposes an
+empty-diff Task result failure. Its success semantics await a user decision.
+Deployed audio analysis distinguishes prepared notification playback from
+admission latency. Interruption feedback repair passes scoped checks and awaits
+deployment; read-scope audit remains open. Multiple
 local commits are authorized; final root-cause review must remove ineffective
 or unnecessary fixes. Stage 2 investigation is active. No new full-product acceptance is claimed.
 The deferred prepared-response timeout and buffering/latency policy remain

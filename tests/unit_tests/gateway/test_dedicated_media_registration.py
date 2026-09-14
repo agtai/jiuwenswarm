@@ -1176,6 +1176,57 @@ async def test_native_business_context_before_start_poll_and_close(monkeypatch, 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("fence,reason,interrupted", [
+    ("same", "NATIVE_DELEGATE_RESPONSE_STALE", True),
+    (None, "NATIVE_DELEGATE_RESPONSE_STALE", False),
+    ("other-generation", "NATIVE_DELEGATE_RESPONSE_STALE", False),
+    ("other-interaction", "NATIVE_DELEGATE_RESPONSE_STALE", False),
+    ("same", "NATIVE_DELEGATE_CALL_CONFLICT", False),
+])
+async def test_native_business_rejection_after_barge_in_preserves_interrupted_state(
+    monkeypatch, fence, reason, interrupted,
+):
+    from jiuwenswarm.channels.live_voice.native_business_contract import (
+        NATIVE_BUSINESS_CONTRACT_VERSION, NativeBusinessProposal, NativeBusinessAction)
+
+    activation = replace(_native_activation(), business_contract_version=NATIVE_BUSINESS_CONTRACT_VERSION)
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls, retired, states = [], [], []
+
+    class Client:
+        async def propose(self, **kwargs):
+            calls.append(kwargs["event"])
+            entered.set()
+            await release.wait()
+            raise NativeRuntimeClientError(reason, "rejected before business admission")
+
+    async def retire(call_id, *, interrupted):
+        retired.append((call_id, interrupted))
+
+    session = SimpleNamespace(closed=False, activation=activation, request_ordinal=0,
+        key=("session-1", "interaction-1", "connection-1"),
+        engine=SimpleNamespace(retire_delegate=retire), barge_fenced_responses={})
+    delegate = NativeBusinessProposal(binding=activation.binding, turn_id="turn", response_generation=1,
+        provider_event_id="function", provider_call_id="call", provider_item_id="item", request_text="cancel",
+        business=NativeBusinessAction("task.cancel", "a" * 64, "task-1", 1, None, None, None))
+    event = NativeEngineEvent(delegate=delegate)
+    registry = DedicatedMediaProductRegistry(enabled=True, native_runtime_client=Client())
+    monkeypatch.setattr(registry, "_native_request_state", lambda *args: states.append(args[1:]))
+    operation = asyncio.create_task(registry._run_native_delegate_event(session, event))
+    await entered.wait()
+    if fence:
+        session.barge_fenced_responses[ResponseRef(
+            "foreign" if fence == "other-interaction" else activation.binding.interaction_id,
+            "source", 2 if fence == "other-generation" else 1)] = None
+    release.set()
+    await operation
+    assert calls == [event]  # Rejected requests are not retried.
+    assert retired == [("call", interrupted)]
+    assert states == ([] if interrupted else [("failed", "turn", reason)])
+    assert registry._records == {} and registry._native_notifications == {}
+
+
+@pytest.mark.asyncio
 async def test_native_business_late_prepared_output_keeps_real_receipt_and_accepts_no_successor():
     from jiuwenswarm.channels.live_voice.native_business_contract import (
         NATIVE_BUSINESS_CONTRACT_VERSION, NativeBusinessProposal, NativeBusinessAction)

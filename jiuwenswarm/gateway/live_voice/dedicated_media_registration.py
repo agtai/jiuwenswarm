@@ -2674,7 +2674,16 @@ class DedicatedMediaProductRegistry:
         except Exception as error:
             reason = getattr(error, "reason", "NATIVE_DELEGATE_FAILED")
             business = session.activation.business_contract_version is not None
-            if reason == "NATIVE_DELEGATE_INTERRUPTED":
+            interrupted_source = (
+                isinstance(error, NativeRuntimeClientError)
+                and reason == "NATIVE_DELEGATE_RESPONSE_STALE"
+                and any(
+                    ref.interaction_id == delegate.binding.interaction_id
+                    and ref.response_generation == delegate.response_generation
+                    for ref in session.barge_fenced_responses
+                )
+            )
+            if reason == "NATIVE_DELEGATE_INTERRUPTED" or interrupted_source:
                 if business:
                     await session.engine.retire_delegate(delegate.provider_call_id, interrupted=True)
                 return
