@@ -14,6 +14,7 @@ import pytest
 
 from jiuwenswarm.runtime.service import AgentRuntime
 from jiuwenswarm.server.runtime.formal_tasks.unified_committed_input import SqliteUnifiedCommittedInputJournal
+from jiuwenswarm.server.runtime.session.session_history import load_history_records
 from tests.support.live_voice.semantic_model import decision
 from tests.integration.live_voice.test_d90_formal_task_vertical import (
     NOW, EXPIRY, PRODUCT_TOKEN, _project, _context, _scope, _git, _wait,
@@ -51,7 +52,7 @@ class JointModel:
             value = decision(data, pending["operation"], pending["arguments"],
                 pending["target"], pending["target_kind"], pending)
         else:
-            assert text == "keep the conversation running"
+            assert text in {"keep the conversation running", "continue a new foreground answer"}
             value = decision(data)
         return SimpleNamespace(content=json.dumps(value), tool_calls=[])
 
@@ -88,9 +89,11 @@ class JointDialogueAgent(_SlowConversationAdapter):
         super().__init__()
         self.cancelled = set()
         self.finished = set()
+        self.hold_text = None
 
     async def process_formal_live_voice_stream_impl(self, request, inputs):
-        if self.entered:
+        hold = self.hold_text is not None and self.hold_text in str(inputs.get("query", ""))
+        if self.entered and not hold:
             self.release.setdefault(request.request_id, asyncio.Event()).set()
         try:
             async for item in super().process_formal_live_voice_stream_impl(request, inputs):
@@ -102,9 +105,11 @@ class JointDialogueAgent(_SlowConversationAdapter):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("finish", ["complete", "cancel"])
+@pytest.mark.parametrize("finish", ["complete", "cancel", "barge"])
 async def test_unified_task_replay_scope_and_voice_close_share_host_lifetime(tmp_path, monkeypatch, finish):
     monkeypatch.setattr("openjiuwen.core.application.tasks.task_store.utc_now", lambda: NOW)
+    monkeypatch.setattr("jiuwenswarm.server.runtime.session.session_history.get_agent_sessions_dir",
+        lambda: tmp_path / "sessions")
     project = tmp_path / "project"
     revision = _project(project)
     database = tmp_path / "state" / "task.sqlite3"
@@ -202,6 +207,73 @@ async def test_unified_task_replay_scope_and_voice_close_share_host_lifetime(tmp
         assert durable_state() == before
         assert len(models.calls) == model_calls and len(dialogue_agent.entered) == agent_calls
         assert len(task_agent.requests) == 1 and not (project / "RESULT-joint.md").exists()
+        if finish == "barge":
+            response = dialogue.payload["result"]["response"]
+            rejected_barge = await registry.handle_p2_barge_in(params={
+                **_joint_product_p2_params(), "action_id": "interrupt-current-dialogue",
+                "response_id": response["response_id"],
+                "response_generation": response["response_generation"], "cancel_response": True,
+            }, request_id="stale-barge", session_id="session-1")
+            assert not rejected_barge.ok, rejected_barge.payload
+            assert rejected_barge.payload["error"]["reason"] == "STALE_RESPONSE_OUTPUT"
+            assert not dialogue_agent.cancelled
+            assert durable_state() == before
+            # The real Host serializes foreground execution in one public
+            # session. Settle its first dialogue before starting the next;
+            # the independent durable Task remains running throughout.
+            first_dialogue = next(iter(dialogue_agent.entered))
+            dialogue_agent.release[first_dialogue].set()
+            await _wait(lambda: first_dialogue in dialogue_agent.finished)
+            second_route = _joint_product_p2_params(correlation_id="correlation-second",
+                interaction_id="interaction-second", activation_id="activation-second")
+            activated_second = await registry.handle_p2_activate(params=second_route,
+                request_id="activate-second", session_id="session-1", channel_id="web")
+            assert activated_second.ok, activated_second.payload
+            previous_dialogues = set(dialogue_agent.entered)
+            dialogue_agent.hold_text = "continue a new foreground answer"
+            current_dialogue = await submit("second-dialogue", dialogue_agent.hold_text, **second_route)
+            assert current_dialogue.ok, current_dialogue.payload
+            await _wait(lambda: bool(set(dialogue_agent.entered) - previous_dialogues - dialogue_agent.finished))
+            active_dialogues = set(dialogue_agent.entered) - previous_dialogues - dialogue_agent.finished
+            assert len(active_dialogues) == 1
+            second_dialogue = active_dialogues.pop()
+            response = current_dialogue.payload["result"]["response"]
+            interrupted = await registry.handle_p2_barge_in(params={
+                **second_route, "action_id": "interrupt-second-dialogue",
+                "response_id": response["response_id"],
+                "response_generation": response["response_generation"], "cancel_response": True,
+            }, request_id="barge", session_id="session-1")
+            assert interrupted.ok, interrupted.payload
+            assert interrupted.payload["result"]["applied"] is True
+            assert second_dialogue not in dialogue_agent.cancelled
+            interrupt_params = {**second_route, "action_id": "stop-second-generation",
+                "response_id": response["response_id"], "response_generation": response["response_generation"]}
+            before_interrupt = durable_state()
+            forbidden_scope = await registry.handle_p2_interrupt_generation(
+                params={**interrupt_params, "cancel_scope": "task.cancel"},
+                request_id="forbidden-cancel-scope", session_id="session-1")
+            assert not forbidden_scope.ok, forbidden_scope.payload
+            assert durable_state() == before_interrupt
+            assert second_dialogue not in dialogue_agent.cancelled
+            generation_interrupted = await registry.handle_p2_interrupt_generation(
+                params=interrupt_params, request_id="stop-generation", session_id="session-1")
+            assert generation_interrupted.ok, generation_interrupted.payload
+            await _wait(lambda: second_dialogue in dialogue_agent.cancelled)
+            replayed_interrupt = await registry.handle_p2_interrupt_generation(
+                params=interrupt_params, request_id="stop-generation", session_id="session-1")
+            assert replayed_interrupt.payload == generation_interrupted.payload
+            assert second_dialogue not in dialogue_agent.finished
+            assert dialogue_agent.cancelled == {second_dialogue}
+            assert store.get_task(task_id, _scope()).outcome is None
+            assert not task_agent.release["joint"].is_set()
+            assert len(task_agent.requests) == 1
+            second_closed = await registry.handle_p2_close(params=second_route,
+                request_id="close-second", session_id="session-1")
+            assert second_closed.ok, second_closed.payload
+            history = load_history_records("session-1")
+            assert any(row["content"] == "continue a new foreground answer" for row in history)
+            assert all(row["role"] == "user" for row in history), history
+            assert len({row["id"] for row in history}) == len(history)
         if finish == "cancel":
             # Current explicit semantic cancel supplies consent to the normal
             # durable claim; it does not fabricate a second utterance.
@@ -219,7 +291,7 @@ async def test_unified_task_replay_scope_and_voice_close_share_host_lifetime(tmp
         closed = await registry.handle_p2_close(params=_joint_product_p2_params(),
             request_id="close-voice", session_id="session-1")
         assert closed.ok, closed.payload
-        if finish == "complete":
+        if finish in {"complete", "barge"}:
             assert store.get_task(task_id, _scope()).outcome is None
             assert not task_agent.release["joint"].is_set()
             task_agent.release["joint"].set()
@@ -228,6 +300,14 @@ async def test_unified_task_replay_scope_and_voice_close_share_host_lifetime(tmp
             record = store.get_task(task_id, _scope())
             assert record.outcome is TerminalOutcome.COMPLETED, (record.state, record.attempt_id, summary, store.counts())
             assert (project / "RESULT-joint.md").read_text() == "completed joint\n"
+            result = await registry.handle_p3_query(operation="task.result", params={
+                "auth_token": PRODUCT_TOKEN, "session_id": "session-1", "task_id": task_id},
+                request_id="read-completed-result", session_id="session-1")
+            assert result.ok, result.payload
+            assert result.payload["result"]["availability"] == "available", result.payload
+            saved = result.payload["result"]["task_result"]
+            assert saved["task_id"] == task_id and saved["attempt_id"] == record.attempt_id
+            assert saved["result_text"] == "completed"
         assert (project / "README.md").read_text() == "baseline\n"
         assert len(task_agent.requests) == 1
     finally:

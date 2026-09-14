@@ -643,3 +643,59 @@ See [files](../evidence/DEEP_PROJECT_AUTHORITY_20260914.json) and
 [modules](../evidence/DEEP_PROJECT_AUTHORITY_MODULES_20260914.json). This closes
 the historical policy-correspondence uncertainty, not all Host/Voice integration
 or outstanding backend tests. Final package evidence still predates these edits.
+
+## Current joint cancellation-domain continuation
+
+Extend the current unified Host-runtime joint test with foreground barge-in while
+a real SQLite/Direct Task is running. Preserve the old S6 oracle that cancelling
+the dialogue cannot cancel the Task; assert the exact dialogue is cancelled and
+the Task can complete and return its saved result. This is test-only Tier 1
+evidence migration using controlled lower Agents, real Host execution and real
+files. The old hand-built voice-origin/retired-p2.submit journey is not silently
+credited or deleted; real Gateway receipt coverage and adjustment integration
+remain separate gaps until implemented. No production or policy change.
+
+Current reproduction is **not passing**. Old-response barge correctly rejects
+`STALE_RESPONSE_OUTPUT`; Host foreground requests in the same public session
+serialize, so the second dialogue starts after the first settles. D-104 explicitly
+keeps barge-in separate from Harness cancellation (also characterized by
+`test_interrupt_after_barge_in_still_stops_the_running_round`). The new test now
+calls the real `handle_p2_interrupt_generation` after barge-in. It observes exact
+lower-Agent cancellation, rejects injected `cancel_scope=task.cancel` without
+durable writes, and observes the detached Task still running. However closing
+the second activation returns `PRODUCT_P2_CLEANUP_PENDING`, and root cleanup
+retains a failed segment. This final cleanup failure still needs diagnosis; do
+not weaken the assertion or credit the whole joint journey. Latest local log:
+`logs/deep-joint-barge-20260914.log`. No production change or new commit yet.
+
+### Joint interruption evidence closed
+
+The cleanup failure was traced to `history_write_intents_pending`, not an
+unsettled Agent. The existing fixture isolated Task SQLite/project files but
+used the default Host history directory with fixed commit IDs. Read-only
+inspection confirmed that `live-voice:commit-second-dialogue:user` in default
+synthetic `session-1/history.jsonl` contained the first fixture wording and
+conflicted with its corrected wording. The real idempotent history writer
+correctly refused replacement. No existing history was erased or overwritten.
+The fixture now injects only its session-history root under pytest `tmp_path`,
+retaining the real writer, and checks real user rows with unique IDs and zero
+unplayed assistant records. Earlier runs left synthetic history in the default
+test-named session; this batch does not delete private runtime files.
+
+Final scoped command:
+
+```powershell
+.venv/Scripts/python.exe -m pytest -q -o addopts= -o log_cli=false tests/integration/live_voice/test_unified_host_task_joint.py --tb=short --show-capture=no
+```
+
+**3 passed in19.35s**, scoped Ruff and diff checks pass. The new barge mode
+preserves stale-response rejection, tests barge output fencing independently
+of actual generation cancellation, rejects an injected Task cancel scope with
+unchanged SQLite, observes exact lower-Agent cancellation through the real Host
+coordinator, replays the same interruption, closes both activations and then
+completes the detached Task. Completion modes read the actual saved Task result
+and compare task/attempt identity, result text and produced file content. No
+Provider, microphone, playback ACK or artifact-download acceptance is inferred.
+No production changes: the last accounting manifests remain current. Old S6
+voice-origin/notification and broader adjustment evidence are still open; this
+does not make the retired `p2.submit` test green.

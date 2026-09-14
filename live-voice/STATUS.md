@@ -122,6 +122,14 @@ real root/HEAD/scope and Executor conflict protection remain. Five resolver/
 factory checks and seven real-Git/SQLite snapshot, collision and recovery cases
 pass. The SDK legacy proof API remains callable for package compatibility.
 
+The current unified Host joint now covers generation interruption separately
+from barge output fencing: exact foreground cancellation leaves the durable
+Task running, duplicated interruption reuses the result, and injected Task
+cancel scope has zero SQLite effects. Both Voice activations close before Task
+completion and saved-result query. Three joint modes pass with real isolated
+history/SQLite/Git and controlled lower Agents; no unplayed assistant history is
+written. The old retired-entry voice-origin/notification test remains unclosed.
+
 The frozen-input recovery child now keeps server generation/context identity in
 the existing Host journal, independently of model records. P3 and unified input
 share a persisted sequence; conflicting unified input cannot advance it. Current
