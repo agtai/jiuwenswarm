@@ -1169,3 +1169,54 @@ SDK implementation commit: `0b8cb556d` (`feat: expose atomic task authority
 snapshots from existing store`). The paired Host commit consumes that `.5` API;
 both belong to this atomic-read change. Neither repository was pushed and no
 history was rewritten.
+
+
+### Work producer ownership convergence (2026-09-14, scoped implementation verified)
+
+Audit: WorkStore checkpoint CAS is the only durable Work state; Host journal
+presentation/suppression facts do not establish execution success. Task origins
+record a Native input-to-Task association before input-receipt completion; current
+Task records do not contain that association. Retain it for the accepted Task /
+incomplete input receipt crash window, intersecting with fresh authorized Tasks.
+Deleting it is not justified by its recoverable projection alone.
+
+The remaining allocation split is real: NativeBusinessRouter manages the Host
+producer dictionary and lock, while HostWorkService retires/closes them. Give the
+existing Host service exclusive allocation and cleanup ownership, using its own
+AgentRuntime session coordinator and AgentManager. Remove Router pool/lock aliases
+and allocation implementation. Keep only scoped Voice input adaptation; retain the
+existing Agent channel identity/cache, generation fence, pins, capacity and pending
+cleanup behavior. This is mostly retained allocation code, not duplicate deletion.
+
+Tier 2 execution-lifetime boundary: source is runtime/service.py, runtime/work/service.py
+and native_business_router.py; tests are runtime/test_host_work_service.py plus
+relevant Work execution regressions. Acceptance: direct Host allocation without a
+Voice Registry, exact generation reuse, stale/closed/changed-generation rejection
+with zero Agent execution/pin effects, retained pending cleanup, Host close races,
+Voice close preserving admitted work. No schema, auth-policy, state-machine,
+Provider, latency, retry policy or SDK API change. No deployment or data migration.
+
+
+Validation closure: 60 tests passed in 10.55s for HostWorkService, WorkRuntime /
+real Harness adapters and native read-only Tool policy. Three actual Native
+Registry Work tests passed in 8.28s: accepted work survives Voice disconnect,
+project rebinding during Agent lookup has zero Work/Agent effects, update/cancel
+preserves Task store and retires the old result. The new direct Host test uses
+real Host session/Harness/Work/SQLite and a controlled Agent; it is not a real
+external model query. Ruff and scoped diff review passed. Independent read-only
+review found no introduced blocker; get_executor is a trusted internal API,
+not a new authorization boundary or new project_dir/scope validator.
+
+Initial execution had a missing moved-helper import, fixed before the successful
+run. Subsequent default-coverage runs displayed passing cases but were interrupted
+while coverage parsed the whole repository; a faulthandler stack identified that
+reporting work. The successful commands explicitly use --no-cov, with exit 0.
+No timeouts, buffering, product latency or test assertion limits were changed.
+
+Same-basis production delta: Voice -72, Host +70, SDK unchanged; net -2 only.
+Most allocation code is retained, with service-owned runtime dependencies replacing
+Registry dependencies. Delete four Voice pool/lock initialization/alias lines;
+retain the allocation algorithm and add the direct service-call adaptation. Total
+is 194612, net -1068 from the initial 195680. This is not broader Task/Work/native
+manager completion. SDK stays at 0b8cb556d and .5; no new SDK commit or install is
+needed for this Host-only internal change. No push or deployment.

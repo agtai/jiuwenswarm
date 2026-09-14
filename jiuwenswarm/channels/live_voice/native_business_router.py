@@ -40,8 +40,6 @@ class NativeBusinessRouter:
         self._work_owner = None
         self._work_journal = None
         self._work_service = None
-        self._executors = {}
-        self._executor_lock = asyncio.Lock()
         self._work_presentations = {}
         self._selected_work_events = {}
         self._task_events = {}
@@ -77,8 +75,6 @@ class NativeBusinessRouter:
             self._work_service = service
             self._work_journal = service.journal
             self._work_owner = service.work_runtime
-            self._executors = service.executors
-            self._executor_lock = service.executor_lock
         return self._work_owner
 
     @staticmethod
@@ -295,75 +291,6 @@ class NativeBusinessRouter:
             return _error_result(request_id, reason=getattr(error, "reason", "NATIVE_BUSINESS_CONTEXT_UNAVAILABLE"),
                 code=getattr(error, "code", ErrorCode.UNAVAILABLE))
 
-    async def _executor(self, route):
-        from jiuwenswarm.server.runtime.work.service import HostWorkAgentExecutor
-        self.works()  # Every producer belongs to the resident Host service.
-        scope = route.binding.scope
-
-        def current_key():
-            from jiuwenswarm.runtime.session import RuntimeSessionState
-            if self._work_service.closing or self._work_service.closed:
-                raise NativeBusinessViolation("NATIVE_WORK_HOST_UNAVAILABLE", code=ErrorCode.UNAVAILABLE)
-            snapshot = self.registry._runtime.session_coordinator.snapshot_session(scope.session_id)
-            if snapshot is None or snapshot.state in {
-                RuntimeSessionState.CLOSED, RuntimeSessionState.QUIESCING,
-            }:
-                raise NativeBusinessViolation("NATIVE_WORK_SESSION_UNAVAILABLE", code=ErrorCode.UNAVAILABLE)
-            return scope, snapshot.generation
-
-        async with self._executor_lock:
-            key = current_key()
-            retained = self._executors.get(key)
-            if retained is not None:
-                return retained[0]
-            await self._work_service.retire_previous_generations_locked(scope, key[1])
-            if current_key() != key:
-                raise NativeBusinessViolation("NATIVE_WORK_SESSION_GENERATION_CHANGED", code=ErrorCode.STALE)
-            if len(self._executors) >= 32:
-                raise NativeBusinessViolation("NATIVE_WORK_SCOPE_CAPACITY", code=ErrorCode.UNAVAILABLE)
-            facade = await self.registry._agent_manager.get_agent(
-                "live_voice_native_work", "agent", route.native_p3_authority.context.file_path, None)
-            if current_key() != key:
-                raise NativeBusinessViolation("NATIVE_WORK_SESSION_GENERATION_CHANGED", code=ErrorCode.STALE)
-            if facade is None or not callable(getattr(facade, "process_formal_live_voice_stream", None)):
-                raise NativeBusinessViolation("FORMAL_AGENT_FACADE_UNAVAILABLE", code=ErrorCode.UNAVAILABLE)
-            pin = getattr(self.registry._agent_manager, "pin_agent", None)
-            if callable(pin):
-                pin(facade)
-            identity_source = {
-                "scope": scope.to_dict(), "session_generation": key[1],
-            }
-            identity = hashlib.sha256(canonical_json_bytes(identity_source)).hexdigest()
-            from jiuwenswarm.server.runtime.agent_adapter.runtime_formal import RuntimeFormalAgentFacade
-            producer = RuntimeFormalAgentFacade(
-                runtime=self.registry._runtime, agent=facade, scope=scope,
-                agent_channel_id="live_voice_native_work", mode="agent",
-                project_dir=route.native_p3_authority.context.file_path,
-            )
-            runtime = HostWorkAgentExecutor(scope=scope, instance_id="native-work-service:" + identity,
-                facade=producer, max_concurrency=4, max_requests=128)
-            try:
-                if not await runtime.start():
-                    raise NativeBusinessViolation("NATIVE_WORK_EXECUTOR_UNAVAILABLE", code=ErrorCode.UNAVAILABLE)
-                if current_key() != key:
-                    raise NativeBusinessViolation("NATIVE_WORK_SESSION_GENERATION_CHANGED", code=ErrorCode.STALE)
-            except BaseException:
-                settled = False
-                try:
-                    result = await runtime.close(timeout_seconds=1.0)
-                    settled = getattr(result, "closed", False) or runtime.snapshot().closed
-                except BaseException:
-                    pass  # Retain cleanup ownership while preserving the primary failure.
-                if settled:
-                    unpin = getattr(self.registry._agent_manager, "unpin_agent", None)
-                    if callable(unpin):
-                        unpin(facade)
-                else:
-                    self._executors[("cleanup", key, id(runtime))] = (runtime, facade)
-                raise
-            self._executors[key] = (runtime, facade)
-            return runtime
-
     async def _work(self, route, delegate, admission, selection):
         from openjiuwen.core.application.tasks.work_runtime import (context_identity)
         action = delegate.business
@@ -383,7 +310,8 @@ class NativeBusinessRouter:
             source="live_voice.native_work_specification")
         context = FormalContextSnapshot(scope, selection.formal.entries + specification.entries)
         commit = admission.turn_commit
-        executor = await self._executor(route)
+        executor = await self._work_service.get_executor(
+            scope=scope, project_dir=route.native_p3_authority.context.file_path)
         await self._require_work_authority(route)
         async def run(control):
             control.check()

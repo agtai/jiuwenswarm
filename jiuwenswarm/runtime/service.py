@@ -325,7 +325,7 @@ class AgentRuntime:
         canonical = normcase(str(Path(database_path).expanduser().resolve()))
         service = self._work_services.get(canonical)
         if service is None:
-            service = HostWorkService(canonical, agent_manager=self._agent_manager)
+            service = HostWorkService(canonical, runtime=self)
             self._work_services[canonical] = service
         if service.closed or service.closing:
             raise RuntimeStateError("runtime work service is closed")

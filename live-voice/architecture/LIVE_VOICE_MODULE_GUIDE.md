@@ -82,6 +82,7 @@ Realtime 还输出输入转写和回复转写事件，适配器转交应用用�
 Realtime 业务调用 → Gateway → M4+M5 校验会话、项目、来源、对象
   ├─ 已有状态/结果：直接读取授权范围内事实 → 真实回执
   └─ 需要分析：HostWorkService → SDK WorkRuntime 先保存受理
+       → HostWorkService.get_executor（宿主分配/代际/pin）
        → HostWorkAgentExecutor → 既有 JiuWenSwarmRoundHarness
        → RuntimeFormalAgentFacade → AgentRuntime.stream_owned → SDK Agent
        → SDK 保存结果和结算状态
@@ -173,7 +174,9 @@ checkpoint 现使用 SDK `AgentCallbackManager.execute` 的 `scoped_agent_rail` 
 Work 保留独立持久管理，不能等同于 Controller/Team 的任务对象。2026-09-14
 producer 改为 HostWorkAgentExecutor，直接复用既有 Harness 的预留、运行、取消和
 清理；不再创建 Voice AgentConversationRuntime、ConversationRuntimeLoop 或 Bridge。
-HostWorkService 仍持有 producer 寿命和 Agent pin，语音轮次结束不关闭它。
+HostWorkService 独占 producer 分配、代际检查、失败清理、寿命和 Agent pin；
+Voice 不再持有其池/锁或分配实现。Voice 仅传已授权的 scope/project_dir，
+Host 内部接口不替代入口授权。语音轮次结束不关闭它。
 Harness 的结果收集只接受恰好一个非空 final 和成功终态；物理结算与结果有效性
 分别检查，清理失败或超时保留 UNKNOWN。该执行路径已收敛，不代表所有持久管理
 能力已与 Controller/Team 合一。

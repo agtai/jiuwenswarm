@@ -1,0 +1,36 @@
+{
+  "baseline_host": "a79b4234c21fa80ac98b270a27fc3c63cf4e4fdd",
+  "sdk_head": "0b8cb556d3279c302c1ab658809b634b8c20e2ba",
+  "source_sha256": {
+    "jiuwenswarm/channels/live_voice/native_business_router.py": "9bf1b23e2501ea2040bed463321394efe437c0ebaa529abb9e9e3d178694b005",
+    "jiuwenswarm/runtime/service.py": "f9aafb350ebae8c92e730c4a06f227b0ff7f34aaa6dc3bf3c41faafe4e8e498e",
+    "jiuwenswarm/server/runtime/work/service.py": "3dc386cf3fec659cfb4358866cd64dbba946361d04cb5aa4d302762a9d4b1a06",
+    "tests/unit_tests/runtime/test_host_work_service.py": "bd9fe8f9d9e43fccae3074858829a3d37f5bba39b411287d6f20e33189a78ca9"
+  },
+  "checks": [
+    {
+      "command": ".venv/Scripts/python.exe -m pytest tests/unit_tests/runtime/test_host_work_service.py tests/unit_tests/live_voice/test_native_work_runtime.py tests/unit_tests/agentserver/test_native_work_formal_policy.py --no-cov -q --disable-warnings --tb=short",
+      "passed": 60,
+      "seconds": 10.55,
+      "exit_code": 0
+    },
+    {
+      "cases": [
+        "test_readonly_refund_work_returns_before_completion_and_survives_p2_disconnect",
+        "test_project_rebound_while_agent_resource_waits_has_zero_work_or_agent_effect",
+        "test_work_update_then_cancel_preserves_task_store_and_retires_old_result"
+      ],
+      "file": "tests/unit_tests/live_voice/test_native_business_registry.py",
+      "options": "--no-cov -q --disable-warnings --tb=short",
+      "passed": 3,
+      "seconds": 8.28,
+      "exit_code": 0
+    }
+  ],
+  "limits": [
+    "Real Host/Harness/SQLite; controlled Agent, no external Provider or physical audio",
+    "Internal trusted get_executor does not replace caller authorization",
+    "Most allocation implementation retained; Voice -72 Host +70 SDK 0; net -2",
+    "No new SQLite schema, Work state machine, SDK API or latency policy"
+  ]
+}

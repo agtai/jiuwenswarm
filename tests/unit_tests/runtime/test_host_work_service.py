@@ -68,7 +68,7 @@ async def test_voice_release_keeps_host_work_and_actual_producer_pool_alive(tmp_
     service = runtime.get_work_service(journal.database_path)
     producer = SimpleNamespace(close=AsyncMock(return_value=SimpleNamespace(closed=True)))
     facade = object()
-    service.executors[SCOPE] = (producer, facade)
+    service._executors[SCOPE] = (producer, facade)
     started, release = asyncio.Event(), asyncio.Event()
 
     async def run(control):
@@ -83,7 +83,8 @@ async def test_voice_release_keeps_host_work_and_actual_producer_pool_alive(tmp_
     assert owner.query(scope=SCOPE, work_id=work.work_id).state is NativeWorkState.RUNNING
     producer.close.assert_not_called()
     second = NativeBusinessRouter(registry)
-    assert second.works() is owner and second._executors is service.executors
+    assert second.works() is owner and second._work_service is service
+    assert not hasattr(second, "_executors") and not hasattr(second, "_executor_lock")
     release.set()
     # Await the actual existing work operation, not a projected receipt.
     await asyncio.wait_for(owner._records[(SCOPE, work.work_id, work.revision)].operation, 2)
@@ -110,7 +111,7 @@ async def test_existing_recovery_marks_lost_process_unknown_without_running_agen
     assert restored.state is NativeWorkState.UNKNOWN
     assert restored.reason == "PROCESS_OWNERSHIP_LOST" and restored.execution_settled
     assert restored.sequence == before.sequence + 1
-    assert service.executors == {}
+    assert service._executors == {}
     runtime._initializer.assert_not_called()
     await runtime.close()
 
@@ -139,17 +140,17 @@ async def test_incomplete_producer_cleanup_is_retained_for_host_close_retry(tmp_
         snapshot=lambda: SimpleNamespace(closed=False),
     )
     facade = object()
-    service.executors[SCOPE] = (producer, facade)
+    service._executors[SCOPE] = (producer, facade)
     with pytest.raises(RuntimeError):
         await runtime.close()
     assert not runtime.closed and not service.closed and service.closing
-    assert service.executors[SCOPE] == (producer, facade)
+    assert service._executors[SCOPE] == (producer, facade)
     runtime.agent_manager.unpin_agent.assert_not_called()
     runtime.agent_manager.cleanup.assert_not_called()
     with pytest.raises(RuntimeStateError):
         runtime.get_work_service(journal.database_path)
     await runtime.close()
-    assert runtime.closed and service.closed and service.executors == {}
+    assert runtime.closed and service.closed and service._executors == {}
     runtime.agent_manager.unpin_agent.assert_called_once_with(facade)
 
 
@@ -197,8 +198,8 @@ async def executor_router(tmp_path):
 @pytest.mark.asyncio
 async def test_recreated_session_uses_new_executor_and_old_facade_stays_fenced(tmp_path):
     value, agent, manager, runtime, router, route = await executor_router(tmp_path)
-    first = await router._executor(route)
-    assert await router._executor(route) is first
+    first = await router._work_service.get_executor(scope=route.binding.scope, project_dir=route.native_p3_authority.context.file_path)
+    assert await router._work_service.get_executor(scope=route.binding.scope, project_dir=route.native_p3_authority.context.file_path) is first
     assert [item async for item in first._facade.process_formal_live_voice_stream(value)][-1].is_complete
     old_generation = runtime.session_coordinator.snapshot_session(value.commit.scope.session_id).generation
     await runtime.session_coordinator.close_session(value.commit.scope.session_id)
@@ -208,13 +209,13 @@ async def test_recreated_session_uses_new_executor_and_old_facade_stays_fenced(t
     with pytest.raises(RuntimeStateError, match="FORMAL_SESSION_GENERATION_CHANGED"):
         await anext(first._facade.process_formal_live_voice_stream(replace(value, request_id="stale-request")))
     assert agent.seen == [value]
-    second = await router._executor(route)
-    assert second is not first and await router._executor(route) is second
+    second = await router._work_service.get_executor(scope=route.binding.scope, project_dir=route.native_p3_authority.context.file_path)
+    assert second is not first and await router._work_service.get_executor(scope=route.binding.scope, project_dir=route.native_p3_authority.context.file_path) is second
     fresh = replace(value, request_id="fresh-request", internal_session_id="fresh-internal")
     result = [item async for item in second._facade.process_formal_live_voice_stream(fresh)]
     assert result[-1].payload["content"] == "Exact answer"
     assert agent.seen == [value, fresh]
-    assert set(router._executors) == {(value.commit.scope, new_generation)}
+    assert set(router._work_service._executors) == {(value.commit.scope, new_generation)}
     assert first.snapshot().closed
     assert manager.unpin_agent.call_count == 1
     await runtime.close()
@@ -223,7 +224,7 @@ async def test_recreated_session_uses_new_executor_and_old_facade_stays_fenced(t
 
 @pytest.mark.asyncio
 async def test_executor_generation_change_during_facade_lookup_has_zero_producer_effects(tmp_path):
-    from jiuwenswarm.channels.live_voice.native_business_contract import NativeBusinessViolation
+    from openjiuwen.core.application.tasks.work_runtime import WorkViolation
 
     value, agent, manager, runtime, router, route = await executor_router(tmp_path)
 
@@ -233,9 +234,9 @@ async def test_executor_generation_change_during_facade_lookup_has_zero_producer
         return agent
 
     manager.get_agent.side_effect = recreate
-    with pytest.raises(NativeBusinessViolation, match="NATIVE_WORK_SESSION_GENERATION_CHANGED"):
-        await router._executor(route)
-    assert router._executors == {} and agent.seen == [] and agent.gates == []
+    with pytest.raises(WorkViolation, match="NATIVE_WORK_SESSION_GENERATION_CHANGED"):
+        await router._work_service.get_executor(scope=route.binding.scope, project_dir=route.native_p3_authority.context.file_path)
+    assert router._work_service._executors == {} and agent.seen == [] and agent.gates == []
     manager.pin_agent.assert_not_called()
     manager.unpin_agent.assert_not_called()
     await runtime.close()
@@ -243,22 +244,22 @@ async def test_executor_generation_change_during_facade_lookup_has_zero_producer
 
 @pytest.mark.asyncio
 async def test_closed_session_cannot_allocate_work_executor(tmp_path):
-    from jiuwenswarm.channels.live_voice.native_business_contract import NativeBusinessViolation
+    from openjiuwen.core.application.tasks.work_runtime import WorkViolation
 
     value, agent, manager, runtime, router, route = await executor_router(tmp_path)
     await runtime.session_coordinator.close_session(value.commit.scope.session_id)
-    with pytest.raises(NativeBusinessViolation, match="NATIVE_WORK_SESSION_UNAVAILABLE"):
-        await router._executor(route)
+    with pytest.raises(WorkViolation, match="NATIVE_WORK_SESSION_UNAVAILABLE"):
+        await router._work_service.get_executor(scope=route.binding.scope, project_dir=route.native_p3_authority.context.file_path)
     manager.get_agent.assert_not_called()
     manager.pin_agent.assert_not_called()
-    assert router._executors == {} and agent.seen == []
+    assert router._work_service._executors == {} and agent.seen == []
     await runtime.close()
 
 
 @pytest.mark.asyncio
 async def test_host_close_waits_for_blocked_start_and_retains_late_failed_cleanup(tmp_path, monkeypatch):
     from jiuwenswarm.server.runtime.work import service as work_service
-    from jiuwenswarm.channels.live_voice.native_business_contract import NativeBusinessViolation
+    from openjiuwen.core.application.tasks.work_runtime import WorkViolation
 
     value, agent, manager, runtime, router, route = await executor_router(tmp_path)
     started, release = asyncio.Event(), asyncio.Event()
@@ -281,7 +282,7 @@ async def test_host_close_waits_for_blocked_start_and_retains_late_failed_cleanu
 
     producer = StartingExecutor()
     monkeypatch.setattr(work_service, "HostWorkAgentExecutor", lambda **kwargs: producer)
-    allocation = asyncio.create_task(router._executor(route))
+    allocation = asyncio.create_task(router._work_service.get_executor(scope=route.binding.scope, project_dir=route.native_p3_authority.context.file_path))
     await asyncio.wait_for(started.wait(), 2)
     closing = asyncio.create_task(runtime.close())
     for _ in range(100):
@@ -293,16 +294,16 @@ async def test_host_close_waits_for_blocked_start_and_retains_late_failed_cleanu
     manager.unpin_agent.assert_not_called()
     manager.cleanup.assert_not_called()
     release.set()
-    with pytest.raises(NativeBusinessViolation, match="NATIVE_WORK_HOST_UNAVAILABLE"):
+    with pytest.raises(WorkViolation, match="NATIVE_WORK_HOST_UNAVAILABLE"):
         await allocation
     with pytest.raises(RuntimeStateError, match="cleanup is incomplete"):
         await closing
-    assert len(router._executors) == 1 and not runtime.closed and not router._work_service.closed
+    assert len(router._work_service._executors) == 1 and not runtime.closed and not router._work_service.closed
     manager.unpin_agent.assert_not_called()
     manager.cleanup.assert_not_called()
     assert agent.seen == []
     await runtime.close()
-    assert runtime.closed and router._work_service.closed and router._executors == {}
+    assert runtime.closed and router._work_service.closed and router._work_service._executors == {}
     assert len(attempts) == 3
     manager.unpin_agent.assert_called_once_with(agent)
 
@@ -314,8 +315,8 @@ async def test_more_than_pool_capacity_session_reopens_reclaim_idle_generations(
         if index:
             await runtime.session_coordinator.close_session(value.commit.scope.session_id)
             await runtime.register_session(session_id=value.commit.scope.session_id, channel_id="web")
-        executor = await router._executor(route)
-        assert len(router._executors) == 1
+        executor = await router._work_service.get_executor(scope=route.binding.scope, project_dir=route.native_p3_authority.context.file_path)
+        assert len(router._work_service._executors) == 1
         assert manager.unpin_agent.call_count == index
     fresh = replace(value, request_id="after-35-reopens", internal_session_id="new-generation-internal")
     chunks = [item async for item in executor._facade.process_formal_live_voice_stream(fresh)]
@@ -336,7 +337,7 @@ async def test_nonsettled_predecessor_is_retained_without_reuse_or_unpin(tmp_pat
     )
     previous_facade = object()
     key = (value.commit.scope, generation)
-    router._executors[key] = (predecessor, previous_facade)
+    router._work_service._executors[key] = (predecessor, previous_facade)
     work = None
     release = asyncio.Event()
     if state == "work-unsettled":
@@ -349,8 +350,8 @@ async def test_nonsettled_predecessor_is_retained_without_reuse_or_unpin(tmp_pat
         work = await router._work_owner.start(**arguments, runner=run)
     await runtime.session_coordinator.close_session(value.commit.scope.session_id)
     await runtime.register_session(session_id=value.commit.scope.session_id, channel_id="web")
-    current = await router._executor(route)
-    assert current is not predecessor and router._executors[key] == (predecessor, previous_facade)
+    current = await router._work_service.get_executor(scope=route.binding.scope, project_dir=route.native_p3_authority.context.file_path)
+    assert current is not predecessor and router._work_service._executors[key] == (predecessor, previous_facade)
     manager.unpin_agent.assert_not_called()
     if state in {"active", "work-unsettled"}:
         predecessor.close.assert_not_called()
@@ -362,3 +363,37 @@ async def test_nonsettled_predecessor_is_retained_without_reuse_or_unpin(tmp_pat
     predecessor.close.return_value = SimpleNamespace(closed=True)
     await runtime.close()
     assert manager.unpin_agent.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_work_producer_allocation_uses_host_without_voice_registry(tmp_path):
+    from tests.unit_tests.runtime.test_runtime_formal import setup
+
+    value, agent, manager, _admission, runtime, _wrapper = await setup()
+    manager.get_agent = AsyncMock(return_value=agent)
+    manager.pin_agent = Mock()
+    manager.unpin_agent = Mock()
+    journal = SqliteUnifiedCommittedInputJournal(tmp_path / "host-only.sqlite3")
+    service = runtime.get_work_service(journal.database_path)
+    first, second = await asyncio.gather(*(
+        service.get_executor(scope=value.commit.scope, project_dir="project-path")
+        for _ in range(2)
+    ))
+    assert first is second
+    manager.get_agent.assert_awaited_once_with("live_voice_native_work", "agent", "project-path", None)
+    manager.pin_agent.assert_called_once_with(agent)
+    work = await service.work_runtime.start(
+        **{**inputs(), "scope": value.commit.scope, "input_id": value.commit.commit_id,
+           "instruction": "host-owned analysis", "context_id": context_identity(value.context)},
+        runner=lambda control: first.execute_work(
+            control=control, commit=value.commit, context=value.context,
+            instruction="host-owned analysis", correlation_id="host-work"),
+    )
+    await asyncio.wait_for(service.work_runtime._records[(work.scope, work.work_id, work.revision)].operation, 2)
+    result = service.work_runtime.query(scope=work.scope, work_id=work.work_id)
+    assert result.state is NativeWorkState.COMPLETED and result.result_text == "Exact answer"
+    assert result.execution_settled and len(agent.seen) == 1
+    assert SqliteNativeWorkJournal(journal.database_path).restore()[0] == result
+    await runtime.close()
+    assert service.closed and first.snapshot().closed and service._executors == {}
+    manager.unpin_agent.assert_called_once_with(agent)

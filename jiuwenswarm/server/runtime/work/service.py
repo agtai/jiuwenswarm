@@ -110,31 +110,101 @@ class HostWorkAgentExecutor:
 class HostWorkService:
     """Borrowed by channels; only AgentRuntime closes this service."""
 
-    def __init__(self, database_path: str | Path, *, agent_manager: Any) -> None:
+    def __init__(self, database_path: str | Path, *, runtime: Any) -> None:
         self.journal = SqliteNativeWorkJournal(database_path)
         self.work_runtime = NativeWorkRuntime(
             save=self.journal.save,
             restored=self.journal.restore(),
             observer=profile_event,
         )
-        self.executors: dict[Any, tuple[Any, Any]] = {}
-        self.executor_lock = asyncio.Lock()
-        self._agent_manager = agent_manager
+        self._executors: dict[Any, tuple[Any, Any]] = {}
+        self._executor_lock = asyncio.Lock()
+        self._runtime = runtime
+        self._agent_manager = runtime.agent_manager
         self.closed = False
         self.closing = False
+
+    async def get_executor(self, *, scope, project_dir):
+        """Borrow the Host-owned producer for this existing session generation."""
+        from openjiuwen.core.application.tasks.work_runtime import WorkViolation
+        from openjiuwen.core.application.tasks.contracts import ErrorCode, canonical_json_bytes
+
+        def current_key():
+            from jiuwenswarm.runtime.session import RuntimeSessionState
+            if self.closing or self.closed:
+                raise WorkViolation("NATIVE_WORK_HOST_UNAVAILABLE", "NATIVE_WORK_HOST_UNAVAILABLE", code=ErrorCode.UNAVAILABLE)
+            snapshot = self._runtime.session_coordinator.snapshot_session(scope.session_id)
+            if snapshot is None or snapshot.state in {
+                RuntimeSessionState.CLOSED, RuntimeSessionState.QUIESCING,
+            }:
+                raise WorkViolation("NATIVE_WORK_SESSION_UNAVAILABLE", "NATIVE_WORK_SESSION_UNAVAILABLE", code=ErrorCode.UNAVAILABLE)
+            return scope, snapshot.generation
+
+        async with self._executor_lock:
+            key = current_key()
+            retained = self._executors.get(key)
+            if retained is not None:
+                return retained[0]
+            await self.retire_previous_generations_locked(scope, key[1])
+            if current_key() != key:
+                raise WorkViolation("NATIVE_WORK_SESSION_GENERATION_CHANGED", "NATIVE_WORK_SESSION_GENERATION_CHANGED", code=ErrorCode.STALE)
+            if len(self._executors) >= 32:
+                raise WorkViolation("NATIVE_WORK_SCOPE_CAPACITY", "NATIVE_WORK_SCOPE_CAPACITY", code=ErrorCode.UNAVAILABLE)
+            facade = await self._agent_manager.get_agent(
+                "live_voice_native_work", "agent", project_dir, None)
+            if current_key() != key:
+                raise WorkViolation("NATIVE_WORK_SESSION_GENERATION_CHANGED", "NATIVE_WORK_SESSION_GENERATION_CHANGED", code=ErrorCode.STALE)
+            if facade is None or not callable(getattr(facade, "process_formal_live_voice_stream", None)):
+                raise WorkViolation("FORMAL_AGENT_FACADE_UNAVAILABLE", "FORMAL_AGENT_FACADE_UNAVAILABLE", code=ErrorCode.UNAVAILABLE)
+            pin = getattr(self._agent_manager, "pin_agent", None)
+            if callable(pin):
+                pin(facade)
+            identity_source = {
+                "scope": scope.to_dict(), "session_generation": key[1],
+            }
+            identity = hashlib.sha256(canonical_json_bytes(identity_source)).hexdigest()
+            from jiuwenswarm.server.runtime.agent_adapter.runtime_formal import RuntimeFormalAgentFacade
+            producer = RuntimeFormalAgentFacade(
+                runtime=self._runtime, agent=facade, scope=scope,
+                agent_channel_id="live_voice_native_work", mode="agent",
+                project_dir=project_dir,
+            )
+            runtime = HostWorkAgentExecutor(scope=scope, instance_id="native-work-service:" + identity,
+                facade=producer, max_concurrency=4, max_requests=128)
+            try:
+                if not await runtime.start():
+                    raise WorkViolation("NATIVE_WORK_EXECUTOR_UNAVAILABLE", "NATIVE_WORK_EXECUTOR_UNAVAILABLE", code=ErrorCode.UNAVAILABLE)
+                if current_key() != key:
+                    raise WorkViolation("NATIVE_WORK_SESSION_GENERATION_CHANGED", "NATIVE_WORK_SESSION_GENERATION_CHANGED", code=ErrorCode.STALE)
+            except BaseException:
+                settled = False
+                try:
+                    result = await runtime.close(timeout_seconds=1.0)
+                    settled = getattr(result, "closed", False) or runtime.snapshot().closed
+                except BaseException:
+                    pass  # Retain cleanup ownership while preserving the primary failure.
+                if settled:
+                    unpin = getattr(self._agent_manager, "unpin_agent", None)
+                    if callable(unpin):
+                        unpin(facade)
+                else:
+                    self._executors[("cleanup", key, id(runtime))] = (runtime, facade)
+                raise
+            self._executors[key] = (runtime, facade)
+            return runtime
 
     async def _close_executor_locked(self, key: Any) -> None:
         """Release one producer only after its real cleanup, under executor_lock."""
         from jiuwenswarm.runtime.service import RuntimeStateError
 
-        executor, facade = self.executors[key]
+        executor, facade = self._executors[key]
         result = await executor.close(timeout_seconds=1.0)
         if not (getattr(result, "closed", False) or executor.snapshot().closed):
             raise RuntimeStateError("work producer cleanup is incomplete")
         unpin = getattr(self._agent_manager, "unpin_agent", None)
         if callable(unpin):
             unpin(facade)
-        del self.executors[key]
+        del self._executors[key]
 
     async def retire_previous_generations_locked(
         self, scope: Any, generation: int
@@ -148,7 +218,7 @@ class HostWorkService:
             not item.execution_settled for item in self.work_runtime.list(scope=scope)
         ):
             return
-        for key, (executor, _facade) in tuple(self.executors.items()):
+        for key, (executor, _facade) in tuple(self._executors.items()):
             binding = (
                 key[1]
                 if isinstance(key, tuple) and len(key) == 3 and key[0] == "cleanup"
@@ -177,7 +247,7 @@ class HostWorkService:
         # Fence allocation before waiting for an in-flight startup. Its cleanup
         # record must be published under the same lock before we take a snapshot.
         self.closing = True
-        async with self.executor_lock:
+        async with self._executor_lock:
             if self.closed:
                 return
             errors: list[BaseException] = []
@@ -185,7 +255,7 @@ class HostWorkService:
                 await self.work_runtime.close()
             except BaseException as error:
                 errors.append(error)
-            for key in tuple(self.executors):
+            for key in tuple(self._executors):
                 try:
                     await self._close_executor_locked(key)
                 except BaseException as error:
