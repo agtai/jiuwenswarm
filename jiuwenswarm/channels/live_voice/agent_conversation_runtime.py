@@ -42,7 +42,7 @@ from jiuwenswarm.channels.live_voice.agent_bridge import AgentEvent
 from jiuwenswarm.channels.live_voice.agent_bridge_runtime import (
     AgentBridgeCompletionStatus,
     AgentBridgeCompletionHandle,
-    AgentBridgeDispatchReservation,
+    AgentBridgeConsumerSlot,
     AgentBridgeRuntime,
     AgentBridgeRuntimeSnapshot,
     AgentBridgeRuntimeViolation,
@@ -549,7 +549,7 @@ class _ClosedTaskPresentationReservation:
 class _AdmissionEntry:
     fingerprint: bytes
     harness_reservation: HarnessRoundReservation
-    bridge_reservation: AgentBridgeDispatchReservation
+    bridge_reservation: AgentBridgeConsumerSlot
     outcome: asyncio.Future[_AdmissionOutcome]
     coordinator: asyncio.Task[None] | None
     facade: object | None = None
@@ -959,7 +959,7 @@ class AgentConversationRuntime:
         answer_from_selected_task_result: bool,
     ) -> str:
         harness_reservation: HarnessRoundReservation | None = None
-        bridge_reservation: AgentBridgeDispatchReservation | None = None
+        bridge_reservation: AgentBridgeConsumerSlot | None = None
         round_handle: HarnessRoundHandle | None = None
         foreground = NATIVE_FOREGROUND.get()
         try:
@@ -976,16 +976,12 @@ class AgentConversationRuntime:
                 ),
                 facade=self._facade,
             )
-            bridge_reservation = self._bridge.reserve_dispatch(
-                request_id=request_id,
-                round_id=harness_reservation.round_id,
-                response_id=source_response.response_id,
-                correlation_id=correlation_id,
-                commit=commit,
+            bridge_reservation = self._bridge.reserve_consumer(
+                harness_reservation, harness=self._harness,
                 adapter_id=JiuWenSwarmAgentAdapter.adapter_id,
             )
             self._harness.begin_round_commit(harness_reservation)
-            self._bridge.begin_dispatch_commit(bridge_reservation)
+
             round_handle = self._harness.commit_round(
                 harness_reservation,
                 response_ref=source_response,
@@ -995,9 +991,9 @@ class AgentConversationRuntime:
                 allow_tools=allow_tools,
                 answer_from_selected_task_result=(answer_from_selected_task_result),
             )
-            submission = self._bridge.commit_dispatch(
+            submission = self._bridge.attach_consumer(
                 bridge_reservation,
-                response_ref=source_response,
+                handle=round_handle,
                 adapter=JiuWenSwarmAgentAdapter(round_handle),
             )
             try:
@@ -1075,7 +1071,7 @@ class AgentConversationRuntime:
         except BaseException:
             if bridge_reservation is not None:
                 try:
-                    self._bridge.rollback_undelivered_dispatch(
+                    self._bridge.release_consumer(
                         bridge_reservation,
                         reason="native_delegate_failed",
                     )
@@ -2527,7 +2523,7 @@ class AgentConversationRuntime:
         # Reservation is not round acceptance and has zero Agent/Tool/Task/history
         # effect; a capacity or facade failure therefore leaves CR unchanged.
         harness_reservation: HarnessRoundReservation | None = None
-        bridge_reservation: AgentBridgeDispatchReservation | None = None
+        bridge_reservation: AgentBridgeConsumerSlot | None = None
         try:
             assert self._facade is not None
             # A speculative candidate is taken over through a facade that
@@ -2547,19 +2543,15 @@ class AgentConversationRuntime:
                 ),
                 facade=round_facade,
             )
-            bridge_reservation = self._bridge.reserve_dispatch(
-                request_id=request_id,
-                round_id=harness_reservation.round_id,
-                response_id=response_id,
-                correlation_id=correlation_id,
-                commit=commit,
+            bridge_reservation = self._bridge.reserve_consumer(
+                harness_reservation, harness=self._harness,
                 adapter_id=JiuWenSwarmAgentAdapter.adapter_id,
             )
             self._harness.begin_round_commit(harness_reservation)
-            self._bridge.begin_dispatch_commit(bridge_reservation)
+
         except BaseException:
             if bridge_reservation is not None:
-                self._bridge.abort_dispatch(
+                self._bridge.release_consumer(
                     bridge_reservation, reason="product_submission_admission_failed"
                 )
             if harness_reservation is not None:
@@ -3768,9 +3760,9 @@ class AgentConversationRuntime:
                 allow_tools=allow_tools,
             )
             adapter = JiuWenSwarmAgentAdapter(round_handle)
-            submission = self._bridge.commit_dispatch(
+            submission = self._bridge.attach_consumer(
                 bridge_reservation,
-                response_ref=response_ref,
+                handle=round_handle,
                 adapter=adapter,
             )
             handle = AgentConversationHandle(
@@ -3803,15 +3795,13 @@ class AgentConversationRuntime:
             history_task.add_done_callback(self._history_tasks.discard)
             entry.outcome.set_result(_AdmissionOutcome(handle=handle))
         except BaseException as error:  # noqa: BLE001
-            if speculation is not None and speculation.state == "pending":
-                await speculation.discard("admission_failed")
             # ``after_dispatch`` is the durable acceptance seam for unified
             # input.  It runs synchronously before this coroutine yields, so a
             # failure can still prove that neither the queued Bridge delivery
             # nor the scheduled Harness task has started.  Revoke both exact
             # commits before falling back to ordinary reservation aborts.
             try:
-                self._bridge.rollback_undelivered_dispatch(
+                self._bridge.release_consumer(
                     bridge_reservation, reason="composition_checkpoint_failed"
                 )
             except (AgentBridgeRuntimeViolation, RuntimeError):
@@ -3823,17 +3813,15 @@ class AgentConversationRuntime:
             except (HarnessRoundViolation, RuntimeError):
                 pass
             try:
-                self._bridge.abort_dispatch(
-                    bridge_reservation, reason="composition_commit_failed"
-                )
-            except (AgentBridgeRuntimeViolation, RuntimeError):
-                pass
-            try:
                 self._harness.abort_round_reservation(
                     reservation, reason="composition_commit_failed"
                 )
             except (HarnessRoundViolation, RuntimeError):
                 pass
+            # Candidate cleanup can yield, allowing the already scheduled
+            # round to enter its fallback facade. Revoke both commits first.
+            if speculation is not None and speculation.state == "pending":
+                await speculation.discard("admission_failed")
             if response_ref is not None:
                 try:
                     await self._cr.transition_response(
@@ -3882,7 +3870,7 @@ class AgentConversationRuntime:
             )
         except BaseException as error:  # noqa: BLE001 - retained outcome truth
             try:
-                self._bridge.abort_dispatch(
+                self._bridge.release_consumer(
                     entry.bridge_reservation,
                     reason="product_turn_commit_failed",
                 )

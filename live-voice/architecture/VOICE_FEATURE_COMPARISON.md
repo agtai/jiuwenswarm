@@ -1,14 +1,11 @@
 # LiveVoice、Hermes Voice 与多模态全双工：按同一模块比较
 
-> 最新 `.8` 工作树：Work 通过既有 TaskManager 注册/执行/取消，运行于 Host 的 Runner 根任务组；WorkStore 继续持有业务耐久事实。原生 Task 完成不等于 Work 成功，也不生成正式 Task 卡片。同步调度回执和启动回调收尾增强已被现有 BackgroundTask 与 Work 使用。
-> 当前同口径净增：Voice **112334** / Host **48028** / SDK **34134**，合计 **194496**；本批 **+78**，较初始累计 **−1184**。SDK 当前受影响文件36440行含2306行原生基线，不得全算新增。[当前逐文件统计](../evidence/DEEP_NATIVE_TASK_MANAGER_COUNTS_20260914.json)、[当前模块分桶](../evidence/DEEP_NATIVE_TASK_MANAGER_MODULES_20260914.json)。后文较早数字和 `.7` 是历史阶段。
-> AgentServer 仍是应用与执行依赖的运行容器。M4+M5、M7+M9 保持合并；Hermes 和多模态方案仍沿用原固定版本静态证据，未重新核验。本批干净 wheel 安装后 24 项原生/SQLite 场景通过，全部 1016 个 Host / 2409 个 SDK Python 文件与源码一致；整体融合仍 PARTIAL。
+> 2026-09-14 round 身份收敛：Harness 是唯一 round 预约、提交与取消权威；Voice Bridge 只保留有界输出消费许可、队列、校验和完成通知。已删除第二套预约模型、状态枚举、身份指纹账本及提交/回退协议；持久化失败仍先同步撤销未运行的 round，再等待 speculative 清理。
+> 配套 SDK 仍为 `0.1.17+livevoice.8`；Work 已复用 Runner 根任务组和 TaskManager，正式 Task 的执行尝试管理仍未完成原生收敛。AgentServer 是装配应用服务与执行依赖的运行容器。整体仍为 PARTIAL。
+> 当前相同口径：Voice **112101** / Host **48040** / SDK **34134**，合计净增 **194275**；本批 **−221**，较初始 **−1405**。[逐文件统计](../evidence/DEEP_ROUND_IDENTITY_COUNTS_20260914.json)、[合并模块统计](../evidence/DEEP_ROUND_IDENTITY_MODULES_20260914.json)。后文日期较早的数字均为历史阶段；此前 wheel 验证只对应其原提交，不替代当前源码验证。
+> M4+M5、M7+M9 保持合并。Hermes 和多模态方案未重新核验，下面保留原固定版本和静态证据边界；不据本批消重声称性能或物理音频优势。
 
-> 2026-09-14 当前工作树：配套 SDK `.7`。Work 编排由 `AgentRuntime → Runner.get_root_task_group → root.start_soon` 管理；WorkStore 的耐久事实仍为业务权威。独立 producer/cleanup 未结算时保留容量且不发布成功。TaskManager 注册管理及完整 Task/Work 融合仍未完成。
-> 最新相同口径：Voice **112334**、Host **48028**、SDK **34056**，合计净增 **194418**；本批 **+70**（Host 适配 +13、SDK 所有权/结算增强 +57），累计较初始 **−1262**。后文各阶段数字为历史快照。[逐文件统计](../evidence/DEEP_WORK_NATIVE_OWNER_COUNTS_20260914.json)、[合并模块统计](../evidence/DEEP_WORK_NATIVE_OWNER_MODULES_20260914.json)。
-> AgentServer 是宿主运行容器，持有应用服务并装配 Runner；不是另一个执行引擎。M4+M5、M7+M9 保持合并展示。外部 Hermes/多模态版本未重新核验，原静态证据边界不变；本批不证明性能优势。配套 wheel 安装后 12 项真实 Runner/SQLite 场景通过；1016 个 Host、2409 个 SDK Python 文件与当前源码逐字节一致。
-
-> 2026-09-13，LiveVoice 按配套 AgentCore `.5` 的代码审计更新；管理层深度融合仍为 PARTIAL。
+> 下列外部对比来源固定于 2026-09-13；当时本地 SDK 为 `.5`，后续本地变化以上述记录为准。
 > LiveVoice 以当前两仓库源码为准；Hermes 固定 `e151d0b3458e136729fe498b566deb795ffb6a42`；多模态方案是 PR #2813 + #5301 的组合，插件代码对应 `b83923ae1f8cf0a315ce1f580e016edf48a02c2d`。这是模块级静态调用分析，不是三方性能或真实音视频实测。
 
 本地09-14补充：语音产品执行已只使用现行提交入口及单一准入账本；删除旧调度

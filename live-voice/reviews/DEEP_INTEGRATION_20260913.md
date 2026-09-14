@@ -1586,3 +1586,57 @@ This closes this native-management execution boundary only, not the full goal.
 Paired SDK commit `.8`: `c46c9b2ba5ec026e8c3f1459542d46f079ea0dd6`
 (`refactor(work): execute through native task management with retained ownership`).
 This Host commit supplies the matching dependency pin and reviewed source/installed-pair evidence.
+
+### Round identity convergence audit (2026-09-14, Tier 2, in progress)
+
+At Host 977c392d / SDK c46c9b2ba, AgentConversationRuntime reserves the same
+round first in JiuWenSwarmRoundHarness and then in AgentBridgeRuntime. Harness
+commit_round already starts the actual Agent; Bridge's dispatcher limits event
+consumers, not Agent concurrency. Its pending/reserved capacity and global output
+backpressure are distinct from Harness active-round and per-round output bounds.
+Retain those resource limits; converge the duplicate round identity/commit ledger
+onto the existing Harness reservation/handle. Do not introduce another scheduler.
+
+Owned surfaces: Voice composition/Bridge and Host round handle, their admission,
+rollback, stale identity, capacity, close/cancel and speculative integration tests.
+Preserve the synchronous after_dispatch durability barrier, exact cancellation,
+output validation, history ACK truth and physical cleanup. Before removing the
+duplicate ledger, verify rollback runs before any awaited speculative cleanup;
+the current exception path has the opposite order. No database/schema, provider,
+timeout/buffer, project policy or Task-card change is in this child boundary.
+
+The existing admission/capacity/rollback selection passed 10 tests (6.49s).
+Independent source review confirms the duplicate identity and distinct capacity
+semantics; it is not implementation acceptance. Formal Task still directly owns
+asyncio attempt workers: its apply/cleanup protection must be preserved before
+reusing native execution management. This audit does not close that separate gap.
+
+
+Round identity implementation: remove Bridge DispatchReservation, reservation
+state enum, request/round fingerprint ledgers and the standalone submit/two-phase
+round protocol. Existing Host require_reservation validates and returns its
+canonical issued object. Bridge keeps immutable consumption tokens plus private
+capacity/attachment records, bound to one Harness; attach validates the actual
+Host handle. Queues, output validation and close/drain remain unchanged. These
+are output resource facts, not a second round state machine. All located internal
+production callers and Bridge tests use the Host identity; no wire schema change.
+
+The speculative checkpoint failure is reproduced with the actual composition,
+Harness and SpeculativeDialogue and a controlled lower Agent whose cleanup waits.
+Before repair the rejected round starts while cleanup is pending. Revoking the
+consumer and unstarted round before any awaited cleanup prevents fallback Agent,
+tool resumption, notifications and history effects. This preserves the existing
+durability contract, not removal of rollback or a new timeout policy.
+
+Final-source checks: Bridge 32 (3.70s), selected composition/speculation 17 (7.78s),
+Host joint and Work 43 (35.10s), SQLite/history reconstruction 8 (13.53s), all pass.
+The earlier 95-test composition run predates private-record hardening; do not
+count it as another 95 final-source tests. Independent complete-diff review found
+no blockers. Ruff and diff checks pass. SDK .8 is unchanged; this batch uses the
+source pair, not a new installed-wheel claim. No Provider/physical-audio/OS-restart
+acceptance. See DEEP_ROUND_IDENTITY_CHECKS_20260914.json for hashes and limits.
+
+Same-basis production: Voice112101, Host48040, SDK34134, net194275. Batch -221
+(Voice -233, Host validation exposure +12, SDK0), total1405 below initial195680.
+No relocation credited. Native existing baseline lines remain excluded from net
+additions. Formal Task attempt worker/native management remains incomplete.

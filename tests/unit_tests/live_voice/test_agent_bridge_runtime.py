@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Callable
+from dataclasses import replace
 
 import pytest
 
@@ -17,6 +18,10 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     TurnCommit,
     WorkProgressEventV2,
 )
+from jiuwenswarm.server.runtime.agent_adapter.jiuwenswarm_round_harness import (
+    HarnessRoundBinding, HarnessRoundViolation, JiuWenSwarmRoundHarness,
+)
+from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import FormalContextSnapshot
 from jiuwenswarm.channels.live_voice.agent_bridge import AgentEvent
 import jiuwenswarm.channels.live_voice.agent_bridge_runtime as agent_bridge_runtime
 from jiuwenswarm.channels.live_voice.agent_bridge_runtime import (
@@ -258,9 +263,9 @@ async def test_request_id_surrogate_rejects_before_adapter_or_ledger_effect() ->
     adapter = ScriptedAdapter(lambda _request: ())
     runtime = AgentBridgeRuntime(instance_id="bridge-valid")
     await runtime.start()
-    with pytest.raises(AgentBridgeRuntimeViolation) as invalid:
+    with pytest.raises(HarnessRoundViolation) as invalid:
         submit(runtime, adapter, request_id="request-\ud800")
-    assert invalid.value.reason == "INVALID_AGENT_ROUND_REQUEST"
+    assert invalid.value.reason == "INVALID_HARNESS_ROUND_INPUT"
     assert invalid.value.code is ErrorCode.INVALID_ARGUMENT
     assert adapter.calls == 0
     assert runtime.snapshot().retained_requests == 0
@@ -268,29 +273,50 @@ async def test_request_id_surrogate_rejects_before_adapter_or_ledger_effect() ->
     await runtime.close()
 
 
+class EmptyRoundFacade:
+    def __init__(self):
+        self.calls = 0
+
+    def supports_formal_live_voice(self):
+        return True
+
+    async def process_formal_live_voice_stream(self, execution):
+        # Bridge tests control the adapter's output stream. Identity/admission
+        # still come from a real Host round owner, never another Bridge ledger.
+        self.calls += 1
+        if False:
+            yield execution
+
+
 def submit(
-    runtime: AgentBridgeRuntime,
-    adapter: AgentRoundAdapter,
-    *,
-    request_id: str = "request-1",
-    round_id: str = "round-1",
+    runtime: AgentBridgeRuntime, adapter: AgentRoundAdapter, *,
+    request_id: str = "request-1", round_id: str = "round-1",
     current_commit: TurnCommit | None = None,
     current_response: ResponseRef | None = None,
 ):
     bound_commit = current_commit or commit()
-    return runtime.submit(
-        request_id=request_id,
-        round_id=round_id,
-        response_ref=current_response
-        or response_ref(
-            interaction_id=bound_commit.interaction_id,
-            response_id=f"response-{round_id}",
-        ),
-        correlation_id=f"correlation-{round_id}",
-        commit=bound_commit,
-        adapter_id="jiuwenswarm.harness",
-        adapter=adapter,
+    response = current_response or response_ref(
+        interaction_id=bound_commit.interaction_id, response_id=f"response-{round_id}",
     )
+    if not hasattr(runtime, "test_harness"):
+        runtime.test_tokens = []
+        runtime.test_facade = EmptyRoundFacade()
+        runtime.test_harness = JiuWenSwarmRoundHarness(
+            instance_id="bridge-test-harness", id_factory=lambda: runtime.test_tokens.pop(0),
+        )
+    runtime.test_tokens[:] = [round_id.removeprefix("round-"), f"token-{request_id}"]
+    harness = runtime.test_harness
+    reservation = harness.reserve_round(HarnessRoundBinding(
+        request_id, response.response_id, f"correlation-{round_id}", bound_commit,
+    ), facade=runtime.test_facade)
+    slot = runtime.reserve_consumer(
+        reservation, harness=harness, adapter_id="jiuwenswarm.harness",
+    )
+    handle = harness.commit_round(
+        reservation, response_ref=response, context=FormalContextSnapshot(bound_commit.scope),
+        facade=runtime.test_facade,
+    )
+    return runtime.attach_consumer(slot, handle=handle, adapter=adapter)
 
 
 @pytest.mark.asyncio
@@ -530,7 +556,7 @@ async def test_dispatch_backpressure_replay_conflict_and_ledger_are_bounded() ->
     assert rejected.calls == 0
 
     changed = commit(text="changed")
-    with pytest.raises(AgentBridgeRuntimeViolation) as conflict:
+    with pytest.raises(HarnessRoundViolation) as conflict:
         submit(
             runtime,
             second,
@@ -539,7 +565,7 @@ async def test_dispatch_backpressure_replay_conflict_and_ledger_are_bounded() ->
             current_commit=changed,
             current_response=response_ref(response_id="response-round-2"),
         )
-    assert conflict.value.reason == "REQUEST_ID_CONFLICT"
+    assert conflict.value.reason == "HARNESS_REQUEST_ID_CONFLICT"
     assert second.calls == 0
 
     release.set()
@@ -600,9 +626,9 @@ async def test_scoped_round_identity_cannot_be_rebound_to_another_request() -> N
     await runtime.start()
     one = submit(runtime, first, request_id="request-1", round_id="round-1")
     await asyncio.wait_for(first.started.wait(), timeout=1)
-    with pytest.raises(AgentBridgeRuntimeViolation) as conflict:
+    with pytest.raises(HarnessRoundViolation) as conflict:
         submit(runtime, rejected, request_id="request-2", round_id="round-1")
-    assert conflict.value.reason == "ROUND_ID_CONFLICT"
+    assert conflict.value.reason == "HARNESS_ROUND_ID_COLLISION"
     assert rejected.calls == 0
     release.set()
     await asyncio.wait_for(one.completion, timeout=1)
@@ -1096,3 +1122,81 @@ async def test_concurrent_rounds_keep_scope_and_identity_isolated_while_close_dr
     }
     assert first.cancel_calls == second.cancel_calls == 0
     assert runtime.snapshot().closed is True
+
+
+@pytest.mark.asyncio
+async def test_consumer_slot_uses_one_host_identity_and_revokes_only_unstarted_consumption():
+    bridge = AgentBridgeRuntime(instance_id="consumer-owner")
+    await bridge.start()
+    harness = JiuWenSwarmRoundHarness(instance_id="round-owner")
+    foreign = JiuWenSwarmRoundHarness(instance_id="foreign-owner")
+    facade = EmptyRoundFacade()
+    adapter = ScriptedAdapter(lambda _request: ())
+    selected = commit()
+    binding = HarnessRoundBinding("owned-request", "owned-response", "owned-correlation", selected)
+    reservation = harness.reserve_round(binding, facade=facade)
+    slot = bridge.reserve_consumer(reservation, harness=harness, adapter_id="controlled-output")
+    assert bridge.reserve_consumer(replace(reservation), harness=harness, adapter_id="controlled-output") is slot
+    assert bridge.snapshot().reserved_requests == 1
+    before = bridge.snapshot()
+    with pytest.raises(AgentBridgeRuntimeViolation, match="does not belong"):
+        bridge.release_consumer(replace(slot), reason="forged")
+    with pytest.raises(HarnessRoundViolation):
+        bridge.reserve_consumer(replace(reservation, reservation_token="forged"), harness=harness, adapter_id="controlled-output")
+    foreign_reservation = foreign.reserve_round(binding, facade=facade)
+    with pytest.raises(AgentBridgeRuntimeViolation) as wrong_owner:
+        bridge.reserve_consumer(foreign_reservation, harness=foreign, adapter_id="controlled-output")
+    assert wrong_owner.value.reason == "CONSUMER_OWNER_MISMATCH"
+    assert bridge.snapshot() == before
+    handle = harness.commit_round(reservation, response_ref=ResponseRef(selected.interaction_id, "owned-response", 0),
+                                  context=FormalContextSnapshot(selected.scope), facade=facade)
+    submission = bridge.attach_consumer(slot, handle=handle, adapter=adapter)
+    assert bridge.attach_consumer(slot, handle=handle, adapter=adapter) is submission
+    assert bridge.release_consumer(slot, reason="checkpoint-failed")
+    assert not bridge.release_consumer(slot, reason="checkpoint-failed")
+    with pytest.raises(AgentBridgeRuntimeViolation) as released:
+        bridge.attach_consumer(slot, handle=handle, adapter=adapter)
+    assert released.value.reason == "CONSUMER_SLOT_RELEASED"
+    # Consumption revocation does not pretend to revoke the real execution.
+    assert harness.rollback_unstarted_round(reservation, reason="checkpoint-failed")
+    for _ in range(3):
+        await asyncio.sleep(0)
+    assert facade.calls == adapter.calls == 0
+    assert bridge.snapshot().queued_outputs == bridge.snapshot().reserved_requests == 0
+    assert submission.completion.done()
+    await bridge.close()
+    await harness.close()
+    await foreign.close()
+
+
+@pytest.mark.asyncio
+async def test_consuming_round_cannot_be_revoked_or_rebound_to_another_handle():
+    bridge = AgentBridgeRuntime(instance_id="consumer-running")
+    await bridge.start()
+    adapter = ScriptedAdapter(lambda _request: (), release=asyncio.Event())
+    first = submit(bridge, adapter)
+    harness = bridge.test_harness
+    first_reservation = harness._reservations["request-1"].reservation
+    slot = bridge.reserve_consumer(first_reservation, harness=harness, adapter_id="jiuwenswarm.harness")
+    await adapter.started.wait()
+    before = bridge.snapshot()
+    with pytest.raises(AgentBridgeRuntimeViolation) as delivered:
+        bridge.release_consumer(slot, reason="too-late")
+    assert delivered.value.reason == "DISPATCH_ALREADY_DELIVERED"
+    assert bridge.snapshot() == before
+    selected = commit(turn_id="other-turn", commit_id="other-commit")
+    bridge.test_tokens[:] = ["other-round", "other-token"]
+    other = harness.reserve_round(HarnessRoundBinding("other-request", "other-response", "other-correlation", selected),
+                                  facade=bridge.test_facade)
+    other_handle = harness.commit_round(other, response_ref=ResponseRef(selected.interaction_id, "other-response", 0),
+                                        context=FormalContextSnapshot(selected.scope), facade=bridge.test_facade)
+    with pytest.raises(AgentBridgeRuntimeViolation) as wrong_handle:
+        bridge.attach_consumer(slot, handle=other_handle, adapter=adapter)
+    assert wrong_handle.value.reason == "CONSUMER_HANDLE_MISMATCH"
+    assert bridge.snapshot() == before
+    harness.rollback_unstarted_round(other, reason="test-no-other-effect")
+    adapter.release.set()
+    await first.completion
+    assert adapter.calls == bridge.test_facade.calls == 1
+    await bridge.close()
+    await harness.close()

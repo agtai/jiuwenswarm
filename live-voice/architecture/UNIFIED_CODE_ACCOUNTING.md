@@ -1,12 +1,9 @@
 # Live Voice / Host / SDK 生产代码量与实际复用
 
-> 最新 `.8` 工作树：Work 通过既有 TaskManager 注册/执行/取消，运行于 Host 的 Runner 根任务组；WorkStore 继续持有业务耐久事实。原生 Task 完成不等于 Work 成功，也不生成正式 Task 卡片。同步调度回执和启动回调收尾增强已被现有 BackgroundTask 与 Work 使用。
-> 当前同口径净增：Voice **112334** / Host **48028** / SDK **34134**，合计 **194496**；本批 **+78**，较初始累计 **−1184**。SDK 当前受影响文件36440行含2306行原生基线，不得全算新增。[当前逐文件统计](../evidence/DEEP_NATIVE_TASK_MANAGER_COUNTS_20260914.json)、[当前模块分桶](../evidence/DEEP_NATIVE_TASK_MANAGER_MODULES_20260914.json)。后文较早数字和 `.7` 是历史阶段。
-> AgentServer 仍是应用与执行依赖的运行容器。M4+M5、M7+M9 保持合并；Hermes 和多模态方案仍沿用原固定版本静态证据，未重新核验。本批干净 wheel 安装后 24 项原生/SQLite 场景通过，全部 1016 个 Host / 2409 个 SDK Python 文件与源码一致；整体融合仍 PARTIAL。
-
-> 2026-09-14 当前工作树：配套 SDK `.7`。Work 编排由 `AgentRuntime → Runner.get_root_task_group → root.start_soon` 管理；WorkStore 的耐久事实仍为业务权威。独立 producer/cleanup 未结算时保留容量且不发布成功。TaskManager 注册管理及完整 Task/Work 融合仍未完成。
-> 最新相同口径：Voice **112334**、Host **48028**、SDK **34056**，合计净增 **194418**；本批 **+70**（Host 适配 +13、SDK 所有权/结算增强 +57），累计较初始 **−1262**。后文各阶段数字为历史快照。[逐文件统计](../evidence/DEEP_WORK_NATIVE_OWNER_COUNTS_20260914.json)、[合并模块统计](../evidence/DEEP_WORK_NATIVE_OWNER_MODULES_20260914.json)。
-> AgentServer 是宿主运行容器，持有应用服务并装配 Runner；不是另一个执行引擎。M4+M5、M7+M9 保持合并展示。外部 Hermes/多模态版本未重新核验，原静态证据边界不变；本批不证明性能优势。配套 wheel 安装后 12 项真实 Runner/SQLite 场景通过；1016 个 Host、2409 个 SDK Python 文件与当前源码逐字节一致。
+> 2026-09-14 round 身份收敛：Harness 是唯一 round 预约、提交与取消权威；Voice Bridge 只保留有界输出消费许可、队列、校验和完成通知。已删除第二套预约模型、状态枚举、身份指纹账本及提交/回退协议；持久化失败仍先同步撤销未运行的 round，再等待 speculative 清理。
+> 配套 SDK 仍为 `0.1.17+livevoice.8`；Work 已复用 Runner 根任务组和 TaskManager，正式 Task 的执行尝试管理仍未完成原生收敛。AgentServer 是装配应用服务与执行依赖的运行容器。整体仍为 PARTIAL。
+> 当前相同口径：Voice **112101** / Host **48040** / SDK **34134**，合计净增 **194275**；本批 **−221**，较初始 **−1405**。[逐文件统计](../evidence/DEEP_ROUND_IDENTITY_COUNTS_20260914.json)、[合并模块统计](../evidence/DEEP_ROUND_IDENTITY_MODULES_20260914.json)。后文日期较早的数字均为历史阶段；此前 wheel 验证只对应其原提交，不替代当前源码验证。
+> M4+M5、M7+M9 保持合并。Hermes 和多模态方案未重新核验，下面保留原固定版本和静态证据边界；不据本批消重声称性能或物理音频优势。
 
 > 2026-09-13。统计源码，不统计测试、文档、配置、二进制、依赖或构建产物。物理行包括注释和空行；这不是可执行语句数。
 
@@ -75,11 +72,13 @@ Agent 上下文投影适配。最新净增量合计 **195,352**，较审计前�
 见[逐文件统计](../evidence/DEEP_INPUT_RECOVERY_20260914.json)与
 [合并模块统计](../evidence/DEEP_INPUT_RECOVERY_MODULES_20260914.json)。
 
-Host 模型目录消重后最新合计 **195,326**，较审计前减少 **354** 行：删除
+历史 Host 模型目录消重阶段合计 **195,326**，较审计前减少 **354** 行：删除
 AgentServer 中26行不可达的重复回退，由原有 `get_default_models()` 继续处理
 格式兼容、环境变量和 AgentOS 条目。没有取消宿主回退或变更正式模型选择政策。
 见[逐文件统计](../evidence/DEEP_HOST_CONFIG_20260914.json)和
 [模块统计](../evidence/DEEP_HOST_CONFIG_MODULES_20260914.json)。
+
+本批 round 身份收敛以 `.8` 已提交统计为前值：Voice 112334 → 112101（−233），Host 48028 → 48040（+12），SDK 34134 不变，总计 194496 → 194275（−221）。无生产文件搬迁。实际删除 Bridge 第二套 round 身份模型、枚举、指纹及提交协议；保留的消费许可只控制资源容量。Host 增加12行，向消费者暴露既有 Harness 的校验及 canonical 预约；不是把整个被修改文件算作新增。队列、事件投影、播放/历史适配和 Task/Work 耐久业务状态仍保留，未计作删除或已完全统一。
 
 ## 2. 最新实施后的合并模块统计
 
@@ -90,10 +89,10 @@ AgentServer 中26行不可达的重复回退，由原有 `get_default_models()` 
 | 浏览器 M1+M2 | 45,137 | 45,995 | 70,839 |
 | Gateway G | 18,155 | 19,538 | 38,373 |
 | Realtime/语音适配 M3 | 14,427 | 14,427 | 14,427 |
-| 会话与业务协调 M4+M5 | 38,320 | 38,320 | 38,320 |
-| 工作管理 M6+M8 | 37,745 | 37,805 | 37,950 |
-| Agent 与项目执行 M7+M9 | 12,829 | 16,917 | 50,937 |
-| 公共契约、授权、配置、观测与 Host 装配 | 19,492 | 21,346 | 46,162 |
+| 会话与业务协调 M4+M5 | 38,087 | 38,087 | 38,087 |
+| 工作管理 M6+M8 | 37,841 | 37,937 | 39,290 |
+| Agent 与项目执行 M7+M9 | 12,841 | 16,929 | 50,949 |
+| 公共契约、授权、配置、观测与 Host 装配 | 19,492 | 21,362 | 47,131 |
 
 这些是文件粒度的职责分桶，不是逐函数测量。例如前端 Task UI 归浏览器，SDK file-effect/durability 归执行，SDK 状态和存储归工作管理；M3 同时包含保留的非 Native 语音适配。大型 Registry 主要归会话协调，实际同时承担装配。需要精确定位时查看逐文件清单，而不是把展示框大小理解为独立部署包大小。
 

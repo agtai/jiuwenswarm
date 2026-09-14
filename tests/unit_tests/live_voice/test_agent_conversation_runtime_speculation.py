@@ -190,3 +190,54 @@ async def test_a_facade_without_a_tool_gate_cannot_speculate() -> None:
     assert refusal.value.reason == "SPECULATION_UNAVAILABLE"
     assert lower.calls == 0
     await current.close(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_failure_revokes_round_before_waiting_for_candidate_cleanup() -> None:
+    cleanup_release = asyncio.Event()
+    lower = GatedLowerAdapter(
+        release=asyncio.Event(), cancel_cleanup_release=cleanup_release,
+    )
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history)
+    selected = commit()
+    await current.start()
+    await current.open_interaction(selected.interaction_id)
+    context = FormalContextSnapshot(selected.scope)
+    candidate = current.begin_speculative_dialogue(
+        request_id="checkpoint-spec", commit=selected, context=context, channel_id="web",
+    )
+    await lower.started.wait()
+    checkpoint_failed = asyncio.Event()
+
+    def reject_checkpoint(_handle):
+        checkpoint_failed.set()
+        raise OSError("durable checkpoint unavailable")
+
+    admission = asyncio.create_task(current.submit_committed_turn(
+        request_id="checkpoint-spec", response_id="checkpoint-response",
+        correlation_id="checkpoint-correlation", commit=selected, context=context,
+        speculation=candidate, after_dispatch=reject_checkpoint,
+    ))
+    try:
+        await asyncio.wait_for(checkpoint_failed.wait(), timeout=1)
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert not admission.done(), "candidate cleanup remains physically owned"
+        snapshot = current.snapshot()
+        assert snapshot.harness.active_rounds == ()
+        assert snapshot.bridge.active_requests == ()
+        assert snapshot.bridge.pending_dispatches == 0
+        assert lower.calls == 1  # Only the already-paused speculative inference.
+        assert lower._stream_event_rail.resumed == []
+        assert history.users == history.assistant_intents == []
+        assert snapshot.published_notifications == 0
+    finally:
+        cleanup_release.set()
+        lower.release.set()
+        with pytest.raises(OSError, match="durable checkpoint unavailable"):
+            await asyncio.wait_for(admission, timeout=1)
+        await current.close(timeout_seconds=1)
+    assert lower.calls == 1
+    assert lower._stream_event_rail.resumed == []
+    assert history.users == history.assistant_intents == []

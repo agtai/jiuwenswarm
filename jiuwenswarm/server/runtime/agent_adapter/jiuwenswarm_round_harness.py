@@ -804,6 +804,18 @@ class JiuWenSwarmRoundHarness:
     def terminal_event(self, handle: HarnessRoundHandle) -> EventEnvelope | None:
         return self._require_handle_record(handle).terminal_event
 
+    def require_reservation(self, reservation: HarnessRoundReservation) -> HarnessRoundReservation:
+        """Validate an issued identity for an attached output consumer."""
+        self._require_owner()
+        record = self._require_reservation(reservation)
+        self._expire(record)
+        if record.state in {HarnessReservationState.ABORTED, HarnessReservationState.EXPIRED}:
+            raise HarnessRoundViolation(
+                "HARNESS_RESERVATION_NOT_COMMITTABLE", "round reservation is no longer usable",
+                ErrorCode.STALE,
+            )
+        return record.reservation
+
     def require_handle(self, handle: HarnessRoundHandle) -> None:
         self._require_handle_record(handle)
 

@@ -1,0 +1,72 @@
+{
+  "host_before": "977c392d4a63d06590ece98c1c5f42d1bbb23dd7",
+  "sdk": "c46c9b2ba5ec026e8c3f1459542d46f079ea0dd6",
+  "sdk_changed": false,
+  "scope": "Harness canonical round identity; Bridge bounded consumption; synchronous checkpoint rollback before speculative cleanup",
+  "source_sha256": {
+    "jiuwenswarm/channels/live_voice/agent_bridge_runtime.py": "29eb638fba1d45a4eab1d7e603d826768a3c651b63f7525b8ae435e3ca81950f",
+    "jiuwenswarm/channels/live_voice/agent_conversation_runtime.py": "4fdd9ebc31c6cfbc55491e0330a2481564650fb726adc03cb430d1100573fd45",
+    "jiuwenswarm/server/runtime/agent_adapter/jiuwenswarm_round_harness.py": "cebd0091075a9ebdb6116055c85e24474cc184ee866c29b8a1edfa1b86159983"
+  },
+  "final_source_checks": [
+    {
+      "files": [
+        "test_agent_bridge_runtime.py"
+      ],
+      "passed": 32,
+      "seconds": 3.7
+    },
+    {
+      "files": [
+        "test_agent_conversation_runtime.py",
+        "test_agent_conversation_runtime_speculation.py"
+      ],
+      "selection": "checkpoint or capacity or synchronous_after_dispatch_failure or rollback or cancellation or cancel_ack or expired_reservation or speculative or candidate or facade_without",
+      "passed": 17,
+      "deselected": 78,
+      "seconds": 7.78
+    },
+    {
+      "files": [
+        "test_unified_host_task_joint.py",
+        "test_native_work_runtime.py",
+        "test_host_work_service.py"
+      ],
+      "passed": 43,
+      "seconds": 35.1,
+      "warnings": "one Authlib deprecation"
+    },
+    {
+      "files": [
+        "test_semantic_input_recovery.py"
+      ],
+      "passed": 8,
+      "seconds": 13.53
+    }
+  ],
+  "earlier_source_checks": {
+    "composition_and_speculation": 95,
+    "seconds": 36.67,
+    "limitation": "Before immutable consumer token/private record and single-owner/canonicalization hardening; affected final-source tests above rerun."
+  },
+  "fault_reproduction": "Actual pending speculative cleanup allowed an unaccepted Harness round to start before rollback; new test failed before fix and passed after synchronous revocation ordering repair.",
+  "log_sha256": {
+    "livevoice-round-integration-tests.log": "0d5c6ce0594636a9bb92ae45e4284a3d368524ed037591a5ccac66a4b88fd96c",
+    "livevoice-round-final-composition.log": "248132e8e943a0a1001011275b22e0fc57d73ad4913596370523052e6a2e6215",
+    "livevoice-round-recovery-tests.log": "366f7681704f023cf11a9f1931fbb1296d05aa681b77ececd58708ac4674857e"
+  },
+  "independent_review": "Read-only complete production/test diff and consumer search; no concrete blockers. Reviewer did not run tests.",
+  "count_delta": {
+    "voice": -233,
+    "jiuwenswarm": 12,
+    "agentcore": 0,
+    "total": -221,
+    "relocation": 0
+  },
+  "limits": [
+    "Controlled lower Agent/model/authority ports; real Host composition, SQLite and selected project/history file boundaries.",
+    "Registry reconstruction is not full OS restart.",
+    "No fresh wheel/install, Provider, physical audio, browser or human acceptance; prior .8 wheel evidence belongs to its original Host commit.",
+    "Formal Task native attempt management and full deep-integration objective remain incomplete."
+  ]
+}

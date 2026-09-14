@@ -103,6 +103,13 @@ not one management state machine; their cancellation, transaction and result
 semantics differ. Work now directly uses HostWorkAgentExecutor and the existing
 Harness, removing its Voice ConversationRuntime/Bridge allocation; SQLite result
 recovery, replay suppression and cancellation cleanup checks cover this seam.
+Work orchestration now also uses the existing Runner root and TaskManager; its
+durable business outcome remains in WorkStore. Foreground round identity is owned
+only by the Host Harness: Bridge holds bounded output-consumption permits, not a
+second round reservation/commit ledger. Failed durable acceptance revokes the
+unstarted round before speculative cleanup can yield. Targeted composition,
+Host/SQLite/project and reconstruction checks cover these boundaries; formal
+Task attempt-worker management and the complete deep-integration goal remain open.
 Current unified-input joint tests cover real SQLite Task creation/confirmation,
 replay/conflict, project rejection, Voice close followed by completion, and
 running cancellation while the original dialogue completes normally. These use

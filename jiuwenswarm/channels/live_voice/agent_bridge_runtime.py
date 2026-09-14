@@ -24,7 +24,6 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Knowledge,
     KnownFact,
     ResponseRef,
-    ScopeRef,
     Speakability,
     TerminalOutcome,
     TurnCommit,
@@ -36,6 +35,9 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     canonical_json_bytes,
 )
 from jiuwenswarm.channels.live_voice.agent_bridge import AgentEvent
+from jiuwenswarm.server.runtime.agent_adapter.jiuwenswarm_round_harness import (
+    HarnessRoundHandle, HarnessRoundReservation, JiuWenSwarmRoundHarness,
+)
 
 from jiuwenswarm.channels.live_voice.latency_measurement import (
     L0Milestone,
@@ -74,50 +76,20 @@ class AgentBridgeCompletionStatus(StrEnum):
     STREAM_ENDED_WITHOUT_TERMINAL = "stream_ended_without_terminal"
 
 
-class AgentBridgeReservationState(StrEnum):
-    RESERVED = "reserved"
-    COMMITTING = "committing"
-    COMMITTED = "committed"
-    ABORTED = "aborted"
+@dataclass(frozen=True, slots=True, eq=False)
+class AgentBridgeConsumerSlot:
+    """A bounded output-consumption permit, not another round authority."""
 
-
-@dataclass(frozen=True, slots=True)
-class AgentBridgeDispatchReservation:
-    request_id: str
-    round_id: str
-    response_id: str
-    correlation_id: str
-    commit: TurnCommit
+    harness: JiuWenSwarmRoundHarness
+    reservation: HarnessRoundReservation
     adapter_id: str
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.commit, TurnCommit):
-            raise AgentBridgeRuntimeViolation(
-                "INVALID_AGENT_DISPATCH_RESERVATION",
-                "dispatch reservation requires a canonical TurnCommit",
-                ErrorCode.INVALID_ARGUMENT,
-            )
-        for name, value in (
-            ("request_id", self.request_id),
-            ("round_id", self.round_id),
-            ("response_id", self.response_id),
-            ("correlation_id", self.correlation_id),
-            ("adapter_id", self.adapter_id),
-        ):
-            _validate_runtime_text(
-                value, name, reason="INVALID_AGENT_DISPATCH_RESERVATION"
-            )
 
-    def fingerprint(self) -> bytes:
-        return canonical_json_bytes(
-            {
-                "round_id": self.round_id,
-                "response_id": self.response_id,
-                "correlation_id": self.correlation_id,
-                "commit": self.commit.to_dict(),
-                "adapter_id": self.adapter_id,
-            }
-        )
+@dataclass(slots=True)
+class _ConsumerRecord:
+    slot: AgentBridgeConsumerSlot
+    submission: AgentBridgeSubmission | None = None
+    released: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,20 +128,6 @@ class AgentRoundRequest:
     def source_provenance(self) -> str:
         return canonical_json_bytes(self.commit.hypothesis_provenance).decode("utf-8")
 
-    def fingerprint(self) -> bytes:
-        return canonical_json_bytes(
-            {
-                "round_id": self.round_id,
-                "response_ref": {
-                    "interaction_id": self.response_ref.interaction_id,
-                    "response_id": self.response_ref.response_id,
-                    "response_generation": self.response_ref.response_generation,
-                },
-                "correlation_id": self.correlation_id,
-                "commit": self.commit.to_dict(),
-                "adapter_id": self.adapter_id,
-            }
-        )
 
 
 class AgentRoundAdapter(Protocol):
@@ -416,12 +374,8 @@ class AgentBridgeRuntime:
         self._outputs: asyncio.Queue[AgentBridgeDelivery] = asyncio.Queue(
             maxsize=output_capacity
         )
-        self._submissions: dict[str, AgentBridgeSubmission] = {}
-        self._fingerprints: dict[str, bytes] = {}
-        self._reservations: dict[str, AgentBridgeDispatchReservation] = {}
-        self._reservation_fingerprints: dict[str, bytes] = {}
-        self._reservation_states: dict[str, AgentBridgeReservationState] = {}
-        self._round_bindings: dict[tuple[ScopeRef, str], str] = {}
+        self._consumer_slots: dict[int, _ConsumerRecord] = {}
+        self._consumer_harness: JiuWenSwarmRoundHarness | None = None
         self._source_event_fingerprints: dict[str, bytes] = {}
         self._active: dict[str, asyncio.Task[None]] = {}
         self._owner_loop: asyncio.AbstractEventLoop | None = None
@@ -458,278 +412,109 @@ class AgentBridgeRuntime:
         )
         return True
 
-    def submit(
-        self,
-        *,
-        request_id: str,
-        round_id: str,
-        response_ref: ResponseRef,
-        correlation_id: str,
-        commit: TurnCommit,
-        adapter_id: str,
-        adapter: AgentRoundAdapter,
-    ) -> AgentBridgeSubmission:
-        # Preserve the original one-phase API's validation contract while the
-        # formal composition uses reserve/commit directly.
-        AgentRoundRequest(
-            request_id=request_id,
-            round_id=round_id,
-            response_ref=response_ref,
-            correlation_id=correlation_id,
-            commit=commit,
-            adapter_id=adapter_id,
-        )
-        reservation = self.reserve_dispatch(
-            request_id=request_id,
-            round_id=round_id,
-            response_id=response_ref.response_id,
-            correlation_id=correlation_id,
-            commit=commit,
-            adapter_id=adapter_id,
-        )
-        return self.commit_dispatch(
-            reservation,
-            response_ref=response_ref,
-            adapter=adapter,
-        )
-
-    def reserve_dispatch(
-        self,
-        *,
-        request_id: str,
-        round_id: str,
-        response_id: str,
-        correlation_id: str,
-        commit: TurnCommit,
-        adapter_id: str,
-    ) -> AgentBridgeDispatchReservation:
+    def reserve_consumer(
+        self, reservation: HarnessRoundReservation, *,
+        harness: JiuWenSwarmRoundHarness, adapter_id: str,
+    ) -> AgentBridgeConsumerSlot:
         self._require_admission()
-        reservation = AgentBridgeDispatchReservation(
-            request_id=request_id,
-            round_id=round_id,
-            response_id=response_id,
-            correlation_id=correlation_id,
-            commit=commit,
-            adapter_id=adapter_id,
-        )
-        fingerprint = reservation.fingerprint()
-        prior = self._reservations.get(request_id)
-        if prior is not None:
-            if self._reservation_fingerprints[request_id] == fingerprint:
-                return prior
+        if self._consumer_harness is not None and self._consumer_harness is not harness:
             raise AgentBridgeRuntimeViolation(
-                "REQUEST_ID_CONFLICT",
-                "request_id cannot change its reserved dispatch binding",
-                ErrorCode.CONFLICT,
-            )
-        if len(self._reservations) >= self._max_requests:
-            raise AgentBridgeRuntimeViolation(
-                "REQUEST_LEDGER_FULL",
-                "bounded request ledger is full for this runtime session",
-                ErrorCode.UNAVAILABLE,
-            )
-        uncommitted = sum(
-            state
-            in {
-                AgentBridgeReservationState.RESERVED,
-                AgentBridgeReservationState.COMMITTING,
-            }
-            for state in self._reservation_states.values()
-        )
-        if len(self._pending) + uncommitted >= self._dispatch_capacity:
-            raise AgentBridgeRuntimeViolation(
-                "DISPATCH_QUEUE_FULL",
-                "bounded Agent dispatch queue is full",
-                ErrorCode.UNAVAILABLE,
-            )
-        round_key = (commit.scope, round_id)
-        bound_request = self._round_bindings.get(round_key)
-        if bound_request is not None:
-            raise AgentBridgeRuntimeViolation(
-                "ROUND_ID_CONFLICT",
-                "a scoped round_id can belong to only one Agent dispatch",
-                ErrorCode.CONFLICT,
-            )
-        self._reservations[request_id] = reservation
-        self._reservation_fingerprints[request_id] = fingerprint
-        self._reservation_states[request_id] = AgentBridgeReservationState.RESERVED
-        self._round_bindings[round_key] = request_id
-        return reservation
-
-    def begin_dispatch_commit(
-        self, reservation: AgentBridgeDispatchReservation
-    ) -> bool:
-        self._require_admission()
-        retained = self._reservations.get(reservation.request_id)
-        if retained != reservation:
-            raise AgentBridgeRuntimeViolation(
-                "UNTRUSTED_DISPATCH_RESERVATION",
-                "dispatch reservation does not match the Bridge ledger",
+                "CONSUMER_OWNER_MISMATCH", "Bridge consumers belong to one Host round owner",
                 ErrorCode.PERMISSION_DENIED,
             )
-        state = self._reservation_states[reservation.request_id]
-        if state in {
-            AgentBridgeReservationState.COMMITTING,
-            AgentBridgeReservationState.COMMITTED,
-        }:
-            return False
-        if state is not AgentBridgeReservationState.RESERVED:
+        reservation = harness.require_reservation(reservation)
+        _validate_runtime_text(adapter_id, "adapter_id", reason="INVALID_AGENT_ADAPTER")
+        prior = self._consumer_slots.get(id(reservation))
+        if prior is not None:
+            if prior.slot.adapter_id != adapter_id:
+                raise AgentBridgeRuntimeViolation(
+                    "CONSUMER_BINDING_CONFLICT", "consumer cannot change its owner or adapter",
+                    ErrorCode.CONFLICT,
+                )
+            return prior.slot
+        if len(self._consumer_slots) >= self._max_requests:
             raise AgentBridgeRuntimeViolation(
-                "DISPATCH_RESERVATION_ABORTED",
-                "an aborted reservation cannot enter commit",
-                ErrorCode.STALE,
+                "REQUEST_LEDGER_FULL", "bounded consumer ledger is full for this runtime session",
+                ErrorCode.UNAVAILABLE,
             )
-        self._reservation_states[reservation.request_id] = (
-            AgentBridgeReservationState.COMMITTING
-        )
-        return True
+        reserved = sum(not slot.released and slot.submission is None
+                       for slot in self._consumer_slots.values())
+        if len(self._pending) + reserved >= self._dispatch_capacity:
+            raise AgentBridgeRuntimeViolation(
+                "DISPATCH_QUEUE_FULL", "bounded Agent output consumption queue is full",
+                ErrorCode.UNAVAILABLE,
+            )
+        slot = AgentBridgeConsumerSlot(harness, reservation, adapter_id)
+        self._consumer_slots[id(reservation)] = _ConsumerRecord(slot)
+        self._consumer_harness = harness
+        return slot
 
-    def commit_dispatch(
-        self,
-        reservation: AgentBridgeDispatchReservation,
-        *,
-        response_ref: ResponseRef,
-        adapter: AgentRoundAdapter,
+    def _require_consumer(self, slot: AgentBridgeConsumerSlot) -> _ConsumerRecord:
+        record = (self._consumer_slots.get(id(slot.reservation))
+                  if isinstance(slot, AgentBridgeConsumerSlot) else None)
+        if record is None or record.slot is not slot:
+            raise AgentBridgeRuntimeViolation(
+                "UNTRUSTED_CONSUMER_SLOT", "consumer slot does not belong to this Bridge",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        return record
+
+    def attach_consumer(
+        self, slot: AgentBridgeConsumerSlot, *,
+        handle: HarnessRoundHandle, adapter: AgentRoundAdapter,
     ) -> AgentBridgeSubmission:
         running = self._require_admission()
-        retained = self._reservations.get(reservation.request_id)
-        if retained != reservation:
+        record = self._require_consumer(slot)
+        if record.released:
             raise AgentBridgeRuntimeViolation(
-                "UNTRUSTED_DISPATCH_RESERVATION",
-                "dispatch reservation does not match the Bridge ledger",
-                ErrorCode.PERMISSION_DENIED,
-            )
-        state = self._reservation_states[reservation.request_id]
-        if state is AgentBridgeReservationState.ABORTED:
-            raise AgentBridgeRuntimeViolation(
-                "DISPATCH_RESERVATION_ABORTED",
-                "an aborted reservation cannot dispatch",
+                "CONSUMER_SLOT_RELEASED", "released consumption capacity cannot be reused",
                 ErrorCode.STALE,
             )
-        if state is AgentBridgeReservationState.RESERVED:
-            self._reservation_states[reservation.request_id] = (
-                AgentBridgeReservationState.COMMITTING
-            )
-        if (
-            not isinstance(response_ref, ResponseRef)
-            or response_ref.interaction_id != reservation.commit.interaction_id
-            or response_ref.response_id != reservation.response_id
-        ):
+        slot.harness.require_handle(handle)
+        if handle.reservation is not slot.reservation:
             raise AgentBridgeRuntimeViolation(
-                "DISPATCH_RESPONSE_BINDING_MISMATCH",
-                "ResponseRef does not match the reserved dispatch",
+                "CONSUMER_HANDLE_MISMATCH", "consumer requires its exact reserved round handle",
                 ErrorCode.PERMISSION_DENIED,
             )
+        if record.submission is not None:
+            return record.submission
+        binding = slot.reservation.binding
         request = AgentRoundRequest(
-            request_id=reservation.request_id,
-            round_id=reservation.round_id,
-            response_ref=response_ref,
-            correlation_id=reservation.correlation_id,
-            commit=reservation.commit,
-            adapter_id=reservation.adapter_id,
+            request_id=binding.request_id, round_id=handle.round_id,
+            response_ref=handle.response_ref, correlation_id=binding.correlation_id,
+            commit=binding.commit, adapter_id=slot.adapter_id,
         )
-        fingerprint = request.fingerprint()
-        request_id = reservation.request_id
-        existing = self._submissions.get(request_id)
-        if existing is not None:
-            if self._fingerprints[request_id] == fingerprint:
-                return existing
-            raise AgentBridgeRuntimeViolation(
-                "REQUEST_ID_CONFLICT",
-                "request_id cannot change its committed dispatch binding",
-                ErrorCode.CONFLICT,
-            )
         completion: asyncio.Future[AgentBridgeCompletion] = running.create_future()
-        submission = AgentBridgeSubmission(
-            request, AgentBridgeCompletionHandle(completion)
-        )
-        self._submissions[reservation.request_id] = submission
-        self._fingerprints[reservation.request_id] = fingerprint
-        self._reservation_states[reservation.request_id] = (
-            AgentBridgeReservationState.COMMITTED
-        )
+        submission = AgentBridgeSubmission(request, AgentBridgeCompletionHandle(completion))
+        record.submission = submission
         self._pending.append(_PendingDispatch(submission, adapter))
         assert self._wake is not None
         self._wake.set()
         return submission
 
-    def abort_dispatch(
-        self, reservation: AgentBridgeDispatchReservation, *, reason: str
-    ) -> bool:
-        running = asyncio.get_running_loop()
-        self._require_owner_loop(running)
-        _validate_runtime_text(reason, "reason", reason="INVALID_DISPATCH_ABORT_REASON")
-        retained = self._reservations.get(reservation.request_id)
-        if retained != reservation:
-            raise AgentBridgeRuntimeViolation(
-                "UNTRUSTED_DISPATCH_RESERVATION",
-                "dispatch reservation does not match the Bridge ledger",
-                ErrorCode.PERMISSION_DENIED,
-            )
-        state = self._reservation_states[reservation.request_id]
-        if state is AgentBridgeReservationState.ABORTED:
-            return False
-        if state is AgentBridgeReservationState.COMMITTED:
-            raise AgentBridgeRuntimeViolation(
-                "DISPATCH_ALREADY_COMMITTED",
-                "a committed dispatch cannot be converted into an abort",
-                ErrorCode.CONFLICT,
-            )
-        self._reservation_states[reservation.request_id] = (
-            AgentBridgeReservationState.ABORTED
-        )
-        return True
+    def release_consumer(self, slot: AgentBridgeConsumerSlot, *, reason: str) -> bool:
+        """Release reserved or still-queued output consumption before yielding.
 
-    def rollback_undelivered_dispatch(
-        self, reservation: AgentBridgeDispatchReservation, *, reason: str
-    ) -> bool:
-        """Revoke a committed dispatch while it is still in the local queue.
-
-        This narrow rollback is used when the synchronous durable checkpoint
-        immediately following ``commit_dispatch`` fails.  Because no await is
-        permitted between commit and rollback, finding the exact request in
-        ``_pending`` proves that no adapter/Agent work has started.
+        Round rollback belongs to Harness. A delivered consumer cannot be revoked
+        here: it must drain the authoritative producer's terminal/cleanup events.
         """
-
-        self._require_admission()
+        self._require_owner_loop(asyncio.get_running_loop())
         _validate_runtime_text(reason, "reason", reason="INVALID_DISPATCH_ABORT_REASON")
-        retained = self._reservations.get(reservation.request_id)
-        if retained != reservation:
-            raise AgentBridgeRuntimeViolation(
-                "UNTRUSTED_DISPATCH_RESERVATION",
-                "dispatch reservation does not match the Bridge ledger",
-                ErrorCode.PERMISSION_DENIED,
-            )
-        state = self._reservation_states[reservation.request_id]
-        if state is AgentBridgeReservationState.ABORTED:
+        record = self._require_consumer(slot)
+        if record.released:
             return False
-        if state is not AgentBridgeReservationState.COMMITTED:
-            raise AgentBridgeRuntimeViolation(
-                "DISPATCH_NOT_ROLLBACKABLE",
-                "only a committed, undelivered dispatch can be rolled back",
-                ErrorCode.CONFLICT,
-            )
-        request_id = reservation.request_id
-        retained_pending = next(
-            (
-                pending
-                for pending in self._pending
-                if pending.submission.request.request_id == request_id
-            ),
-            None,
-        )
-        if retained_pending is None or request_id in self._active:
-            raise AgentBridgeRuntimeViolation(
-                "DISPATCH_ALREADY_DELIVERED",
-                "a delivered dispatch cannot be rolled back",
-                ErrorCode.CONFLICT,
-            )
-        self._pending.remove(retained_pending)
-        submission = self._submissions.pop(request_id, None)
-        self._fingerprints.pop(request_id, None)
-        self._reservation_states[request_id] = AgentBridgeReservationState.ABORTED
-        if submission is not None and not submission.completion.done():
-            submission.completion._cancel()
+        submission = record.submission
+        if submission is not None:
+            pending = next((item for item in self._pending if item.submission is submission), None)
+            if pending is None:
+                raise AgentBridgeRuntimeViolation(
+                    "DISPATCH_ALREADY_DELIVERED", "a delivered consumer cannot be revoked",
+                    ErrorCode.CONFLICT,
+                )
+            self._pending.remove(pending)
+            if not submission.completion.done():
+                submission.completion._cancel()
+        record.released = True
         return True
 
     async def next_delivery(self) -> AgentBridgeDelivery:
@@ -802,15 +587,10 @@ class AgentBridgeRuntime:
             pending_dispatches=len(self._pending),
             active_requests=tuple(self._active),
             queued_outputs=self._outputs.qsize(),
-            retained_requests=len(self._submissions),
-            reserved_requests=sum(
-                state
-                in {
-                    AgentBridgeReservationState.RESERVED,
-                    AgentBridgeReservationState.COMMITTING,
-                }
-                for state in self._reservation_states.values()
-            ),
+            retained_requests=sum(slot.submission is not None and not slot.released
+                                  for slot in self._consumer_slots.values()),
+            reserved_requests=sum(slot.submission is None and not slot.released
+                                  for slot in self._consumer_slots.values()),
         )
 
     async def _dispatch_loop(self) -> None:
@@ -1225,9 +1005,8 @@ __all__ = [
     "AgentBridgeCompletion",
     "AgentBridgeCompletionHandle",
     "AgentBridgeCompletionStatus",
-    "AgentBridgeDispatchReservation",
+    "AgentBridgeConsumerSlot",
     "AgentBridgeDelivery",
-    "AgentBridgeReservationState",
     "AgentBridgeRuntime",
     "AgentBridgeRuntimeSnapshot",
     "AgentBridgeRuntimeViolation",
