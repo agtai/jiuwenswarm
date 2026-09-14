@@ -33,6 +33,58 @@ def inputs():
 
 
 @pytest.mark.asyncio
+async def test_managed_host_work_uses_real_runner_root_and_survives_caller_cancel(tmp_path, monkeypatch):
+    import importlib
+    from openjiuwen.core.runner import Runner
+    from openjiuwen.core.common.task_manager.manager import get_task_manager
+    from jiuwenswarm.runtime import service as runtime_module
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+
+    runner_module = importlib.import_module("openjiuwen.core.runner.runner")
+    isolated = runner_module._RunnerImpl(runner_id="host-work-owner-probe", config=Runner.get_config())
+    monkeypatch.setattr(runner_module, "GLOBAL_RUNNER", isolated)
+    # Isolate external checkpointer/extensions; Runner start/stop, root group,
+    # Host lifecycle, Work execution and SQLite are real.
+    monkeypatch.setattr(runtime_module, "_initialize_runtime_dependencies", AsyncMock())
+    monkeypatch.setattr(interface_deep, "close_persistent_checkpointer", AsyncMock())
+    monkeypatch.setattr(AgentRuntime, "_ensure_extensions", AsyncMock())
+    monkeypatch.setattr(runtime_module, "_PROCESS_RUNTIME_DEPENDENCY_USERS", 0)
+    runtime = AgentRuntime(agent_manager=SimpleNamespace(
+        cancel_all_inflight_work=AsyncMock(), cleanup=AsyncMock(), unpin_agent=Mock()))
+    journal = SqliteUnifiedCommittedInputJournal(tmp_path / "managed.sqlite3")
+    service = runtime.get_work_service(journal.database_path)
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def run(_control):
+        started.set()
+        await release.wait()
+        return "real root result"
+
+    with pytest.raises(RuntimeStateError):
+        await service.work_runtime.start(**inputs(), runner=run)
+    assert service.journal.restore() == ()
+    try:
+        await runtime.start()
+        assert runtime.get_background_task_group() is isolated.get_root_task_group()
+        async with get_task_manager().task_group() as caller:
+            work = await service.work_runtime.start(**inputs(), runner=run)
+            await asyncio.wait_for(started.wait(), 2)
+            caller.cancel_scope.cancel()
+        record = service.work_runtime._records[(SCOPE, work.work_id, 1)]
+        assert type(record.operation) is asyncio.Future
+        assert record.snapshot.state is NativeWorkState.RUNNING
+        release.set()
+        await asyncio.wait_for(record.operation, 2)
+        assert service.journal.restore() == (record.snapshot,)
+        assert record.snapshot.result_text == "real root result"
+    finally:
+        release.set()
+        await runtime.close()
+    assert isolated.get_root_task_group() is None
+    assert service.closed
+
+
+@pytest.mark.asyncio
 async def test_canonical_database_has_one_owner_and_shutdown_settles_work(tmp_path):
     journal = SqliteUnifiedCommittedInputJournal(tmp_path / "work.sqlite3")
     runtime = host()

@@ -116,6 +116,7 @@ class HostWorkService:
             save=self.journal.save,
             restored=self.journal.restore(),
             observer=profile_event,
+            task_group_provider=runtime.get_background_task_group,
         )
         self._executors: dict[Any, tuple[Any, Any]] = {}
         self._executor_lock = asyncio.Lock()

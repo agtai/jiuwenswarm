@@ -1,5 +1,9 @@
 # LiveVoice：模块、运行位置与数据流
 
+> 2026-09-14 当前工作树：配套 SDK `.7`。Work 编排由 `AgentRuntime → Runner.get_root_task_group → root.start_soon` 管理；WorkStore 的耐久事实仍为业务权威。独立 producer/cleanup 未结算时保留容量且不发布成功。TaskManager 注册管理及完整 Task/Work 融合仍未完成。
+> 最新相同口径：Voice **112334**、Host **48028**、SDK **34056**，合计净增 **194418**；本批 **+70**（Host 适配 +13、SDK 所有权/结算增强 +57），累计较初始 **−1262**。后文各阶段数字为历史快照。[逐文件统计](../evidence/DEEP_WORK_NATIVE_OWNER_COUNTS_20260914.json)、[合并模块统计](../evidence/DEEP_WORK_NATIVE_OWNER_MODULES_20260914.json)。
+> AgentServer 是宿主运行容器，持有应用服务并装配 Runner；不是另一个执行引擎。M4+M5、M7+M9 保持合并展示。外部 Hermes/多模态版本未重新核验，原静态证据边界不变；本批不证明性能优势。配套 wheel 安装后 12 项真实 Runner/SQLite 场景通过；1016 个 Host、2409 个 SDK Python 文件与当前源码逐字节一致。
+
 > 2026-09-13 代码审计后的模块导读。SDK 配套版本 `0.1.17+livevoice.5`；深度融合仍为 PARTIAL。
 > 对应[统一记录](../reviews/TASK_WORK_UNIFICATION_20260913.md)和[代码量清单](UNIFIED_CODE_ACCOUNTING.md)。这是源码说明；当前产品验收边界仍由 [STATUS](../STATUS.md) 管理。
 
@@ -21,6 +25,8 @@ flowchart TB
   subgraph H["AgentServer / Host：JiuwenSwarm 应用后端"]
     C["语音会话与业务协调 M4+M5<br/>轮次、打断、播放事实、业务分流与来源校验"]
     W["工作管理 M6+M8<br/>Work 分析 / Task 正式项目任务<br/>Host 装配，AgentCore 持有通用生命周期"]
+    R["AgentCore Runner 根任务组<br/>持有 Work 编排寿命，等待物理执行及清理"]
+    W -->|WorkRuntime 通过 Host 获取既有 root| R
     X["Agent 与项目执行 M7+M9<br/>Host 绑定 Agent、模型和权限<br/>AgentCore 执行底座与项目副作用管理"]
     C <-->|受理、状态、调整、取消、结果| W
     W <-->|执行请求、输出、结算事实| X

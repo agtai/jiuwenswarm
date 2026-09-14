@@ -1,5 +1,9 @@
 # LiveVoice、Hermes Voice 与多模态全双工：按同一模块比较
 
+> 2026-09-14 当前工作树：配套 SDK `.7`。Work 编排由 `AgentRuntime → Runner.get_root_task_group → root.start_soon` 管理；WorkStore 的耐久事实仍为业务权威。独立 producer/cleanup 未结算时保留容量且不发布成功。TaskManager 注册管理及完整 Task/Work 融合仍未完成。
+> 最新相同口径：Voice **112334**、Host **48028**、SDK **34056**，合计净增 **194418**；本批 **+70**（Host 适配 +13、SDK 所有权/结算增强 +57），累计较初始 **−1262**。后文各阶段数字为历史快照。[逐文件统计](../evidence/DEEP_WORK_NATIVE_OWNER_COUNTS_20260914.json)、[合并模块统计](../evidence/DEEP_WORK_NATIVE_OWNER_MODULES_20260914.json)。
+> AgentServer 是宿主运行容器，持有应用服务并装配 Runner；不是另一个执行引擎。M4+M5、M7+M9 保持合并展示。外部 Hermes/多模态版本未重新核验，原静态证据边界不变；本批不证明性能优势。配套 wheel 安装后 12 项真实 Runner/SQLite 场景通过；1016 个 Host、2409 个 SDK Python 文件与当前源码逐字节一致。
+
 > 2026-09-13，LiveVoice 按配套 AgentCore `.5` 的代码审计更新；管理层深度融合仍为 PARTIAL。
 > LiveVoice 以当前两仓库源码为准；Hermes 固定 `e151d0b3458e136729fe498b566deb795ffb6a42`；多模态方案是 PR #2813 + #5301 的组合，插件代码对应 `b83923ae1f8cf0a315ce1f580e016edf48a02c2d`。这是模块级静态调用分析，不是三方性能或真实音视频实测。
 

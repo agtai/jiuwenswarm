@@ -1,5 +1,9 @@
 # Live Voice / Host / SDK 生产代码量与实际复用
 
+> 2026-09-14 当前工作树：配套 SDK `.7`。Work 编排由 `AgentRuntime → Runner.get_root_task_group → root.start_soon` 管理；WorkStore 的耐久事实仍为业务权威。独立 producer/cleanup 未结算时保留容量且不发布成功。TaskManager 注册管理及完整 Task/Work 融合仍未完成。
+> 最新相同口径：Voice **112334**、Host **48028**、SDK **34056**，合计净增 **194418**；本批 **+70**（Host 适配 +13、SDK 所有权/结算增强 +57），累计较初始 **−1262**。后文各阶段数字为历史快照。[逐文件统计](../evidence/DEEP_WORK_NATIVE_OWNER_COUNTS_20260914.json)、[合并模块统计](../evidence/DEEP_WORK_NATIVE_OWNER_MODULES_20260914.json)。
+> AgentServer 是宿主运行容器，持有应用服务并装配 Runner；不是另一个执行引擎。M4+M5、M7+M9 保持合并展示。外部 Hermes/多模态版本未重新核验，原静态证据边界不变；本批不证明性能优势。配套 wheel 安装后 12 项真实 Runner/SQLite 场景通过；1016 个 Host、2409 个 SDK Python 文件与当前源码逐字节一致。
+
 > 2026-09-13。统计源码，不统计测试、文档、配置、二进制、依赖或构建产物。物理行包括注释和空行；这不是可执行语句数。
 
 ## 1. 历史提取阶段与本轮相同口径

@@ -1274,9 +1274,10 @@ repeated validation algorithms, retains error adapters and enhances the existing
 identity helper rather than adding a new framework. Current combined net is
 194474 (-1206 from initial 195680). Controller/Team/coroutine-manager reuse remains
 bounded by actual execution semantics. In particular Coroutine TaskManager starts
-inside caller-owned AnyIO groups and cancels a CancelScope; its transient status
-cannot replace Work UNKNOWN/physical settlement or durable Task command/outbox
-facts. No schema/API version/dependency change or new SDK wheel deployment.
+inside the currently bound AnyIO group and cancels a CancelScope. The later
+native-owner re-audit below corrects the incomplete caller-lifetime exclusion:
+Runner already has a process-owned root, and native pending cleanup is usable.
+Transient status still cannot replace durable Task command/outbox facts. No schema/API version/dependency change or new SDK wheel deployment.
 
 
 Final SDK source (after import formatting) passed the same 37-test boundary in
@@ -1387,3 +1388,108 @@ and [final installed pair](../evidence/DEEP_CONSUMER_SUBSCRIPTION_PAIR_20260914.
 The prior note that consumer subscription management was unproved is superseded
 for this seam only. Task command/outbox, Work settlement and broader Host/Voice
 lifecycle audits retain their outstanding full-goal requirements; status PARTIAL.
+
+
+### Native Work owner correspondence re-audit (2026-09-14, in progress)
+
+Code fact correction: core/runner/runner.py owns a persistent root AnyIO task
+group; Host runtime/service.py acquires Runner.start with process reference
+counting and releases Runner.stop after the final Runtime. The earlier statement
+about caller-owned groups was incomplete. common/background_tasks.py chooses the
+currently bound group, but callers can explicitly bind the existing Runner root.
+Do not claim a new Host root/task-group framework is necessary.
+
+Tier 0 characterization audit, no production behavior change: run real native
+Runner root-group/TaskManager/background handles alongside real WorkRuntime and
+SQLite checkpoints. Check inherited versus explicit root ownership on caller
+cancellation and native pending cleanup versus Work UNKNOWN/occupied capacity.
+This determines whether native ownership/settlement is actually missing before
+choosing an adapter. Controlled producers do not prove Agent or Provider behavior;
+actual Harness producer reuse remains covered by preceding Work integration tests.
+
+
+Three real native/SQLite correspondence scenarios passed (1.62s, exit0): default
+caller ownership ends with that caller; explicit Runner-root binding survives it;
+native cancellation timeout leaves a protected-cleanup handle pending while
+Work persists UNKNOWN and rejects capacity replacement. Completed/UNKNOWN
+snapshots match a reopened SQLite Store. No mocks of manager, root or journal.
+This is meaningful evidence against the previous blanket non-reuse rationale,
+not proof that Work orchestration has already been integrated with TaskManager.
+The producers are controlled; no full Runner.start, Host initializer or Agent
+execution is claimed. Host source independently shows Runner.start acquisition
+and last-owner stop in runtime/service.py.
+
+Next implementation boundary: native ownership for the existing Work
+orchestration, without a new root group or durable status projection. First verify
+its cancellation/settlement behavior under actual native management, including
+scheduling failure after admission and pending producer cleanup. Keep Work CAS,
+revision, capacity and restart facts as domain authority. Do not simply replace
+asyncio.create_task with a helper call and claim convergence. No production
+code has changed in this audit; current production counts remain Voice112334,
+Host48015, SDK33999, combined194348 (-1332 against initial195680).
+
+
+### Work orchestration under native cancellation (2026-09-14, Tier 2)
+
+A scheduling-seam experiment runs the unchanged Work admission/_run through the
+actual native BackgroundTask/TaskManager. Cancelling that orchestration ends its
+native handle while its independent physical runner remains pending. The new
+positive safety test fails at operation.done(): the Work snapshot is UNKNOWN and
+unsettled, but the current capacity predicate ignores it once the coordinator
+ends. No production native scheduling has been enabled yet.
+
+Owned repair: keep capacity authority on execution_settled, not coordinator
+completion; wait for the actual runner and supplied settlement future in native
+shielded cleanup, retaining UNKNOWN and no successful result after ownership
+loss. This is required before native root integration. Preserve admission/CAS,
+revision, scoped cancellation, normal shutdown bounds and Voice-close behavior;
+no new database schema, Task cards, timeout values or voice latency policy.
+Accept real native-cancel/SQLite held capacity, settlement truth, existing Work
+cancel/update/recovery/failure tests, and independent review of the changed seam.
+
+
+### Native Work owner implementation (2026-09-14, current working tree)
+
+The earlier audit-only paragraphs above are historical. HostWorkService now passes
+AgentRuntime.get_background_task_group into WorkRuntime; managed Host resolves
+Runner.get_root_task_group and rejects unavailable/unstarted ownership before
+admission is persisted. The existing root starts the Work orchestration directly.
+A Future only reports coroutine completion; no second business state is created.
+Custom initializer/standalone SDK ownership remains compatible. WorkStore and
+revision/CAS/capacity/restart UNKNOWN semantics remain necessary domain authority.
+This is root lifecycle reuse, not TaskManager registry or full Task/Work convergence.
+
+Native cancellation before first execution is checked before RUNNING/producer
+allocation (real root red/green test); closed-group scheduling retains UNKNOWN
+without executing or replaying the request. Independent producer/cleanup must
+settle before capacity or success is published. Cleanup-phase cancel/deadline
+uses existing bounds and publishes UNKNOWN while physical cleanup remains owned.
+No Voice timeout, database schema, project authorization or Task-card policy changed.
+
+SDK real native/SQLite: 11 passed (1.94s); Host existing Work regressions: 37 passed
+(7.10s); real Runner.start/stop + Host/SQLite probe: 1 passed (7.48s). The latter
+isolates external checkpointer/extensions, not Runner or Work. Read-only review
+found no remaining concrete blocker in the three production files; this is not
+full candidate acceptance. Paired wheel validation and final documentation/checks
+remain pending before local commit.
+
+Same-basis production delta this batch: Voice 0, Host +13, SDK +57 = +70.
+Current official-baseline net: Voice 112334, Host 48028, SDK 34056 = 194418;
+1262 fewer than audit start 195680. This batch is necessary ownership/settlement
+enhancement and Host adaptation, not relocation or bulk duplicate deletion.
+
+
+Final batch verification: SDK 11 passed (1.94s), Host 38 passed (10.00s).
+SDK .7 and Host matching pins built and installed to an isolated target;
+12 native/SQLite scenarios passed there, including real Runner start/stop.
+All 1016 Host / 2409 SDK installed Python files match current source bytes.
+An initial reused Host build directory resurrected deleted task_core.py;
+that artifact was rejected and a clean temporary source build passed the
+complete file comparison. No source rollback, repository cleanup or deployment.
+Ruff on changed SDK source/test and git diff --check passed. Third-party
+dependencies reused the local environment; no full dependency-resolution claim.
+This closes only this native-root/settlement batch, not the overall goal.
+
+Paired SDK commit: `0420563d08a84ef207bce1f0c6b6aa569db69f54`
+(`fix(work): bind orchestration to native owner and retain physical settlement`),
+version `.7`; this Host commit supplies its owner, pin, integration test and evidence.

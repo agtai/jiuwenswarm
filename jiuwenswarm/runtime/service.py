@@ -335,6 +335,18 @@ class AgentRuntime:
     def session_coordinator(self) -> RuntimeSessionCoordinator:
         return self._session_coordinator
 
+    def get_background_task_group(self):
+        """Return the native process owner for accepted background execution."""
+        from openjiuwen.core.runner import Runner
+
+        if not self._manage_runner:
+            return None  # Custom initializers retain their existing ownership contract.
+        self._require_started()
+        group = Runner.get_root_task_group()
+        if group is None:
+            raise RuntimeStateError("runtime background task owner is unavailable")
+        return group
+
     def set_admission_controller(self, controller: Any | None) -> None:
         """Attach optional host-owned scheduling admission to chat execution."""
         self._admission_controller = controller

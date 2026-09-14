@@ -1,0 +1,30 @@
+{
+  "version": "0.1.17+livevoice.7",
+  "python_files_byte_identical_to_current_source": {
+    "jiuwenswarm": 1016,
+    "openjiuwen": 2409
+  },
+  "passed": 12,
+  "checks": [
+    "test_independent_cleanup_keeps_sqlite_unsettled_and_capacity_reserved('success',)",
+    "test_independent_cleanup_keeps_sqlite_unsettled_and_capacity_reserved('failure',)",
+    "test_independent_cleanup_keeps_sqlite_unsettled_and_capacity_reserved('cancel',)",
+    "test_independent_cleanup_keeps_sqlite_unsettled_and_capacity_reserved('cleanup_failure',)",
+    "test_independent_cleanup_keeps_sqlite_unsettled_and_capacity_reserved('cleanup_cancel',)",
+    "test_native_owner_lost_before_execution_never_starts_producer_or_replays(False,)",
+    "test_native_owner_lost_before_execution_never_starts_producer_or_replays(True,)",
+    "test_native_root_can_outlive_caller_group_like_durable_work(False,)",
+    "test_native_root_can_outlive_caller_group_like_durable_work(True,)",
+    "test_native_handle_retains_cleanup_but_durable_unknown_is_separate()",
+    "test_work_orchestration_native_cancel_keeps_physical_reservation()",
+    "test_managed_host_work_uses_real_runner_root_and_survives_caller_cancel (isolated external services)"
+  ],
+  "wheels": {
+    "openjiuwen-0.1.17+livevoice.7-py3-none-any.whl": "1ca2e4ee936fee0d0593299af3327b694c07880d7a65a3775e349ec6f036d15f",
+    "workswarm-0.2.5b1-py3-none-any.whl": "79bcd0f4c3489c0a13ab77327c2563f3c8a3c811b5ee14799380160d2ffb523b"
+  },
+  "limits": [
+    "No fresh dependency resolution; existing third-party dependencies.",
+    "Controlled producer and isolated external checkpointer/extensions; real Runner and SQLite."
+  ]
+}

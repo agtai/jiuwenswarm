@@ -1,0 +1,37 @@
+{
+  "sdk_baseline": "76c614a1886d7affb98b8c53e97de9e81abdb93a",
+  "host_baseline": "c96b8aa0e2832d08e6e4784981812587ac944d92",
+  "source_sha256": {
+    "openjiuwen/core/runner/runner.py": "aaa94a9d03c41c7d43a137ec687734ce941b9e3751554f4701ab965cbb528208",
+    "openjiuwen/core/common/background_tasks.py": "e202ef1a3cfd40f31de8dfaa2355cab2bb779cb613f65095567fbe741b7df05f",
+    "openjiuwen/core/common/task_manager/task.py": "6f88e89d1a7dd979db907e5f711ce2b08181f294e7bc8d4f72e214334016df08",
+    "openjiuwen/core/common/task_manager/manager.py": "078ba7882bddb757ac577d94d69d5b848216022331fd57d98e7f52527a072912",
+    "openjiuwen/core/application/tasks/work_runtime.py": "bcdbbec6e5b874bf0720c5156d672bb0027bfff388d983ddcfe9006da48eb292",
+    "tests/integration_tests/application_tasks/test_work_native_task_ownership.py": "4b015620f614cad71985481bfb745e922377423440134ec4a14178f6a4d8f179"
+  },
+  "validation": {
+    "passed": 11,
+    "seconds": 1.94,
+    "exit_code": 0,
+    "file": "tests/integration_tests/application_tasks/test_work_native_task_ownership.py"
+  },
+  "finding": "Production Work now uses the existing Runner root through Host lifecycle injection. Durable Work remains business authority; native registry convergence is not claimed.",
+  "production_net_change": 70,
+  "current_net_added": 194418,
+  "limits": [
+    "Real Runner.start/stop Host probe isolates external checkpointer and extensions.",
+    "Controlled producer; no physical Voice, Provider, or OS process restart.",
+    "TaskManager registry not used for Work; its asynchronous creation callbacks need separate semantics assessment.",
+    "Installed pair passed 12 actual native/SQLite scenarios; 1016 Host and 2409 SDK Python files byte-identical to source. No fresh external dependency resolution."
+  ],
+  "host_validation": {
+    "passed": 38,
+    "seconds": 10.0,
+    "exit_code": 0,
+    "files": [
+      "tests/unit_tests/live_voice/test_native_work_runtime.py",
+      "tests/unit_tests/runtime/test_host_work_service.py"
+    ]
+  },
+  "installed_pair": "DEEP_WORK_NATIVE_OWNER_PAIR_20260914.json"
+}
