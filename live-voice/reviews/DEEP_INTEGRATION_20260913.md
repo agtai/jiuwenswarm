@@ -1640,3 +1640,85 @@ Same-basis production: Voice112101, Host48040, SDK34134, net194275. Batch -221
 (Voice -233, Host validation exposure +12, SDK0), total1405 below initial195680.
 No relocation credited. Native existing baseline lines remain excluded from net
 additions. Formal Task attempt worker/native management remains incomplete.
+
+### Formal attempt native execution migration (2026-09-14, Tier 2, in progress)
+
+The next coherent boundary must make native Task execute the existing single
+_run_attempt body, not merely observe another asyncio executor. Host supplies
+its Runner owner; clear the Voice parent identity. Keep journal/OS lock/cleanup
+as domain-resource authority. SDK standalone/custom-owner compatibility must be
+explicit, without silently falling back after a configured Host owner fails.
+
+Code audit finds native terminal status precedes terminal callback settlement;
+expose physical settlement separately without changing existing done/status
+consumer semantics. Use the existing on_scheduled receipt, and keep creation
+ownership until _run_attempt actually enters: startup callbacks can fail before
+its finally exists. Native cancellation is level-triggered, requiring shielded
+worktree acquisition through path ownership, completion-reservation/apply/result
+sealing, and journal/cleanup handoff. Keep the current apply-wins-cancel policy,
+deadlines, result authority, restart UNKNOWN and no-replay protection.
+
+Owned code is native Task/BackgroundTask where necessary, SDK project executor,
+and Host runtime/composition owner wiring. No new framework, data migration,
+Voice latency or authorization policy. Required real SQLite/Git evidence covers
+startup/callback failure, cancel during checkout/acquisition/apply/cleanup,
+physical capacity/lock retention, bounded close/retry and forbidden paths.
+Independent source review confirms these prerequisites; implementation remains
+open and must not be committed as complete before actual native dispatch works.
+
+
+Formal native implementation (.9): the single _run_attempt is now executed by native
+TaskManager in the Host Runner root. The temporary precondition-only state above is
+superseded for this boundary. The Host wiring is AgentServer -> P3 factory -> lazy
+AgentRuntime owner; no Voice producer/session owns an accepted formal attempt.
+
+| Responsibility/current source | Existing entry reused | Decision and retained authority | Deleted/retained implementation; evidence |
+|---|---|---|---|
+| Direct formal coroutine execution, previously asyncio worker in Host | TaskManager.create_task / Task.execute / native registry and cancellation scope | Adapt existing native execution; clear caller parent identity | Host path replaces independent asyncio execution with actual native Task; same _run_attempt and journal remain. Git/SQLite tests inspect native Task and exact artifact |
+| Task scheduling startup/terminal observation | Existing on_scheduled, Task.wait, BackgroundTask | Enhance existing Task with optional finalizer and separate is_settled | No new registry/executor. Failed startup closes unentered coroutine and releases OS lock; callbacks/errors cannot strand dispatch |
+| Project write, accepted cancellation and recovery | Existing reserve_completion, journal/CAS, D2 effects, cleanup coordinator | Retain domain transaction authority; native status is never business result | Independent cleanup remains because threads/subprocesses may outlive cancellation. Before-apply cancellation forbids target mutation; applying completion and cleanup retention are verified |
+| Host initialization / lifecycle | AgentRuntime.start and Runner.get_root_task_group | Lazy adapter in existing runtime; configured owner failure fails closed | Host adds8 production lines. Custom initializer/standalone None retains declared compatibility; no hidden fallback on owner failure |
+| Physical wait observers | Native Task.wait / is_settled | Bounded non-owning wait adapters | Temporary asyncio waiters do not execute Agent/project work and never cancel native owner on timeout |
+
+Independent review found and fixed the overly broad preparation shield and startup
+release-error cleanup hole. The new real Host/D2 test proves intent/checkpoint/dispatch
+are present before cancellation while no target apply follows, and that caller close
+leaves the same native attempt alive. Native checkout/apply/cleanup/root-cancel and
+late-created-observer failures are covered; resource-acquisition cancellation retains
+the actual checkout and pending lease until safe release. Review did not run tests.
+
+Compatibility detail: Executor's private durable-outbox input is not an authentication
+API. Its exact binding is task/attempt/spec fingerprint, including canonical context
+scope. Tests for foreign scope change that canonical context too; changing only the
+redundant outbox.scope while retaining the exact spec is not credited as a public
+authorization test. Store/Host admission remains the authorization boundary; no new
+permission policy or data migration was introduced in this batch.
+
+Accounting before112101/48040/34134 (194275), after112101/48048/34307 (194456):
+Voice0, Host+8, SDK+173, combined+181. SDK project adapter+143; existing native modules
++30. Relocation0; no bulk duplicate deletion claimed. Overall1224 fewer production
+lines than initial195680. This is substantive execution reuse, but it does not close
+the broader audit by itself. Remaining full-goal work includes final cross-module
+requirements disposition, old Registry/spoken-notification oracle debt and explicitly
+bounded product evidence. Historical physical Voice/provider/restart limits remain.
+
+
+Final .9 boundary evidence: SDK 44 passed (39.49s), existing native API 10 passed
+(2.32s), Host project regressions 21 passed (50.71s), lazy Host/factory checks4
+(14.64s), real Host/D2 checks2 (13.54s). Counts are distinct within those groups;
+later focused checks/installed probes overlap and are not added as new coverage.
+The 21-test run preceded restoring the old standalone dispatch exception behavior;
+the affected cancellation/acquisition paths are rechecked separately in evidence.
+Independent review findings were fixed; final scoped Ruff/diff/link checks pass,
+with six pre-existing AgentServer lint findings verified unchanged against HEAD.
+
+Clean paired wheels were built and installed in an isolated temporary target.
+All1016 Host and2409 SDK Python files match current source bytes;25 installed
+scenarios pass, including actual D2 facts, project files and native lifecycle.
+The initial probe's test-support import setup failed before scenarios; corrected
+test-only namespaces ran without importing production source outside the installed
+target. No whole-environment dependency resolution or deployment was performed.
+The SDK source was rebuilt after restoring standalone exception compatibility;
+only the final .9 wheel SHA in evidence is accepted. Full goal remains partial.
+
+Pair: SDK `05faf6123365ec2aa6942efbe25dde3b3176b691` (`refactor(tasks): run formal project attempts through native task management`), .9; the Host commit containing this record is its companion. Final standalone cancellation/acquisition recheck:2 passed (9.28s), overlapping the earlier21. No push or history rewrite.

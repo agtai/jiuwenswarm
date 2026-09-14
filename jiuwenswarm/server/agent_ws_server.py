@@ -1640,6 +1640,7 @@ class AgentWebSocketServer:
             commit_ledger = TurnCommitLedger()
             composition = create_p3_composition_from_environment(
                 agent_manager=self._agent_manager,
+                task_group_provider=self._runtime.ensure_background_task_group,
                 model_resolver=ServerModelCatalogResolver(
                     catalog_reader=self._live_voice_p3_model_catalog,
                     model_builder=self._build_live_voice_p3_model,

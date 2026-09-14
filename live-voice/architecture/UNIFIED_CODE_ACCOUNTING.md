@@ -1,9 +1,9 @@
 # Live Voice / Host / SDK 生产代码量与实际复用
 
-> 2026-09-14 round 身份收敛：Harness 是唯一 round 预约、提交与取消权威；Voice Bridge 只保留有界输出消费许可、队列、校验和完成通知。已删除第二套预约模型、状态枚举、身份指纹账本及提交/回退协议；持久化失败仍先同步撤销未运行的 round，再等待 speculative 清理。
-> 配套 SDK 仍为 `0.1.17+livevoice.8`；Work 已复用 Runner 根任务组和 TaskManager，正式 Task 的执行尝试管理仍未完成原生收敛。AgentServer 是装配应用服务与执行依赖的运行容器。整体仍为 PARTIAL。
-> 当前相同口径：Voice **112101** / Host **48040** / SDK **34134**，合计净增 **194275**；本批 **−221**，较初始 **−1405**。[逐文件统计](../evidence/DEEP_ROUND_IDENTITY_COUNTS_20260914.json)、[合并模块统计](../evidence/DEEP_ROUND_IDENTITY_MODULES_20260914.json)。后文日期较早的数字均为历史阶段；此前 wheel 验证只对应其原提交，不替代当前源码验证。
-> M4+M5、M7+M9 保持合并。Hermes 和多模态方案未重新核验，下面保留原固定版本和静态证据边界；不据本批消重声称性能或物理音频优势。
+> 2026-09-14 正式 Task 原生执行收敛：AgentServer → P3 factory → AgentRuntime → 既有 Runner 根任务组 / TaskManager，原生 Task 直接运行唯一 `_run_attempt`。Harness 仍是前台 round 身份权威，Voice Bridge 只持有有界输出消费许可。
+> 配套 SDK `0.1.17+livevoice.9`。Work 和正式 Task 尝试共用原生执行、取消及事件能力；Task journal/Store 的事务、副作用与恢复事实仍是业务权威，不用原生瞬时状态替代。AgentServer 是装配应用服务与执行依赖的运行容器。完整融合目标仍为 PARTIAL。
+> 当前相同口径：Voice **112101** / Host **48048** / SDK **34307**，合计净增 **194456**；本批 **+181**，较初始 **−1224**。本批没有大批删除重复代码，不将接线和必要取消保护算作代码消除。[逐文件统计](../evidence/DEEP_FORMAL_NATIVE_COUNTS_20260914.json)、[合并模块统计](../evidence/DEEP_FORMAL_NATIVE_MODULES_20260914.json)。后文旧数字为历史阶段。
+> M4+M5、M7+M9 保持合并。Hermes 和多模态方案未重新核验，保留原固定版本和静态证据边界；本批不形成性能、延迟或物理音频优势证据。
 
 > 2026-09-13。统计源码，不统计测试、文档、配置、二进制、依赖或构建产物。物理行包括注释和空行；这不是可执行语句数。
 
@@ -90,9 +90,9 @@ AgentServer 中26行不可达的重复回退，由原有 `get_default_models()` 
 | Gateway G | 18,155 | 19,538 | 38,373 |
 | Realtime/语音适配 M3 | 14,427 | 14,427 | 14,427 |
 | 会话与业务协调 M4+M5 | 38,087 | 38,087 | 38,087 |
-| 工作管理 M6+M8 | 37,841 | 37,937 | 39,290 |
-| Agent 与项目执行 M7+M9 | 12,841 | 16,929 | 50,949 |
-| 公共契约、授权、配置、观测与 Host 装配 | 19,492 | 21,362 | 47,131 |
+| 工作管理 M6+M8 | 37,843 | 37,969 | 39,322 |
+| Agent 与项目执行 M7+M9 | 12,984 | 17,072 | 51,092 |
+| 公共契约、授权、配置、观测与 Host 装配 | 19,492 | 21,368 | 47,137 |
 
 这些是文件粒度的职责分桶，不是逐函数测量。例如前端 Task UI 归浏览器，SDK file-effect/durability 归执行，SDK 状态和存储归工作管理；M3 同时包含保留的非 Native 语音适配。大型 Registry 主要归会话协调，实际同时承担装配。需要精确定位时查看逐文件清单，而不是把展示框大小理解为独立部署包大小。
 
@@ -226,3 +226,18 @@ Work revision/CAS/UNKNOWN及取消实际结算保证。保留这些扩展的依�
 .venv/Scripts/python.exe scripts/live_voice/code_ownership_counts.py --stage deep-integration-after --output live-voice/evidence/DEEP_INTEGRATION_AFTER_20260913.json
 .venv/Scripts/python.exe scripts/live_voice/module_code_counts.py live-voice/evidence/DEEP_INTEGRATION_AFTER_20260913.json live-voice/evidence/DEEP_INTEGRATION_MODULES_20260913.json
 ```
+
+
+### .9 正式 Task 原生执行：同口径变化
+
+前值取上一已提交 round 批：Voice112101、Host48040、SDK34134，总194275。后值112101/48048/34307，总194456，净+181。原生已有文件基线仍为2306行，没有将整个 TaskManager 文件计入新增。
+
+| 分类 | 本批实际变化 |
+|---|---|
+| 搬迁而未消除 | 0；没有生产文件搬迁 |
+| 真正删除的重复实现 | 没有批量删除；Host 正常路径不再用独立 asyncio attempt worker，改为原生 Task 直接执行。独立消费者兼容分支仍在，不能把其代码计作删除 |
+| 必要原生增强 | Task/TaskManager/BackgroundTask 合计净+30：物理完成查询和可选资源 finalizer；旧 done/status 默认语义保留 |
+| 应用执行适配和保护 | SDK project_executor 净+143：句柄等待/取消、scheduled资源交接、原生取消临界区和启动失败清理。Host净+8：惰性取得既有root及两层接线；Voice0 |
+| 原生已有能力 | Runner root、TaskManager registry/execute/cancel/events；这些既有实现不算本批新增，也不替代业务数据库事务 |
+
+本批+181不是减少181，更不是消除了完整Task框架。大部分保留代码仍是输入/业务协议、持久化、项目写入保护、恢复、语音呈现和兼容模式；完整逐项消重与产品验收仍未完成。

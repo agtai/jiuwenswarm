@@ -64,7 +64,7 @@ async def test_managed_host_work_uses_real_runner_root_and_survives_caller_cance
         await service.work_runtime.start(**inputs(), runner=run)
     assert service.journal.restore() == ()
     try:
-        await runtime.start()
+        assert await runtime.ensure_background_task_group() is isolated.get_root_task_group()
         assert runtime.get_background_task_group() is isolated.get_root_task_group()
         async with get_task_manager().task_group() as caller:
             work = await service.work_runtime.start(**inputs(), runner=run)
@@ -82,6 +82,19 @@ async def test_managed_host_work_uses_real_runner_root_and_survives_caller_cance
         await runtime.close()
     assert isolated.get_root_task_group() is None
     assert service.closed
+    with pytest.raises(RuntimeStateError):
+        await runtime.ensure_background_task_group()
+
+
+@pytest.mark.asyncio
+async def test_lazy_background_owner_preserves_custom_initializer_and_initializes_once():
+    runtime = host()
+    try:
+        assert await runtime.ensure_background_task_group() is None
+        assert await runtime.ensure_background_task_group() is None
+        runtime._initializer.assert_awaited_once()
+    finally:
+        await runtime.close()
 
 
 @pytest.mark.asyncio

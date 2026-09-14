@@ -5139,6 +5139,7 @@ def create_p3_composition_from_environment(
     commit_ledger: TurnCommitLedger | None = None,
     reconciliation_event_sink: ReconciliationEventSink | None = None,
     stream_observer: DirectStreamObserver | None = None,
+    task_group_provider: Callable[[], Awaitable[Any]] | None = None,
 ) -> P3AuthenticatedComposition | None:
     """Build the production composition only after the complete gate validates."""
 
@@ -5240,6 +5241,7 @@ def create_p3_composition_from_environment(
             database_path,
             stream_observer=stream_observer,
             durability_store=store,
+            task_group_provider=task_group_provider,
         )
         if direct_selection.profile not in executor.capability_profiles():
             raise FormalTaskViolation(

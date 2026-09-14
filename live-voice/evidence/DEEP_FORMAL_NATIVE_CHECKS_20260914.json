@@ -1,0 +1,153 @@
+{
+  "host_before": "62d454115a556b26c000539b4ac03f02995a64ed",
+  "sdk_before": "c46c9b2ba5ec026e8c3f1459542d46f079ea0dd6",
+  "scope": "Actual native execution of formal project attempts through Host Runner; physical settlement, startup ownership and safe cancellation; .9 pair",
+  "source_sha256": {
+    "host/jiuwenswarm/runtime/service.py": "405be979af758fa8650c69b7e585efbfbeb932302ed85eb5ee0b1b44c72fc6f7",
+    "host/jiuwenswarm/server/agent_ws_server.py": "8a8e257cb71666c1d32941fc85328a19be04476363463a40e4c2335213a9cae1",
+    "host/jiuwenswarm/server/runtime/formal_tasks/p3_authenticated_composition.py": "1e689f4174e170cca7c3e3fbf8b1b403201c49a575d6a821ca1a88a1d1042e0f",
+    "host/pyproject.toml": "1572fcacdf9aa27807bbd7970e0b4fa4716e40d6c5c22b650cfcfcecbdcd0419",
+    "host/tests/unit_tests/live_voice/test_p3_authenticated_composition.py": "2068fe0baa86fa9e15daecc0b7b771bc5e2d2c9e1742fd584d337cb7b2fe7e02",
+    "host/tests/unit_tests/runtime/test_host_work_service.py": "96906bb42f131f58fc0f4d929b723284edf3a0803236cbc18f16a50eb7a906e8",
+    "host/uv.lock": "802ba2baf0c3cb6d3c7a4b76e63dd56965b961f6a0f5c333e04bc1ca77f220f0",
+    "host/tests/unit_tests/runtime/test_host_project_task_owner.py": "6ecf4271e3743ec0e0267e57e063373ddd9a9fea2cd885a6937c3fb877c32dc8",
+    "sdk/openjiuwen/core/application/tasks/project_executor.py": "f399559768613ef3c8060cae68fa29e6bebea62965fc3e144504615a35a728b0",
+    "sdk/openjiuwen/core/common/background_tasks.py": "e2908f821df3dd7eade1cdc1e21e3bce45ce99a5410ec1268ade87c73290ca66",
+    "sdk/openjiuwen/core/common/task_manager/manager.py": "8dce76f575352a25b3376be7cd77db9c14d20f2cad60f899cd7a5efa85b4aec1",
+    "sdk/openjiuwen/core/common/task_manager/task.py": "b7e99a8ff702a3dae342c465b945dfbf7d5ce0a2906c8c986a7f58f239cf08ae",
+    "sdk/pyproject.toml": "4dba932726b7bd15170d9d16208aef878d40e817bb135ae24bb990d9bdb4ea83",
+    "sdk/tests/integration_tests/application_tasks/test_project_native_task_ownership.py": "109788974cf5bb72683ee75fac14f79cbb95e7a883e7fd4e061d3944f2883bab",
+    "sdk/tests/unit_tests/core/common/test_task_finalization.py": "0ea1e4ab9d75d70b96c6a11fe42ce79c941b67adfa8e3ef80800198fe99a283d",
+    "sdk/tests/unit_tests/core/common/test_task_physical_settlement.py": "de01e241d1350981ce8055973a9c7b931c4d111dee16693c512ba76b948c2854"
+  },
+  "source_checks": [
+    {
+      "boundary": "SDK native project, standalone Git/SQLite, native lifecycle and existing Work ownership",
+      "passed": 44,
+      "seconds": 39.49
+    },
+    {
+      "boundary": "Existing native TaskManager affected API compatibility",
+      "passed": 10,
+      "seconds": 2.32
+    },
+    {
+      "boundary": "Host existing project cancellation/acquisition/cleanup/adjustment/restart matrix",
+      "passed": 21,
+      "seconds": 50.71,
+      "note": "Before final compatibility restoration to prior standalone dispatch exception handling; affected paths checked separately below."
+    },
+    {
+      "boundary": "Host lazy root/custom initializer/factory/feature-off",
+      "passed": 4,
+      "seconds": 14.64
+    },
+    {
+      "boundary": "Real Host Runner/TaskManager/Core/D2 Store/Adapter/Git, caller close and cancellation before apply",
+      "passed": 2,
+      "seconds": 13.54
+    },
+    {
+      "boundary": "Final standalone cancellation/acquisition compatibility after exception-handler restoration",
+      "passed": 2,
+      "seconds": 9.28,
+      "overlaps": "Two of the existing 21 Host project regressions; not additional distinct coverage."
+    }
+  ],
+  "installed_pair": {
+    "version": "0.1.17+livevoice.9",
+    "python_files_byte_identical_to_snapshot_and_current_source": {
+      "jiuwenswarm": 1016,
+      "openjiuwen": 2409
+    },
+    "passed": 25,
+    "checks": [
+      "test_project_attempt_runs_in_native_task_with_real_git_and_detached_voice_parent",
+      "test_native_running_cancel_is_exact_and_restart_cannot_replay",
+      "test_cancelled_native_acquisition_retains_checkout_and_bounds_close",
+      "test_native_observer_failure_does_not_orphan_resources_or_replay",
+      "test_native_observer_failure_does_not_orphan_resources_or_replay",
+      "test_native_observer_failure_does_not_orphan_resources_or_replay",
+      "test_native_observer_failure_does_not_orphan_resources_or_replay",
+      "test_native_cancel_retains_thread_owner_until_real_git_operation_finishes",
+      "test_native_cancel_retains_thread_owner_until_real_git_operation_finishes",
+      "test_native_cancel_retains_thread_owner_until_real_git_operation_finishes",
+      "test_native_cancel_retains_thread_owner_until_real_git_operation_finishes",
+      "test_native_cancel_retains_thread_owner_until_real_git_operation_finishes",
+      "test_native_cancel_retains_thread_owner_until_real_git_operation_finishes",
+      "test_native_cancel_retains_thread_owner_until_real_git_operation_finishes",
+      "test_native_cancel_retains_thread_owner_until_real_git_operation_finishes",
+      "test_configured_native_owner_failure_never_falls_back_or_acquires_agent",
+      "test_sdk_project_execution_applies_exact_result_and_restores_without_agent_replay",
+      "test_finalization_precedes_settlement_even_when_body_never_enters",
+      "test_finalization_precedes_settlement_even_when_body_never_enters",
+      "test_finalization_precedes_settlement_even_when_body_never_enters",
+      "test_finalizer_failure_is_observable_and_does_not_strand_waiters",
+      "test_physical_settlement_waits_for_terminal_observer_without_changing_done",
+      "test_physical_settlement_waits_for_terminal_observer_without_changing_done",
+      "test_host_native_d2_survives_caller_close_and_honors_cancel_before_apply",
+      "test_host_native_d2_survives_caller_close_and_honors_cancel_before_apply"
+    ],
+    "wheels": {
+      "workswarm-0.2.5b1-py3-none-any.whl": "d6cbaacca86b23108c9baa1bf1843334dac763758523b92fcdd616750c1ebbdf",
+      "openjiuwen-0.1.17+livevoice.9-py3-none-any.whl": "ca67d38aca8be135c8227261f2a24300d2d87f8f9cc82c9a6547313660138178"
+    },
+    "limits": [
+      "Existing third-party dependencies; no fresh resolution.",
+      "Controlled lower Agent; real native TaskManager/Runner, SQLite/D2 and Git.",
+      "External checkpointer/extensions isolated; no physical Voice/Provider or OS restart."
+    ]
+  },
+  "pair_directory": "C:\\Users\\admin\\AppData\\Local\\Temp\\livevoice-native-project-pair-vq98jdhn",
+  "log_sha256": {
+    "livevoice-sdk-native-project-final.log": "b0b157c343d87bacaab80dd02526358a026ffa2c4d924f3289ec81951bab06a5",
+    "livevoice-native-formal-regression.log": "841a4e18475d0ed19de4e0ad12b8bcf447b528d266fc6633f30877499e2c6b5e",
+    "livevoice-host-native-project.log": "b108fa34fd51a073903187c39ebaba5ab70b652335380c546b5ebf0b81624e08",
+    "livevoice-formal-fallback-final.log": "91b76eadab225dc4935c2ebb2d1bbce7c961c8357cb54a82414a4a458573fe0f"
+  },
+  "review": {
+    "mode": "Independent read-only complete SDK diff and targeted fix/Host-wiring review; no tests run by reviewer",
+    "findings_fixed": [
+      "Preparation shield must not swallow cancellation before reserve/apply",
+      "Startup release failure must not skip OS unlock/started-event/map cleanup"
+    ],
+    "limits": "Reviewer did not cover latest acquire/cleanup tests; Main inspected and exercised these actual retained-resource paths."
+  },
+  "lint": {
+    "sdk": "passed with existing ASYNC109 API convention excluded",
+    "host": "affected runtime/factory/tests passed; AgentServer six diagnostics match HEAD code/message exactly",
+    "diff": "passed",
+    "local_document_links": "passed"
+  },
+  "accounting": {
+    "before": {
+      "voice": 112101,
+      "jiuwenswarm": 48040,
+      "agentcore": 34134,
+      "combined": 194275
+    },
+    "after": {
+      "voice": 112101,
+      "jiuwenswarm": 48048,
+      "agentcore": 34307,
+      "combined": 194456
+    },
+    "batch_net": 181,
+    "net_reduction_from_initial": 1224,
+    "relocated": 0,
+    "bulk_duplicate_deletion_claimed": false,
+    "native_enhancement_net": 30,
+    "project_adapter_net": 143,
+    "host_adapter_net": 8
+  },
+  "limitations": [
+    "Full deep-integration goal remains partial; this closes formal execution ownership only.",
+    "Task journal/Store/D2/OS locks and retained cleanup keep separate verified domain authority.",
+    "Standalone/custom-owner mode remains asyncio; configured Host owner failure never silently falls back.",
+    "No Provider/physical voice/device/full OS restart acceptance.",
+    "No Voice preparation-timeout, buffer or latency-policy changes.",
+    "No fresh transitive dependency resolution; editable uv.lock package version drift repaired only."
+  ],
+  "sdk_commit": "05faf6123365ec2aa6942efbe25dde3b3176b691",
+  "host_pair": "The Host commit containing this evidence is the companion of sdk_commit; package requirement .9."
+}

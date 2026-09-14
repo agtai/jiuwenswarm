@@ -347,6 +347,11 @@ class AgentRuntime:
             raise RuntimeStateError("runtime background task owner is unavailable")
         return group
 
+    async def ensure_background_task_group(self):
+        """Initialize the Host owner lazily when background execution is admitted."""
+        await self.start()
+        return self.get_background_task_group()
+
     def set_admission_controller(self, controller: Any | None) -> None:
         """Attach optional host-owned scheduling admission to chat execution."""
         self._admission_controller = controller

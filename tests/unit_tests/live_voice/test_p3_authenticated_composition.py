@@ -5994,6 +5994,25 @@ def test_flag_off_constructs_no_store_scheduler_or_agent(
     assert observer_calls == []
 
 
+def test_formal_factory_retains_lazy_host_owner_without_starting_it(tmp_path, monkeypatch):
+    _configure_enabled_factory(monkeypatch, 3600)
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition._resolve_database_path",
+        lambda _configured: tmp_path / "host-owner.sqlite3",
+    )
+    calls = []
+
+    async def owner():
+        calls.append("started")
+        raise AssertionError("construction must not initialize runtime")
+
+    composition = create_p3_composition_from_environment(
+        agent_manager=object(), model_resolver=_ModelResolver(), task_group_provider=owner,
+    )
+    assert composition._core.executor._task_group_provider is owner
+    assert calls == []
+
+
 @pytest.mark.parametrize(
     "interval",
     [math.nan, math.inf, -math.inf, 0.0, -1.0, 3600.0001],

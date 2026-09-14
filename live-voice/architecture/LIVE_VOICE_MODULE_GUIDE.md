@@ -1,9 +1,9 @@
 # LiveVoice：模块、运行位置与数据流
 
-> 2026-09-14 round 身份收敛：Harness 是唯一 round 预约、提交与取消权威；Voice Bridge 只保留有界输出消费许可、队列、校验和完成通知。已删除第二套预约模型、状态枚举、身份指纹账本及提交/回退协议；持久化失败仍先同步撤销未运行的 round，再等待 speculative 清理。
-> 配套 SDK 仍为 `0.1.17+livevoice.8`；Work 已复用 Runner 根任务组和 TaskManager，正式 Task 的执行尝试管理仍未完成原生收敛。AgentServer 是装配应用服务与执行依赖的运行容器。整体仍为 PARTIAL。
-> 当前相同口径：Voice **112101** / Host **48040** / SDK **34134**，合计净增 **194275**；本批 **−221**，较初始 **−1405**。[逐文件统计](../evidence/DEEP_ROUND_IDENTITY_COUNTS_20260914.json)、[合并模块统计](../evidence/DEEP_ROUND_IDENTITY_MODULES_20260914.json)。后文日期较早的数字均为历史阶段；此前 wheel 验证只对应其原提交，不替代当前源码验证。
-> M4+M5、M7+M9 保持合并。Hermes 和多模态方案未重新核验，下面保留原固定版本和静态证据边界；不据本批消重声称性能或物理音频优势。
+> 2026-09-14 正式 Task 原生执行收敛：AgentServer → P3 factory → AgentRuntime → 既有 Runner 根任务组 / TaskManager，原生 Task 直接运行唯一 `_run_attempt`。Harness 仍是前台 round 身份权威，Voice Bridge 只持有有界输出消费许可。
+> 配套 SDK `0.1.17+livevoice.9`。Work 和正式 Task 尝试共用原生执行、取消及事件能力；Task journal/Store 的事务、副作用与恢复事实仍是业务权威，不用原生瞬时状态替代。AgentServer 是装配应用服务与执行依赖的运行容器。完整融合目标仍为 PARTIAL。
+> 当前相同口径：Voice **112101** / Host **48048** / SDK **34307**，合计净增 **194456**；本批 **+181**，较初始 **−1224**。本批没有大批删除重复代码，不将接线和必要取消保护算作代码消除。[逐文件统计](../evidence/DEEP_FORMAL_NATIVE_COUNTS_20260914.json)、[合并模块统计](../evidence/DEEP_FORMAL_NATIVE_MODULES_20260914.json)。后文旧数字为历史阶段。
+> M4+M5、M7+M9 保持合并。Hermes 和多模态方案未重新核验，保留原固定版本和静态证据边界；本批不形成性能、延迟或物理音频优势证据。
 
 > 本文由 2026-09-13 的模块导读持续更新；早期 `.5` 阶段结论应结合上述当前调用关系阅读。
 > 对应[统一记录](../reviews/TASK_WORK_UNIFICATION_20260913.md)和[代码量清单](UNIFIED_CODE_ACCOUNTING.md)。这是源码说明；当前产品验收边界仍由 [STATUS](../STATUS.md) 管理。
@@ -26,8 +26,9 @@ flowchart TB
   subgraph H["AgentServer / Host：JiuwenSwarm 应用后端"]
     C["语音会话与业务协调 M4+M5<br/>轮次、打断、播放事实、业务分流与来源校验"]
     W["工作管理 M6+M8<br/>Work 分析 / Task 正式项目任务<br/>Host 装配，AgentCore 持有通用生命周期"]
-    R["AgentCore Runner 根任务组 / TaskManager<br/>注册、执行与取消 Work 编排，等待物理执行及清理"]
+    R["AgentCore Runner 根任务组 / TaskManager<br/>注册、运行与取消 Work / 正式 Task 尝试，等待物理执行及清理"]
     W -->|WorkRuntime 通过 Host 获取既有 root| R
+    R -->|原生 Task 直接运行唯一项目尝试协程| X
     X["Agent 与项目执行 M7+M9<br/>Host 绑定 Agent、模型和权限<br/>AgentCore 执行底座与项目副作用管理"]
     C <-->|受理、状态、调整、取消、结果| W
     W <-->|执行请求、输出、结算事实| X
@@ -231,3 +232,12 @@ ACK游标验证、按需分页与完整前缀回放仍保留不同交付语义�
 队列、授权、状态快照和关闭意图共用；分页验证及历史attempt终态区分作为模式保留。
 ACK仍由Host展示/播放事实决定，读取和关闭均不写Task/outbox/消费水位。
 这项仅证明订阅管理收敛，不能推导Controller、Team与Work已全面统一。
+
+
+### 正式 Task 的实际执行所有者（.9）
+
+AgentServer 在 P3 装配时传入 `AgentRuntime.ensure_background_task_group`；仅在新尝试准备执行时启动/取得现有 Runner 根任务组，配置关闭或读取旧结果不会启动它。TaskManager 同步 scheduled 回执交接 journal 对应的 OS 锁与 context，再释放分发锁；异步创建回调不能占锁等待执行结束。原生 Task 直接执行 `_run_attempt`，不是外包一层 observer 再运行另一套 asyncio worker。
+
+创建/播报请求的 Voice 父任务身份被清除；语音调用者退出不取消已接受的后台执行。任务取消仍先经过原 Task 的绑定和 journal，再中止原生句柄。原生容器中断记录 INTERRUPTED，不能伪造用户取消。checkout/seed 的线程必须返回后才能移交目录；D2 准备后重新检查取消，只有 reserve/apply 临界段保护真实写入；清理期间使用 physical settlement 判断容量与关闭。
+
+未配置宿主 owner 的 SDK 独立消费者及 Host custom initializer 保留 asyncio 调用模式，共用同一执行算法和 journal。这是已有消费者兼容模式；已配置 owner 失败时不降级。独立 cleanup coordinator 保留，因为线程、Git 子进程及延迟 Agent 释放不能由协程取消停止。TaskStore、attempt journal、D2 ledger、OS lock 各保存业务受理、尝试事实、副作用证据和进程所有权；不能用原生 Task 内存状态替代，也不能据此声称所有任务管理已合并。

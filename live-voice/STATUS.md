@@ -108,8 +108,11 @@ durable business outcome remains in WorkStore. Foreground round identity is owne
 only by the Host Harness: Bridge holds bounded output-consumption permits, not a
 second round reservation/commit ledger. Failed durable acceptance revokes the
 unstarted round before speculative cleanup can yield. Targeted composition,
-Host/SQLite/project and reconstruction checks cover these boundaries; formal
-Task attempt-worker management and the complete deep-integration goal remain open.
+Host/SQLite/project and reconstruction checks cover these boundaries. Formal
+Task attempts now execute directly in native TaskManager under the Host Runner
+root; journal/effect/cleanup facts retain their distinct domain authority. Real
+Git/D2 checks distinguish caller cancellation, native interruption and apply
+settlement. The complete deep-integration goal remains open.
 Current unified-input joint tests cover real SQLite Task creation/confirmation,
 replay/conflict, project rejection, Voice close followed by completion, and
 running cancellation while the original dialogue completes normally. These use

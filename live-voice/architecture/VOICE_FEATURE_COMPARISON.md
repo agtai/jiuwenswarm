@@ -1,9 +1,9 @@
 # LiveVoice、Hermes Voice 与多模态全双工：按同一模块比较
 
-> 2026-09-14 round 身份收敛：Harness 是唯一 round 预约、提交与取消权威；Voice Bridge 只保留有界输出消费许可、队列、校验和完成通知。已删除第二套预约模型、状态枚举、身份指纹账本及提交/回退协议；持久化失败仍先同步撤销未运行的 round，再等待 speculative 清理。
-> 配套 SDK 仍为 `0.1.17+livevoice.8`；Work 已复用 Runner 根任务组和 TaskManager，正式 Task 的执行尝试管理仍未完成原生收敛。AgentServer 是装配应用服务与执行依赖的运行容器。整体仍为 PARTIAL。
-> 当前相同口径：Voice **112101** / Host **48040** / SDK **34134**，合计净增 **194275**；本批 **−221**，较初始 **−1405**。[逐文件统计](../evidence/DEEP_ROUND_IDENTITY_COUNTS_20260914.json)、[合并模块统计](../evidence/DEEP_ROUND_IDENTITY_MODULES_20260914.json)。后文日期较早的数字均为历史阶段；此前 wheel 验证只对应其原提交，不替代当前源码验证。
-> M4+M5、M7+M9 保持合并。Hermes 和多模态方案未重新核验，下面保留原固定版本和静态证据边界；不据本批消重声称性能或物理音频优势。
+> 2026-09-14 正式 Task 原生执行收敛：AgentServer → P3 factory → AgentRuntime → 既有 Runner 根任务组 / TaskManager，原生 Task 直接运行唯一 `_run_attempt`。Harness 仍是前台 round 身份权威，Voice Bridge 只持有有界输出消费许可。
+> 配套 SDK `0.1.17+livevoice.9`。Work 和正式 Task 尝试共用原生执行、取消及事件能力；Task journal/Store 的事务、副作用与恢复事实仍是业务权威，不用原生瞬时状态替代。AgentServer 是装配应用服务与执行依赖的运行容器。完整融合目标仍为 PARTIAL。
+> 当前相同口径：Voice **112101** / Host **48048** / SDK **34307**，合计净增 **194456**；本批 **+181**，较初始 **−1224**。本批没有大批删除重复代码，不将接线和必要取消保护算作代码消除。[逐文件统计](../evidence/DEEP_FORMAL_NATIVE_COUNTS_20260914.json)、[合并模块统计](../evidence/DEEP_FORMAL_NATIVE_MODULES_20260914.json)。后文旧数字为历史阶段。
+> M4+M5、M7+M9 保持合并。Hermes 和多模态方案未重新核验，保留原固定版本和静态证据边界；本批不形成性能、延迟或物理音频优势证据。
 
 > 下列外部对比来源固定于 2026-09-13；当时本地 SDK 为 `.5`，后续本地变化以上述记录为准。
 > LiveVoice 以当前两仓库源码为准；Hermes 固定 `e151d0b3458e136729fe498b566deb795ffb6a42`；多模态方案是 PR #2813 + #5301 的组合，插件代码对应 `b83923ae1f8cf0a315ce1f580e016edf48a02c2d`。这是模块级静态调用分析，不是三方性能或真实音视频实测。
