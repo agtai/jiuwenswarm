@@ -1,0 +1,1128 @@
+{
+  "host_source": "92f77b5f17feea8aecfc5fdf58379995810e99d0",
+  "sdk_source": "7c81d886d15b87a5ba9b2d899cbd5259fb7d5e5e",
+  "method": "Changed production Python files in the existing ownership manifest; AST function bodies, at least 10 physical lines; strip leading docstring only. Nested functions may overlap and are not additive savings.",
+  "limits": [
+    "Candidate search only; identical AST does not prove interchangeable semantics or absence of non-identical duplication.",
+    "No frontend scan, runtime test, external implementation review or production change.",
+    "No production deletion or integration credit assigned."
+  ],
+  "files_scanned": 170,
+  "functions_examined": 4167,
+  "matches": [
+    [
+      {
+        "path": "jiuwenswarm/server/runtime/agent_adapter/interface.py",
+        "owner": "jiuwenswarm",
+        "line": 1855,
+        "lines": 35,
+        "name": "_make_retry_without_a2ui_call"
+      },
+      {
+        "path": "jiuwenswarm/server/runtime/agent_adapter/interface.py",
+        "owner": "jiuwenswarm",
+        "line": 1910,
+        "lines": 35,
+        "name": "_make_retry_without_a2ui_call"
+      }
+    ],
+    [
+      {
+        "path": "jiuwenswarm/server/runtime/agent_adapter/interface.py",
+        "owner": "jiuwenswarm",
+        "line": 1861,
+        "lines": 27,
+        "name": "retry_without_a2ui_call"
+      },
+      {
+        "path": "jiuwenswarm/server/runtime/agent_adapter/interface.py",
+        "owner": "jiuwenswarm",
+        "line": 1916,
+        "lines": 27,
+        "name": "retry_without_a2ui_call"
+      }
+    ],
+    [
+      {
+        "path": "jiuwenswarm/gateway/routing/agent_client.py",
+        "owner": "jiuwenswarm",
+        "line": 141,
+        "lines": 16,
+        "name": "send_request"
+      },
+      {
+        "path": "jiuwenswarm/server/runtime/agent_adapter/agent_adapters.py",
+        "owner": "jiuwenswarm",
+        "line": 40,
+        "lines": 16,
+        "name": "reload_agent_config"
+      },
+      {
+        "path": "jiuwenswarm/server/runtime/agent_adapter/agent_adapters.py",
+        "owner": "jiuwenswarm",
+        "line": 57,
+        "lines": 10,
+        "name": "process_message_impl"
+      },
+      {
+        "path": "jiuwenswarm/server/runtime/agent_adapter/agent_adapters.py",
+        "owner": "jiuwenswarm",
+        "line": 68,
+        "lines": 10,
+        "name": "process_message_stream_impl"
+      }
+    ],
+    [
+      {
+        "path": "jiuwenswarm/agents/harness/common/auto_harness/scheduler.py",
+        "owner": "jiuwenswarm",
+        "line": 141,
+        "lines": 17,
+        "name": "_resolve_model"
+      },
+      {
+        "path": "jiuwenswarm/server/agent_ws_server.py",
+        "owner": "jiuwenswarm",
+        "line": 11084,
+        "lines": 17,
+        "name": "_resolve_model"
+      }
+    ],
+    [
+      {
+        "path": "openjiuwen/core/application/tasks/persistent_task_core.py",
+        "owner": "agentcore",
+        "line": 118,
+        "lines": 12,
+        "name": "recovery_facts"
+      },
+      {
+        "path": "openjiuwen/core/application/tasks/persistent_task_core.py",
+        "owner": "agentcore",
+        "line": 131,
+        "lines": 20,
+        "name": "authorize_durable_recovery"
+      }
+    ],
+    [
+      {
+        "path": "jiuwenswarm/server/agent_ws_server.py",
+        "owner": "jiuwenswarm",
+        "line": 9182,
+        "lines": 12,
+        "name": "_resolve_adapter"
+      },
+      {
+        "path": "jiuwenswarm/server/runtime/agent_manager.py",
+        "owner": "jiuwenswarm",
+        "line": 896,
+        "lines": 11,
+        "name": "_resolve_runtime_adapter"
+      }
+    ],
+    [
+      {
+        "path": "jiuwenswarm/channels/live_voice/latency_measurement.py",
+        "owner": "voice",
+        "line": 615,
+        "lines": 11,
+        "name": "trace_binding"
+      },
+      {
+        "path": "jiuwenswarm/common/telemetry/observability.py",
+        "owner": "jiuwenswarm",
+        "line": 861,
+        "lines": 11,
+        "name": "to_dict"
+      }
+    ],
+    [
+      {
+        "path": "jiuwenswarm/channels/live_voice/batch_speech.py",
+        "owner": "voice",
+        "line": 657,
+        "lines": 10,
+        "name": "recognize"
+      },
+      {
+        "path": "jiuwenswarm/channels/live_voice/batch_speech.py",
+        "owner": "voice",
+        "line": 668,
+        "lines": 10,
+        "name": "synthesize"
+      }
+    ]
+  ],
+  "excluded_native_unchanged": [
+    {
+      "path": "jiuwenswarm/server/runtime/agent_adapter/interface.py",
+      "names": [
+        "_make_retry_without_a2ui_call"
+      ]
+    },
+    {
+      "path": "jiuwenswarm/agents/harness/common/auto_harness/scheduler.py",
+      "names": [
+        "_resolve_model"
+      ]
+    },
+    {
+      "path": "jiuwenswarm/server/agent_ws_server.py",
+      "names": [
+        "_resolve_model",
+        "_resolve_adapter"
+      ]
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/agent_manager.py",
+      "names": [
+        "_resolve_runtime_adapter"
+      ]
+    }
+  ],
+  "native_comparison_baseline": "8c7bfecdf0cc7607b07763fe687e08bf24f6ab83",
+  "scanned_files": [
+    {
+      "path": "jiuwenswarm/agents/harness/common/auto_harness/project_execution.py",
+      "owner": "jiuwenswarm",
+      "sha256": "afb1d04a8fc2dbfc7d3d3dc66518802c5e3339393234a5c2e9deca5b3f246224"
+    },
+    {
+      "path": "jiuwenswarm/agents/harness/common/auto_harness/run_log_status.py",
+      "owner": "jiuwenswarm",
+      "sha256": "3adfeaf2e988b0812350ba7610cabcc73c995627ecf46b1325b6ae5eca9df401"
+    },
+    {
+      "path": "jiuwenswarm/agents/harness/common/auto_harness/scheduler.py",
+      "owner": "jiuwenswarm",
+      "sha256": "4458bd685da8c5720260cd73a9d229bff2df057bfeb338b42f57099d449d1baf"
+    },
+    {
+      "path": "jiuwenswarm/agents/harness/common/auto_harness/service.py",
+      "owner": "jiuwenswarm",
+      "sha256": "2749eda3d5d4210bbaaa38cbd189d7ae9cfb3518a942ca845bbb86c7e956e20c"
+    },
+    {
+      "path": "jiuwenswarm/agents/harness/common/auto_harness/task_store.py",
+      "owner": "jiuwenswarm",
+      "sha256": "f8d5b0d8ff767ce686ca72d23dcf31a211c45d3ff90721df6da1cadf52d95211"
+    },
+    {
+      "path": "jiuwenswarm/agents/harness/common/rails/execution_guard/circuit_breaker_rail.py",
+      "owner": "jiuwenswarm",
+      "sha256": "ffb9630bfd7f8d9a8d321890b4f37f3e8e2503a3e1e61dce0c131eb9518dba9e"
+    },
+    {
+      "path": "jiuwenswarm/agents/harness/common/rails/response_prompt_rail.py",
+      "owner": "jiuwenswarm",
+      "sha256": "f93d92e196ec1f99783b8db7bdcf7cf1616685d66034dfbd2abf2f6b65a3c239"
+    },
+    {
+      "path": "jiuwenswarm/agents/harness/common/rails/stream_event_rail.py",
+      "owner": "jiuwenswarm",
+      "sha256": "246e770951eee80f259ab0f7b1f82e1a426488bec9293036b27b411cbb2874ed"
+    },
+    {
+      "path": "jiuwenswarm/agents/harness/common/tools/command_tools.py",
+      "owner": "jiuwenswarm",
+      "sha256": "23332d5a1d375061585a4a50be6ad2d0ff1e85417636c153e0be3a33753f0caa"
+    },
+    {
+      "path": "jiuwenswarm/agents/harness/team/team_runtime_inheritance.py",
+      "owner": "jiuwenswarm",
+      "sha256": "e250051bcbf20d49e0b3217ace69b3654d2452bb51c335a1378ab36238f1c5c9"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/__init__.py",
+      "owner": "voice",
+      "sha256": "df73bf1e82525e81dd57fcfec0076f9e4d14a75ab3664d04aa143279cb3ff185"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/agent_bridge.py",
+      "owner": "voice",
+      "sha256": "0bf63269beefc5ba22735a62df45b88dc65047829b8a502ffa10c0652b521592"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/agent_bridge_runtime.py",
+      "owner": "voice",
+      "sha256": "29eb638fba1d45a4eab1d7e603d826768a3c651b63f7525b8ae435e3ca81950f"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/agent_conversation_runtime.py",
+      "owner": "voice",
+      "sha256": "4fdd9ebc31c6cfbc55491e0330a2481564650fb726adc03cb430d1100573fd45"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/batch_speech.py",
+      "owner": "voice",
+      "sha256": "0dee2f9527f83cd627bd733308bda404d00c7c43d61afea820261b401ce1a31c"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/conversation_runtime.py",
+      "owner": "voice",
+      "sha256": "a2f898130f714d70775a1e1ea8fa8958b8e4b8cedf9bd2e83ec22112c382dfe4"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/conversation_runtime_loop.py",
+      "owner": "voice",
+      "sha256": "5d58fcea3beaa002b142f94d50cf4deff508e571468291a6cabf7a50ea1510c3"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/critical_token_safety.py",
+      "owner": "voice",
+      "sha256": "9eded3f037f5b3c80505ad7268017a1cf4377bf73c2e1f29260b09de4eeacec4"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/formal_history_writer.py",
+      "owner": "voice",
+      "sha256": "16bd73eb6dd30b131aefb21d31f1b4a8f2337cc05f5ba401278b3024f26b89d3"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/interaction_engine.py",
+      "owner": "voice",
+      "sha256": "acb2c0f15039fd6d77a865cecd812c86c1b3bb107022f28e3382aa6fcbfd0ec3"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/jiuwenswarm_agent_adapter.py",
+      "owner": "voice",
+      "sha256": "fbd9b18ba819c0d84c53fa80b08ab403b94a72f324915d010ab1b271d9628f66"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/latency_measurement.py",
+      "owner": "voice",
+      "sha256": "4f1df9464f122fc2f0c9cfeae9d6deb69fa72a27bc787e76965a6c17473164b4"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/native_business_contract.py",
+      "owner": "voice",
+      "sha256": "be510794451c723b0ff7dd23528fa85771f431c0496c8ef78ecf5444f980f38a"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/native_business_encoding.py",
+      "owner": "voice",
+      "sha256": "7cc6a6369d9679f31b62a04b9dc1a9203e6f1a9914bfb339e32276123e32047a"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/native_business_instructions.py",
+      "owner": "voice",
+      "sha256": "b798a5526aaf0c766ab525e3f30c4931595d4a0b00ecedc23200dfd64c7f980f"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/native_business_router.py",
+      "owner": "voice",
+      "sha256": "9bf1b23e2501ea2040bed463321394efe437c0ebaa529abb9e9e3d178694b005"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/native_business_tools.py",
+      "owner": "voice",
+      "sha256": "44b2c1ff24ce68b8390f0d4c4df08c73993f3a25ce7f8049d61728a7d86945ad"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/native_continuation_preparation.py",
+      "owner": "voice",
+      "sha256": "66fd45e79384e8bddb1c05acf5cd110f672e2c007d7e823d2bf79f490f6ac431"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/native_interaction_carrier.py",
+      "owner": "voice",
+      "sha256": "c891320423ca8e07d4cf63404e934e247da0e52adf85cf32a4a594dbf74d82df"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/native_interaction_config.py",
+      "owner": "voice",
+      "sha256": "1876c0dbb98b27e52de1b241eee4c776291fe0b393f91a6cd4dadf57492f6481"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/native_interaction_runtime.py",
+      "owner": "voice",
+      "sha256": "a9b293c9fecd99d8c738c72edaf3a0235d9ece464e50c0ca55bf9217043adc38"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/observability_correlation_contract.py",
+      "owner": "voice",
+      "sha256": "e1d845ef007555c346dd04d517cfe6e59782f0c75a4752419a32c2fceebccf19"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/observability_exporter.py",
+      "owner": "voice",
+      "sha256": "3e94db76ba85c5d4def3a4f802a69e6e9736b59b3b21559029b48dc7fdbe8c9f"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/observability_otel_codec.py",
+      "owner": "voice",
+      "sha256": "313d7d8ef82db138488304390fac8b8119e5e26eab944a34e51ab209abc1f532"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/openai_realtime_native_engine.py",
+      "owner": "voice",
+      "sha256": "b7082b1cea6f6b601adf26ecf54c80744d266c40cb4b86eb9ab0e8746d49b3be"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/openai_realtime_session.py",
+      "owner": "voice",
+      "sha256": "d41cbd0487e15355c42c28189272485e8549a155aa4b356ee18377e03880af7c"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/openai_streaming_speech.py",
+      "owner": "voice",
+      "sha256": "7689ca223966072fcca7b09297a224f2e204cd1cd8420ad5999c0beba1a8f24e"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/product_composition_contract.py",
+      "owner": "voice",
+      "sha256": "be347e5de8946ae8bec17553250f206a511cf1ce360224dd651e617e3fbbcb97"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/product_composition_registry.py",
+      "owner": "voice",
+      "sha256": "b715e4eee655fb0871b0fdf2b03131c7beeaf43fcb3a2058e9b45c9cc3c33883"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/product_composition_root.py",
+      "owner": "voice",
+      "sha256": "7d12d3a8c3894f048856e58769c5a933152c2a92ec8d5c302a09d7fe63ffd49a"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/product_diagnostic_projection.py",
+      "owner": "voice",
+      "sha256": "9a613acbf69525b95d43e75666dcd6c32819fd3d8d4cfcd69cf744afebc98780"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/product_observability_adapter.py",
+      "owner": "voice",
+      "sha256": "b591c267c7c99e3ceb7721a20581a8c7b1a5836f682e9bf5ad197e1af87c177a"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/product_observability_runtime.py",
+      "owner": "voice",
+      "sha256": "ce7e790e6269ab9b933ff4040c1829335f48cacef81d6f7dd1440c349056bc11"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/product_p2_interaction_adapter.py",
+      "owner": "voice",
+      "sha256": "6cb278d4deb52fe5c8fc04f3084a1484367f2ec4c1301b406e29fc66c3bd1837"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/semantic_continuity.py",
+      "owner": "voice",
+      "sha256": "2e223a748a302a322545d6fa38e1f72328ec1896dd5b4d90a0ced72ca3be947e"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/speculative_dialogue.py",
+      "owner": "voice",
+      "sha256": "9fa9f50fe48b63199d748df8d1692fd2687fded6623f5054c8ce59adc6ebc12d"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/speech_authority.py",
+      "owner": "voice",
+      "sha256": "415274402cc41a5bc8d04aa656cde5616c7ea0e2c0d845aba32d0ae3109b47b4"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/speech_http_diagnostics.py",
+      "owner": "voice",
+      "sha256": "380a5ab38318ab4f520cff6ff914b1e375bf91880be4ea785980b723b4d73cff"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/speech_ports.py",
+      "owner": "voice",
+      "sha256": "de438f267087fde260031fbc85538c8255ce1c6d433b56006e626866506a6388"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/speech_socket_diagnostics.py",
+      "owner": "voice",
+      "sha256": "ef96e0a42302d3bd9fc994409e0dae745996b5a3976ee0e495def21e3169538b"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/streaming_speech.py",
+      "owner": "voice",
+      "sha256": "311226cb903465817ad930284f009391a001607ff5aaf03baef63ae4d5f46525"
+    },
+    {
+      "path": "jiuwenswarm/channels/web/app_web.py",
+      "owner": "jiuwenswarm",
+      "sha256": "2864f4692ae23ccca5853b197ccb60e78c186f5c08272db8712d358af0d11183"
+    },
+    {
+      "path": "jiuwenswarm/channels/web/live_voice_deployment_observer.py",
+      "owner": "voice",
+      "sha256": "c2de4a1ec6ef8e57b08408f87593f890ee0da109e706fa05da4a771d794f6677"
+    },
+    {
+      "path": "jiuwenswarm/channels/web/live_voice_deployment_preflight.py",
+      "owner": "voice",
+      "sha256": "c100cab4b61d4e315aefe273d5f57cb062a79b44efd4fd2426e64816569989c0"
+    },
+    {
+      "path": "jiuwenswarm/common/context_processor_compat.py",
+      "owner": "jiuwenswarm",
+      "sha256": "25d4393d9f228301f977419fbe8d050aae1ea6ae5861451ddc808628b2815e44"
+    },
+    {
+      "path": "jiuwenswarm/common/e2a/wire_codec.py",
+      "owner": "jiuwenswarm",
+      "sha256": "186b3ebbd7e31783086080ddeab0cf170a3a435ecb82f0cbb7b5a8a34015eabe"
+    },
+    {
+      "path": "jiuwenswarm/common/live_voice_audio_diagnostics.py",
+      "owner": "voice",
+      "sha256": "479dc045b1cd51d533c43ddd90c72af5f4dbf7d2030c2f307b05ef6a4e52fddb"
+    },
+    {
+      "path": "jiuwenswarm/common/live_voice_capture_limits.py",
+      "owner": "voice",
+      "sha256": "a901a55eab87ad521521a20d25ce577964c9182231b89cd63726b0cc4c2196f5"
+    },
+    {
+      "path": "jiuwenswarm/common/live_voice_lock_diagnostics.py",
+      "owner": "voice",
+      "sha256": "3c6bd7b58a64bc8dc692477fffc4bfcba3c1b53859b1b271bdd97640492f7e73"
+    },
+    {
+      "path": "jiuwenswarm/common/live_voice_operation_budgets.py",
+      "owner": "voice",
+      "sha256": "9629d13c137086cea6fad38446f39510c9ad51060e0109a7219f1a6b42b02287"
+    },
+    {
+      "path": "jiuwenswarm/common/live_voice_profiling.py",
+      "owner": "voice",
+      "sha256": "eafbbb57725700641a44b7906fec9e64f3241859e491b5141f536e55b896abe1"
+    },
+    {
+      "path": "jiuwenswarm/common/openai_responses_client.py",
+      "owner": "jiuwenswarm",
+      "sha256": "ec71475609df9f19daa2271c56e8d30a1cb7815248872e1cb2d80f86ca0207cd"
+    },
+    {
+      "path": "jiuwenswarm/common/openai_responses_dependency.py",
+      "owner": "jiuwenswarm",
+      "sha256": "2020797fa67d933ffef1e9c01b02beb4ad4196f51c3cce0b4515dc529121282c"
+    },
+    {
+      "path": "jiuwenswarm/common/reasoning_injector.py",
+      "owner": "jiuwenswarm",
+      "sha256": "3fe6ffe8dc665ca9d9020736b57ce35b8b5583c47b27db61bbca7746d1cfbaf3"
+    },
+    {
+      "path": "jiuwenswarm/common/schema/live_voice_configuration_declaration.py",
+      "owner": "jiuwenswarm",
+      "sha256": "73338a33efafeda83ec61183ee1a8c858ccaed8836d4451081f51528407a43e5"
+    },
+    {
+      "path": "jiuwenswarm/common/schema/live_voice_contract.py",
+      "owner": "jiuwenswarm",
+      "sha256": "682719d6a19de006ae6a4dd059738d8b51e68c19fa23f5a3deb5ac472c31b8d0"
+    },
+    {
+      "path": "jiuwenswarm/common/schema/live_voice_contract_v2.py",
+      "owner": "jiuwenswarm",
+      "sha256": "39b45500ed0fa0ef097fef68a2c7370028c3e0364173d536ea14a133db19dbaf"
+    },
+    {
+      "path": "jiuwenswarm/common/schema/message.py",
+      "owner": "jiuwenswarm",
+      "sha256": "a5675ae63be980984c89784f263835430f4e6dd7b427fd96dc1dd96a828d0bc3"
+    },
+    {
+      "path": "jiuwenswarm/common/schema/native_business_observation.py",
+      "owner": "jiuwenswarm",
+      "sha256": "1de82d10b3d98c738ee72fde672b04b38f6b9c6d7b5b1487c70157647f426424"
+    },
+    {
+      "path": "jiuwenswarm/common/schema/native_interaction_contract.py",
+      "owner": "jiuwenswarm",
+      "sha256": "618b774670bba623093cec49b93aefbf7631f22f6d65d35e75078640922d7d80"
+    },
+    {
+      "path": "jiuwenswarm/common/schema/native_task_source.py",
+      "owner": "jiuwenswarm",
+      "sha256": "a66f617791fb4ec9aafb08a3d91703f0c18785c9505dbc73ab843e6108cd69bf"
+    },
+    {
+      "path": "jiuwenswarm/common/telemetry/__init__.py",
+      "owner": "jiuwenswarm",
+      "sha256": "df73bf1e82525e81dd57fcfec0076f9e4d14a75ab3664d04aa143279cb3ff185"
+    },
+    {
+      "path": "jiuwenswarm/common/telemetry/observability.py",
+      "owner": "jiuwenswarm",
+      "sha256": "b70a58ab32941c86c934a70c14ea6450397256d4bb73b50e1ab6adbfccd085b6"
+    },
+    {
+      "path": "jiuwenswarm/common/utils.py",
+      "owner": "jiuwenswarm",
+      "sha256": "a60832e6b1f44412044c5bf216451bbf04c6f364ac7cd2b8305dfe0a81ed37d2"
+    },
+    {
+      "path": "jiuwenswarm/debug_launcher.py",
+      "owner": "jiuwenswarm",
+      "sha256": "db78df94f54b34715eefcd1f9c7c15389dabdad99fee8923dc60ef4a0d3408b5"
+    },
+    {
+      "path": "jiuwenswarm/dotenv_early.py",
+      "owner": "jiuwenswarm",
+      "sha256": "27bb6c43f0a45f837ac17dd3e4085c83b0ff9b0662a7fcd72067c461b0a65215"
+    },
+    {
+      "path": "jiuwenswarm/gateway/app_gateway.py",
+      "owner": "jiuwenswarm",
+      "sha256": "c776f8bbac47f5944184b306d5191c3f00eab88a0a3d116429d00a5763ca8bc5"
+    },
+    {
+      "path": "jiuwenswarm/gateway/channel_manager/web/app_web_handlers.py",
+      "owner": "jiuwenswarm",
+      "sha256": "8650a390b9c173e5b58065101ad76de31cd25410c33e723190dcda87380d3b27"
+    },
+    {
+      "path": "jiuwenswarm/gateway/channel_manager/web/web_channel_app.py",
+      "owner": "jiuwenswarm",
+      "sha256": "2791bd759f49126b8dacdffe3fa035e6ff9bca65a06c71e8a05adb0f09aa46ca"
+    },
+    {
+      "path": "jiuwenswarm/gateway/channel_manager/web/web_connect.py",
+      "owner": "jiuwenswarm",
+      "sha256": "f054124a4209ed237f154bc82e428e998075533a8634630c60d5c13afd6486ee"
+    },
+    {
+      "path": "jiuwenswarm/gateway/channel_manager/web/ws_connection_adapter.py",
+      "owner": "jiuwenswarm",
+      "sha256": "d50256d476d32124471da31e5321a90f927878255ef4e29ebb0960daee2eeb77"
+    },
+    {
+      "path": "jiuwenswarm/gateway/live_voice/__init__.py",
+      "owner": "voice",
+      "sha256": "97ec582b4ffc4e9fadc142603c0025676166b816d813efd82fb33a3e272354d5"
+    },
+    {
+      "path": "jiuwenswarm/gateway/live_voice/browser_gateway_media_transport.py",
+      "owner": "voice",
+      "sha256": "3d2e4aedfe3a1999ecf7569eec30268c07dfbb6270a3a5a8c70c3016b9a8e208"
+    },
+    {
+      "path": "jiuwenswarm/gateway/live_voice/dedicated_media_registration.py",
+      "owner": "voice",
+      "sha256": "bfbe83d298fa61e497f511c52f114c70a4108fa124161b9b764a91ff08f78e61"
+    },
+    {
+      "path": "jiuwenswarm/gateway/live_voice/dedicated_media_route.py",
+      "owner": "voice",
+      "sha256": "f36d93f7b4d129cb01d6cddb879bbcad69323e6c2a333401bb26491c97fadbaa"
+    },
+    {
+      "path": "jiuwenswarm/gateway/live_voice/native_interaction_runtime_client.py",
+      "owner": "voice",
+      "sha256": "a2e2f89edbd05867b42ee3bade5efd1a87858119550c8ef4aa9b856cd00880b4"
+    },
+    {
+      "path": "jiuwenswarm/gateway/live_voice/native_response_downlink.py",
+      "owner": "voice",
+      "sha256": "efa69edceb5fa5a1a86ae4f4de8cce99b85bf8750b53267110b3e3df3015b2e4"
+    },
+    {
+      "path": "jiuwenswarm/gateway/live_voice/product_streaming_synthesis.py",
+      "owner": "voice",
+      "sha256": "b4698e9120099103311a39d875c93b5cab94fcac12c89e22c6ca4efe0176be1c"
+    },
+    {
+      "path": "jiuwenswarm/gateway/live_voice/speech_rpc.py",
+      "owner": "voice",
+      "sha256": "4a711523d46e319a267d9635667d567cffe7876ddd3e29648e65b763ff634990"
+    },
+    {
+      "path": "jiuwenswarm/gateway/live_voice/streaming_speech_route.py",
+      "owner": "voice",
+      "sha256": "c7b4002bd3019d76c08edaa9c6034ea860e38709820cab2ee9e34c209d3f1837"
+    },
+    {
+      "path": "jiuwenswarm/gateway/live_voice/streaming_synthesis_route.py",
+      "owner": "voice",
+      "sha256": "99dee806ea65f7ca93341865bde61606c6c8b92cc763bd88b7b4af151407376b"
+    },
+    {
+      "path": "jiuwenswarm/gateway/live_voice/task_notification_preparation.py",
+      "owner": "voice",
+      "sha256": "5526609a5c562016e0e116acffcfc6f61a3412c4d80080f5be6b31c762be09f0"
+    },
+    {
+      "path": "jiuwenswarm/gateway/message_handler/message_handler.py",
+      "owner": "jiuwenswarm",
+      "sha256": "334f3f51bb793134546f574e997a21b796c05bc749294275781bf9bad9336662"
+    },
+    {
+      "path": "jiuwenswarm/gateway/routing/agent_client.py",
+      "owner": "jiuwenswarm",
+      "sha256": "ab49722a2171b75f5142a73664ca22373ea8d50b25a111a0187f025cd5dd78e5"
+    },
+    {
+      "path": "jiuwenswarm/runtime/service.py",
+      "owner": "jiuwenswarm",
+      "sha256": "405be979af758fa8650c69b7e585efbfbeb932302ed85eb5ee0b1b44c72fc6f7"
+    },
+    {
+      "path": "jiuwenswarm/runtime/session/coordinator.py",
+      "owner": "jiuwenswarm",
+      "sha256": "c722f983a6c3d781f4630527b5c1b96f7b453a63d753815b5fc6909152a9bc2e"
+    },
+    {
+      "path": "jiuwenswarm/server/agent_ws_server.py",
+      "owner": "jiuwenswarm",
+      "sha256": "8a8e257cb71666c1d32941fc85328a19be04476363463a40e4c2335213a9cae1"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/agent_adapter/agent_adapters.py",
+      "owner": "jiuwenswarm",
+      "sha256": "538041e4e427ff7ca20a943409c5a4323f8801371c971998abc0f92a3c9fe330"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/agent_adapter/formal_live_voice.py",
+      "owner": "jiuwenswarm",
+      "sha256": "ccc3799bbeeed59efc5fdd7423b588e410b6e94512343086446c2b9256475974"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/agent_adapter/formal_model_diagnostics.py",
+      "owner": "jiuwenswarm",
+      "sha256": "2344fc4f0906e3c8727aad1f304fe750c362dcd3547490986b88425f9d503b02"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/agent_adapter/formal_tool_gate.py",
+      "owner": "jiuwenswarm",
+      "sha256": "dbe9bf42d9f779d7c538c08d34e2441ee0d2774de1850214cba69c9e2853b389"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/agent_adapter/interface.py",
+      "owner": "jiuwenswarm",
+      "sha256": "2e947a838b52489c22a042879ecee5228171622bd09f24931be138cc97d25b27"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/agent_adapter/interface_code.py",
+      "owner": "jiuwenswarm",
+      "sha256": "aafcc5bf49c800a116cffa2841cf89f8bcc25dbd050463b41fbb8a9d099c4d67"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/agent_adapter/interface_deep.py",
+      "owner": "jiuwenswarm",
+      "sha256": "92fdb0a41ce598caaa9d31b1249d6415f03a0dde71ac15a4cc4d3b93f6706e8b"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/agent_adapter/jiuwenswarm_round_harness.py",
+      "owner": "jiuwenswarm",
+      "sha256": "cebd0091075a9ebdb6116055c85e24474cc184ee866c29b8a1edfa1b86159983"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/agent_adapter/native_agent_model.py",
+      "owner": "jiuwenswarm",
+      "sha256": "7404d7f0e4a6b6ade3705af24a6dd3a58ddb1b6ae2a5b20d54dc5e8b1f5821d7"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/agent_adapter/p3_model_resolution.py",
+      "owner": "jiuwenswarm",
+      "sha256": "71069e8df7457d60333512b2aaf7ce52d4b547b1027cc94c81e8747c6809b95f"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/agent_adapter/runtime_formal.py",
+      "owner": "jiuwenswarm",
+      "sha256": "1bcddb6f6c9078faf9b8272835a17597e155528bc69b68d0e437327f655de2bd"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/agent_manager.py",
+      "owner": "jiuwenswarm",
+      "sha256": "9c36d864885ceb9de737cb04ad651b410789f191829f9c9f2505d80f95a9a6a6"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/authority/__init__.py",
+      "owner": "jiuwenswarm",
+      "sha256": "df73bf1e82525e81dd57fcfec0076f9e4d14a75ab3664d04aa143279cb3ff185"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/authority/product_authority.py",
+      "owner": "jiuwenswarm",
+      "sha256": "4c7e47921b7569cadee8b194cbcc896779046d23c201122e5c5b1dd5c6a3ef8c"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/formal_tasks/__init__.py",
+      "owner": "jiuwenswarm",
+      "sha256": "47b866d3e6ac555b49b06f094c7dfe65576c2c66d377bb58a1cfb8bedb01f13b"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/formal_tasks/p3_authenticated_composition.py",
+      "owner": "jiuwenswarm",
+      "sha256": "1e689f4174e170cca7c3e3fbf8b1b403201c49a575d6a821ca1a88a1d1042e0f"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/formal_tasks/p3_confirmation.py",
+      "owner": "jiuwenswarm",
+      "sha256": "37a1621dfbd23b8ed41a78b537cab1390865cd0d102363478daa5c2953e2e607"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/formal_tasks/p3_product_confirmation.py",
+      "owner": "jiuwenswarm",
+      "sha256": "e52688af354634e66b6840425ad14efaceedd624011f46a32332ef1512254450"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/formal_tasks/p3_production_intent_composition.py",
+      "owner": "jiuwenswarm",
+      "sha256": "f3c0eeb05b42202c17f24fe1deaac6cf0087b278a1086ce7321cd53b7062fb1f"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/formal_tasks/product_p3_text_adapter.py",
+      "owner": "jiuwenswarm",
+      "sha256": "11d5bc0c7f98f5ed7a9691262ab50f23cbedd2153377122b2375f2c388a44057"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/formal_tasks/production_task_classifier.py",
+      "owner": "jiuwenswarm",
+      "sha256": "a9ee9c2bf6a72b4d0aad9d514e6a35db013b12775c6aefe7172497b4a23fd46e"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/formal_tasks/production_task_intent.py",
+      "owner": "jiuwenswarm",
+      "sha256": "05fc8ee17c330bd6177d1fc4ae76c65a03773421a0d1f65807fa9c39449b31c4"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/formal_tasks/project_code_executor.py",
+      "owner": "jiuwenswarm",
+      "sha256": "512c7f7510a45ff97eb61a9c3c13d727a983035126dc77276d43ba46072a49ac"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/formal_tasks/task_control_presentation.py",
+      "owner": "jiuwenswarm",
+      "sha256": "ae201ce01267fdf7e8fd95ab8d02e81e24e8fc64630051590e892cc45b554604"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/formal_tasks/task_observability.py",
+      "owner": "jiuwenswarm",
+      "sha256": "f03a2eb243f5c64258efbe5b8b174aa56e8cb4ec7940d1d4abbab5abb2fa8c10"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/formal_tasks/task_result_context.py",
+      "owner": "jiuwenswarm",
+      "sha256": "48083a3726c642a2ad14c56d28210390576f848195f953c69cc43cf9c9d7a436"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/formal_tasks/task_semantics.py",
+      "owner": "jiuwenswarm",
+      "sha256": "1a83826667c81275574588cb1cc65c153c19ce1a710c1e415d404727bdf8a7e9"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/formal_tasks/unified_committed_input.py",
+      "owner": "jiuwenswarm",
+      "sha256": "6e0d747c7ee0ed9d5afcf8b1570c703bf8f35db9b2e02b7f68100e72a5b06334"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/formal_tasks/voice_task_bridge.py",
+      "owner": "jiuwenswarm",
+      "sha256": "5447bba2e17e3399cb7f8458f54eddf03422e537091d419cfe1704996c6c5113"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/formal_tasks/voice_task_policy.py",
+      "owner": "jiuwenswarm",
+      "sha256": "42100da51f3e90d954e4152f6ddceae999c7d06a0f1845170e822b67aa4e69b2"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/presentation/__init__.py",
+      "owner": "jiuwenswarm",
+      "sha256": "df73bf1e82525e81dd57fcfec0076f9e4d14a75ab3664d04aa143279cb3ff185"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/presentation/p2_response_generation_store.py",
+      "owner": "jiuwenswarm",
+      "sha256": "3eaf7266ab59b798252d05a3352a8cb0e56edc393514d6d68f1871a852199ac6"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/presentation/presentation_ledger.py",
+      "owner": "jiuwenswarm",
+      "sha256": "2c43cf7752bb82e3a877eb49e8ab450d3e31a1143ee6b5e4b1d6665c3a659648"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/presentation/progress_notification_arbiter.py",
+      "owner": "jiuwenswarm",
+      "sha256": "569106cbb3f002e463051069857d77c28baae2d8bc65dbac90ea2202135dc2f0"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/presentation/task_progress_return.py",
+      "owner": "jiuwenswarm",
+      "sha256": "fd2b53ff13b8551345a8ebf03a647d13da326a15a57f6605d6e10f2aad98c683"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/session/session_history.py",
+      "owner": "jiuwenswarm",
+      "sha256": "43ce46495ce1f39f47b58c0b669a78481f368bdadf321150d3e71575371b70d0"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/work/__init__.py",
+      "owner": "jiuwenswarm",
+      "sha256": "df73bf1e82525e81dd57fcfec0076f9e4d14a75ab3664d04aa143279cb3ff185"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/work/business_actions.py",
+      "owner": "jiuwenswarm",
+      "sha256": "bef3c3221e59e89bbd17cac36d72122d918a9c75e16a32ae923d35dd66f01432"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/work/native_business_context.py",
+      "owner": "jiuwenswarm",
+      "sha256": "d0beb3a758296b9375e577b8dfeaadda06679b52ad3a4b3b6ac4f1d373146569"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/work/native_foreground.py",
+      "owner": "jiuwenswarm",
+      "sha256": "5d6e91a1aac582db6803a03f888668b0f46a7e94ff738055870528792b4b323a"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/work/native_work_journal.py",
+      "owner": "jiuwenswarm",
+      "sha256": "4880da38d47f3a88085cad5f1a7eafdb9c5d8df785d29604b44790d5bddb8c25"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/work/service.py",
+      "owner": "jiuwenswarm",
+      "sha256": "e17da743b655b6bae7422493c7b0d5a2b916a3aa0f5c2a15ec56c1fa174f05e5"
+    },
+    {
+      "path": "jiuwenswarm/start_services.py",
+      "owner": "jiuwenswarm",
+      "sha256": "31778bb2c2a22927f525060e245d936ed2bab0d06378d81365ae6bcae820653b"
+    },
+    {
+      "path": "openjiuwen/core/application/tasks/__init__.py",
+      "owner": "agentcore",
+      "sha256": "d11b52d9e868ca8454c080c79018bce7d5a1ae31d0beb9d9591929c523301c73"
+    },
+    {
+      "path": "openjiuwen/core/application/tasks/contracts.py",
+      "owner": "agentcore",
+      "sha256": "512b809d9e01c83bd54a18cdd8810605198740d642e5f47091b40814ef6491e0"
+    },
+    {
+      "path": "openjiuwen/core/application/tasks/durability/__init__.py",
+      "owner": "agentcore",
+      "sha256": "693b410e86f0227eeb5eb75452b4c90dfa94f7658facf08068118c248aa97137"
+    },
+    {
+      "path": "openjiuwen/core/application/tasks/durability/durability_authority.py",
+      "owner": "agentcore",
+      "sha256": "5c5d82c6043cffe75f8cea9f8d965c818e12cf3e321ccbac135fa0c44da80eda"
+    },
+    {
+      "path": "openjiuwen/core/application/tasks/durability/durability_checkpoint.py",
+      "owner": "agentcore",
+      "sha256": "79506326fb2cf23f78837758146ad3059a73ad9b213d427e1ba5d85650fade8a"
+    },
+    {
+      "path": "openjiuwen/core/application/tasks/durability/durability_effects.py",
+      "owner": "agentcore",
+      "sha256": "2ff1eb456c60d076fc9e11bc1efc9210beaa028c789a027dcfbc3e1573fdcc35"
+    },
+    {
+      "path": "openjiuwen/core/application/tasks/durability/durability_identity.py",
+      "owner": "agentcore",
+      "sha256": "067e3b946f4b9ba1bc2b2e1801af142d3075d1d77f4c60570b0985322bad71dd"
+    },
+    {
+      "path": "openjiuwen/core/application/tasks/durability/durability_readers.py",
+      "owner": "agentcore",
+      "sha256": "8ec9c1b4e4e36c2e66e122960f9a8a1646c92542e9dba7e92a61a98f8b8b3c66"
+    },
+    {
+      "path": "openjiuwen/core/application/tasks/durability/durability_recovery_facts.py",
+      "owner": "agentcore",
+      "sha256": "e37dc7666f0f27c81f8ddf0fe7ee70c1c05235e87085edca2ac81b5daa24cc8d"
+    },
+    {
+      "path": "openjiuwen/core/application/tasks/execution_checkpoint.py",
+      "owner": "agentcore",
+      "sha256": "e0c2ef11bd69197396534b4f2973bff294731592adee1a64a67cda4d334c622d"
+    },
+    {
+      "path": "openjiuwen/core/application/tasks/execution_control.py",
+      "owner": "agentcore",
+      "sha256": "57e9b7f374ed3bbfaf6042f935073b6afc11a81ffcafba1b820d4fd740610f7f"
+    },
+    {
+      "path": "openjiuwen/core/application/tasks/execution_observation.py",
+      "owner": "agentcore",
+      "sha256": "f50b60845a1401b310a7f89412fb40170c4cd5b90d8e4a37ba6e6dd0e3decb77"
+    },
+    {
+      "path": "openjiuwen/core/application/tasks/executor_capabilities.py",
+      "owner": "agentcore",
+      "sha256": "04e2be3bebd75b8b4153f40c9516011a96fc50a1fed9119b648521e1f377e3fc"
+    },
+    {
+      "path": "openjiuwen/core/application/tasks/file_effect_plan.py",
+      "owner": "agentcore",
+      "sha256": "7c30d8e37d7b8938b35860af32412a7fb88b43268d94876ddff534a2f4367388"
+    },
+    {
+      "path": "openjiuwen/core/application/tasks/formal_task_models.py",
+      "owner": "agentcore",
+      "sha256": "5963cb06c944e9b84b67c96c40793efa22592dba7226cc4e5761efeb14f3bab5"
+    },
+    {
+      "path": "openjiuwen/core/application/tasks/observation.py",
+      "owner": "agentcore",
+      "sha256": "94f72b7e32ef689ac4674e90a17d0f82fb70225f43369b5b90ff18f6a74cfc70"
+    },
+    {
+      "path": "openjiuwen/core/application/tasks/persistent_task_core.py",
+      "owner": "agentcore",
+      "sha256": "64da35fcf5f4dd9b5ed5816812579d8e367415cbe034828b8d98728a4012faed"
+    },
+    {
+      "path": "openjiuwen/core/application/tasks/project_executor.py",
+      "owner": "agentcore",
+      "sha256": "f399559768613ef3c8060cae68fa29e6bebea62965fc3e144504615a35a728b0"
+    },
+    {
+      "path": "openjiuwen/core/application/tasks/source.py",
+      "owner": "agentcore",
+      "sha256": "e9f05c90566f838e9c48490d84b37d997d4b43c45bcd3788770f815ff697a8d4"
+    },
+    {
+      "path": "openjiuwen/core/application/tasks/task_adjustment_queue.py",
+      "owner": "agentcore",
+      "sha256": "ca4e875c1440f12974774967b32dee5c400bc02b3c4a3b7c4b52ce95ae478216"
+    },
+    {
+      "path": "openjiuwen/core/application/tasks/task_event_subscription.py",
+      "owner": "agentcore",
+      "sha256": "70b9d0f88ade5bbe261538e8dbb3f77d4afde513e9a74c8c27cfc72de9da186b"
+    },
+    {
+      "path": "openjiuwen/core/application/tasks/task_result_reader.py",
+      "owner": "agentcore",
+      "sha256": "dc8e20dc206b7b22d7a8e2d6fb76c1b279704f50cc79614f8d906267e2f21b9c"
+    },
+    {
+      "path": "openjiuwen/core/application/tasks/task_store.py",
+      "owner": "agentcore",
+      "sha256": "0118b0800a083fc2a88ddcfdc4c5aa67c0b02277598bb1860f3871a87c15d3c3"
+    },
+    {
+      "path": "openjiuwen/core/application/tasks/work_runtime.py",
+      "owner": "agentcore",
+      "sha256": "c0b12d56de32989b0696411d8fab4eca8163da9059f28171443e770249e58114"
+    },
+    {
+      "path": "openjiuwen/core/application/tasks/work_store.py",
+      "owner": "agentcore",
+      "sha256": "1f3b2bdfeb6b564d36a973881f9283c467a9a51a0f95c468fca93e37b0975a3a"
+    },
+    {
+      "path": "openjiuwen/core/common/background_tasks.py",
+      "owner": "agentcore",
+      "sha256": "e2908f821df3dd7eade1cdc1e21e3bce45ce99a5410ec1268ade87c73290ca66"
+    },
+    {
+      "path": "openjiuwen/core/common/logging/events.py",
+      "owner": "agentcore",
+      "sha256": "098b2bb54e56105c14ecad8056314bc622da07fa3f4291b02dd59f2a428b80c3"
+    },
+    {
+      "path": "openjiuwen/core/common/task_manager/manager.py",
+      "owner": "agentcore",
+      "sha256": "8dce76f575352a25b3376be7cd77db9c14d20f2cad60f899cd7a5efa85b4aec1"
+    },
+    {
+      "path": "openjiuwen/core/common/task_manager/task.py",
+      "owner": "agentcore",
+      "sha256": "b7e99a8ff702a3dae342c465b945dfbf7d5ce0a2906c8c986a7f58f239cf08ae"
+    },
+    {
+      "path": "openjiuwen/core/single_agent/agent_callback_manager.py",
+      "owner": "agentcore",
+      "sha256": "8c5d754c153b986b74ac0db0539528599b4046d3e7cc9b1f6903ee0e7773ea01"
+    }
+  ],
+  "followup_verification": {
+    "result": "5 passed in 7.12s",
+    "log_sha256": "13c827bd36f26e468bfb30bda2ab397ae17fed55466dd6ad846ad3b978d7ef8b",
+    "log_path": "C:\\Users\\admin\\AppData\\Local\\Temp\\livevoice-retained-boundary-checks.log",
+    "registry_change": "Comment only: executable AST and physical line count unchanged. Scan file hashes identify source before the comment correction.",
+    "tests": [
+      "test_native_agent_model.py::test_new_activation_selection_is_closed_bounded_and_secret_free",
+      "test_native_agent_model.py::test_selection_unknown_ambiguous_and_catalog_drift_do_not_construct_models",
+      "test_host_work_service.py::test_recreated_session_uses_new_executor_and_old_facade_stays_fenced",
+      "test_host_work_service.py::test_executor_generation_change_during_facade_lookup_has_zero_producer_effects",
+      "test_host_work_service.py::test_host_close_waits_for_blocked_start_and_retains_late_failed_cleanup"
+    ],
+    "boundary": "Real Host resolver/service/coordinator; controlled catalog, Agent and cleanup dependencies. No physical Provider/audio proof."
+  },
+  "oracle_migration": {
+    "retired_unknown_failure": "Replaced old uncalled resolve_production_semantics injection with current _resolve_semantic_input and journal.bind_semantic faults, including exact replay and zero business/presentation effects.",
+    "retired_dirty_worktree": "Superseded by accepted D-120; current production has no TASK_CONTEXT_WORKTREE_DIRTY emitter. Real mixed-snapshot/read/write/reopen test passes.",
+    "checks": {
+      "new_privacy": "2 passed in 8.87s",
+      "mutation": "1 expected failed in 4.33s; public error message leak caught. Initial attempt did not reach tests due to assertion-rewrite warning; corrected session-start hook used. No source mutation.",
+      "regressions": "2 passed in 20.23s",
+      "collection": "341 collected in 16.20s across affected files; not 341 passing",
+      "lint": "Ruff on both changed test files passed"
+    },
+    "retained_historical_names": [
+      "test_gateway_receipt_reaches_unified_without_lexical_confirmation",
+      "test_unified_adjust_l0_binding_uses_only_canonical_returned_attempt",
+      "test_unified_cancel_l0_binding_uses_only_successful_returned_attempt",
+      "test_unified_cancel_recovery_keeps_its_durable_original_task_target",
+      "test_unified_chinese_implicit_update_and_prefixed_status_stay_on_task_route",
+      "test_unified_default_cancel_keeps_confirmation_boundary_and_zero_mutation",
+      "test_unified_demo_cancel_is_direct_but_only_reports_stop_requested",
+      "test_unified_demo_policy_bypass_is_backend_owned_and_one_current_task",
+      "test_unified_frozen_release_voice_create_never_falls_through_to_agent",
+      "test_unified_frozen_status_no_task_and_non_status_text_have_exact_routes",
+      "test_unified_presentation_crash_rebuilds_runtime_with_same_effect_identity",
+      "test_unified_presentation_crash_window_recovers_without_duplicate_effect",
+      "test_unified_query_reads_authoritative_result_before_agent_and_never_cancels",
+      "test_unified_query_reserves_task_result_after_latest_three_complete_pairs",
+      "test_unified_recovery_never_drifts_a_null_task_target_to_a_new_current",
+      "test_unified_status_l0_binding_uses_only_successful_returned_attempt",
+      "test_unified_status_presents_authoritative_store_progress_shape",
+      "test_unified_task_commit_milestone_keeps_journal_admission_clock",
+      "test_unified_update_binds_current_nonterminal_and_only_applied_event_claims_success",
+      "test_unified_update_keeps_terminal_task_immutable_and_requests_revision",
+      "test_unified_voice_create_returns_task_id_and_retains_live_voice_origin"
+    ],
+    "retained_historical_names_count": 21,
+    "limits": "Retained names are not asserted to be currently failing. Historical 27-case failure-set artifact remains unchanged. Both presentation crash tests and uncommitted replacement failures retained.",
+    "logs_sha256": {
+      "livevoice-current-failure-privacy.log": "03c3696f8e61ba14c1697f282ae6c3eb649e92650e5c6aa3b670d3324deaa119",
+      "livevoice-privacy-mutation.log": "8dff68b203177d80b6cb0dc763572a39c67c742c78ae389a10c05f0e8f0ce321",
+      "livevoice-privacy-mutation-final.log": "f8b19731064b167408509c3e0294533e8c88f43096adeb6d07622473bf58316a",
+      "livevoice-retired-oracle-regressions.log": "8cc10745a67d9de00d9e0777d25cef7cb0b4a534cced6f227ccd61172214cd98",
+      "livevoice-oracle-discovery.log": "b39d4ec32fd7fafcea736bd975566754d54e9e1b0d75d92caa8db5dc1fd7b1e8"
+    }
+  },
+  "recount": {
+    "stage": "retained-boundary-oracles-20260914",
+    "totals": {
+      "voice": {
+        "current_lines": 112101,
+        "baseline_lines": 0,
+        "added_lines": 112101,
+        "removed_lines": 0,
+        "net_lines": 112101,
+        "new_file_lines": 112101,
+        "current_files": 103
+      },
+      "jiuwenswarm": {
+        "current_lines": 150563,
+        "baseline_lines": 102515,
+        "added_lines": 48933,
+        "removed_lines": 885,
+        "net_lines": 48048,
+        "new_file_lines": 39847,
+        "current_files": 119
+      },
+      "agentcore": {
+        "current_lines": 36613,
+        "baseline_lines": 2306,
+        "added_lines": 34323,
+        "removed_lines": 16,
+        "net_lines": 34307,
+        "new_file_lines": 34177,
+        "current_files": 30
+      }
+    },
+    "production_delta": 0,
+    "current_registry_sha256": "8a8541d512f8c8751806d55555301c49ae980ed4b957dacf06dda871461be52a",
+    "note": "Same physical-line method and baselines; removal of tests/docs excluded. Only production edit is a same-line-count comment correction."
+  }
+}

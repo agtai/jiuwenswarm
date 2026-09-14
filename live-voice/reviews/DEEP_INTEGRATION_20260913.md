@@ -1823,3 +1823,77 @@ Native and external implementations. No external source was rechecked. These are
 documentation corrections; production accounting, package versions and the last
 runtime verification remain unchanged. Pending presentation tests are excluded
 from documentation commits and remain visible WIP, not silently removed/xfail-ed.
+
+
+#### Retained Host/Voice boundary review
+
+An exact-body candidate scan covered170 changed-production Python files and4167
+functions of at least10 physical lines. Its8 candidate groups include abstract
+methods, record projection, nested duplicates and native helpers unchanged from
+the official Host baseline. The larger interface retry helpers, model resolvers
+and adapter resolvers are pre-existing native code, not LiveVoice duplicates to
+remove for this task. No deletion credit is assigned; this heuristic does not
+prove absence of structurally different or frontend duplication.
+[Scan and focused verification](../evidence/DEEP_RETAINED_BOUNDARY_SCAN_20260914.json)
+retains source hashes, limits and exact test names.
+
+Independent read-only review traced config/session/Agent allocation/observability.
+Accepted its comment finding: the separate P2 facade cache does not bypass the
+Host public-session coordinator. Corrected those three comment lines; executable
+AST and physical line count are identical. It grants no new concurrency.
+
+Exporter candidate disposition: retain current loop-bound asyncio handles.
+Registry._activate_observability -> adapter -> exporter buffer owns FIFO,
+backpressure, delivery handshake, export deadline and incomplete-close retention.
+_attempt_export must still reconcile cancel/shield with delivery; _worker_done
+accounts for buffer loss. TaskManager can run these coroutines but does not supply
+that delivery algorithm. Merely substituting native handles would require owner,
+callback-failure and wait adapters while retaining the business management. The
+user explicitly excludes migrations just to demonstrate reuse; no replacement
+or full native-exporter-management claim is made. This is an application delivery
+adapter, not another Task/Work durable execution authority.
+
+Config/session evidence mapping is now concrete: NativeAgentModelSelection calls
+ServerModelCatalogResolver without constructing a model, freezes exact identity /
+config version and rejects drift; that is not equivalent to reading a default.
+HostWorkService resolves AgentManager instances, checks current Host generation
+before and after delayed allocation, retains unsettled producers and only unpins
+after cleanup. Five existing tests were selected to close this mapping gap and
+passed in7.12s: valid secret-free selection, unknown/ambiguous/drift rejection with
+zero model construction, old-generation fencing, generation change during lookup
+with zero producer/pin effects, and close racing delayed startup with failed cleanup
+retained until retry. Lower catalog/Agent/cleanup dependencies are controlled.
+These checks do not close the separate P2 presentation recovery gap or physical
+Voice acceptance. Production counts remain112101/48048/34307, total194456.
+
+
+#### Historical oracle migration, current input boundary (Tier 1)
+
+Owned change: two old Registry oracles and the current semantic Registry tests;
+no routing, authorization, storage or timing policy change. Unexpected exceptions
+must use the safe public error, seal that failure for exact replay and cause zero
+Agent/Task/Executor/presentation effects. The old test injected an uncalled
+resolve_production_semantics method. Its replacement injects both current semantic
+resolution and journal freeze failures against real Registry/SQLite, checks the
+fault was actually reached once and checks replay never reruns it. Both cases
+pass (8.87s). A test-process-only mutation leaking synthetic private text through
+_error_result fails at the safe-message assertion (expected1 failure,4.33s).
+The initial mutation harness failed before collection because its premature import
+triggered an assertion-rewrite warning; the session-start hook corrected that
+harness. Neither attempt edited production source.
+
+Removed the obsolete blanket dirty-worktree rejection oracle: accepted D-120
+requires preserving authorized user edits in isolated snapshots. Current production
+has no TASK_CONTEXT_WORKTREE_DIRTY emitter; retaining that fake error as the
+required creation behavior would reverse the accepted contract. Its actual
+replacement is test_mixed_snapshot_new_file_then_save_as_survives_restart, using
+real Git, SQLite and FsOperation with controlled generated instructions. That test
+and the existing journal-seal privacy regression pass (2 tests,20.23s).
+
+Only after these checks, removed those two old tests. Ruff and diff checks pass;
+affected modules collect341 cases (16.20s), which is discovery evidence only.
+The historical27-failure artifact is immutable. Of its25 distinct function names,
+21 remain; this is not a statement that21 currently fail. In particular both
+presentation-crash oracles remain open, and their expanded failing replacement
+stays uncommitted pending the user decision. No tests are xfailed or skipped.
+Test deletion is not production code reduction or full fusion evidence.

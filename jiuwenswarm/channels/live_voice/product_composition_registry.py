@@ -4117,9 +4117,9 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
                 # This route owns no Chat history and always runs an
                 # Agent-profile turn, so the session work mode is not its input.
                 agent = await self._agent_manager.get_agent(
-                    # Formal P2 owns an independent Agent facade.  Reusing the
-                    # ordinary Web channel serializes a voice turn behind a
-                    # long-running text/Tool turn in the Agent facade cache.
+                    # Isolate the Agent-profile facade cache from Web modes.
+                    # Execution still uses the Host public-session coordinator;
+                    # this cache key does not grant independent concurrency.
                     _FORMAL_LIVE_VOICE_AGENT_CHANNEL,
                     _FORMAL_LIVE_VOICE_AGENT_MODE,
                     project_dir,

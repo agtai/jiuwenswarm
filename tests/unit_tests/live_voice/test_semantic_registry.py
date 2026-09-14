@@ -2802,3 +2802,46 @@ async def test_creation_receipt_is_historical_and_current_state_is_read_once(sem
     assert len(reads) == 1 and s.manager.agent.calls == 1
     assert core.store.counts()["tasks"] == 1
     assert s.harness.executor.cancels == s.harness.executor.adjustments == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["semantic_resolution", "semantic_freeze"])
+async def test_unified_unexpected_failure_is_private_and_replayed_without_effects(
+    semantic_runtime, monkeypatch, failure_stage,
+):
+    """Exercise the current owner, not the retired lexical composition hook."""
+    s = semantic_runtime
+    assert (await s.registry.handle_p2_activate(params=p2_params(),
+        request_id="safe-failure-activate", session_id="session-1", channel_id="web")).ok
+    core = s.harness.composition._core
+    route = next(iter(s.registry._p2_routes.values()))
+    cr = route.activation_lease._runtime._cr
+    before = core.store.counts()
+    presentation = cr.snapshot().presentation.records
+    hits = []
+
+    def fail(**kwargs):
+        hits.append(failure_stage)
+        raise RuntimeError("private-project/secret.txt: credential-value")
+
+    async def fail_resolution(**kwargs):
+        fail(**kwargs)
+
+    if failure_stage == "semantic_resolution":
+        monkeypatch.setattr(s.registry, "_resolve_semantic_input", fail_resolution)
+    else:
+        monkeypatch.setattr(s.registry._unified_journal, "bind_semantic", fail)
+    params = typed_final("safe-failure", "Please explain the inventory.")
+    for request_id in ("safe-failure", "safe-failure-replay"):
+        result = await s.registry.handle_unified_submit(params=params,
+            request_id=request_id, session_id="session-1", channel_id="web")
+        assert not result.ok, result.payload
+        assert result.payload["error"]["reason"] == "UNIFIED_INPUT_FAILED"
+        assert result.payload["error"]["message"] == "unified committed input failed closed"
+        serialized = json.dumps(result.payload)
+        assert "private-project" not in serialized and "credential-value" not in serialized
+        assert hits == [failure_stage]
+        assert core.store.counts() == before
+        assert s.manager.agent.calls == 0
+        assert s.harness.executor.dispatches == s.harness.executor.cancels == []
+        assert cr.snapshot().presentation.records == presentation
