@@ -87,7 +87,8 @@ support has been discussed, not implemented.
 ### Continuation boundary
 
 
-**Current deep-integration packet (2026-09-13/14): PARTIAL.** The user explicitly
+**Current deep-integration packet (2026-09-13/14): code-level audit and authorized
+refactor delivered after D-128. Overall product readiness remains PARTIAL.** The user explicitly
 requires code-level native-capability audit, not directory/import ownership
 claims. [Audit, changes and evidence](reviews/DEEP_INTEGRATION_20260913.md) owns
 this packet, beginning at Host `948cfc7920fd35fdf0f4b9a476cd567bb4af9108` and SDK
@@ -112,7 +113,9 @@ Host/SQLite/project and reconstruction checks cover these boundaries. Formal
 Task attempts now execute directly in native TaskManager under the Host Runner
 root; journal/effect/cleanup facts retain their distinct domain authority. Real
 Git/D2 checks distinguish caller cancellation, native interruption and apply
-settlement. The complete deep-integration goal remains open.
+settlement. The current audit records the final requirement-by-requirement delivery
+judgement and retained semantic boundaries; it does not claim one mechanical
+Controller/Team/Task/Work state machine or a newly accepted product candidate.
 Current unified-input joint tests cover real SQLite Task creation/confirmation,
 replay/conflict, project rejection, Voice close followed by completion, and
 running cancellation while the original dialogue completes normally. These use

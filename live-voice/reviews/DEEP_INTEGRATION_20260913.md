@@ -50,13 +50,39 @@ Persisted schema and admission policy are unchanged. Required regression covers
 adjustment, cancellation and project durability. Full external Provider/device
 acceptance is outside this code seam; no new audio performance claim is made.
 
-## Status
+## Delivery judgement after D-128
 
-PARTIAL / IN PROGRESS. Bounded native callback integration and duplicate removal
-are implemented; Task/Work management is not mechanically unified with
-Controller/Team. Work's Voice runtime wrapper was removed and verified in the
-09-14 continuation below. This record is not full product-candidate closure. User session `web_1a09c8505b1_6bce26af6cd4` did not verify running cancel;
-weather Work produced city clarification, not a successful weather lookup.
+The code-level audit and authorized integration/refactor packet is delivered.
+This is not a claim that all application Task, Work, Controller and Team states
+are one framework, or that LiveVoice is a newly accepted full product candidate.
+The current decision tables below identify actual reuse and the semantic reasons
+for retained management. D-128 removes the unsupported ephemeral-answer recovery
+requirement; it does not remove business recovery or truthful history checks.
+
+| Original requirement | Delivery evidence / actual result | Boundary retained |
+|---|---|---|
+| Audit before implementation across Voice, Host and SDK | Initial/current code decision tables, native Controller/Team/Runner/TaskManager/DB comparisons and retained-boundary review in this audit | Directory/import movement is not credited as integration; AST matches are candidate evidence only |
+| Task first, then Work; native execution ownership | Actual common TaskManager runs formal attempts and Work under Host Runner; [formal native checks](../evidence/DEEP_FORMAL_NATIVE_CHECKS_20260914.json), [Work native checks](../evidence/DEEP_NATIVE_TASK_MANAGER_CHECKS_20260914.json) | Domain command/outbox/effect transactions, revision/CAS, UNKNOWN and physical cleanup remain authoritative; no duplicate Controller/Team rows |
+| Host and Voice integration beyond Task/Work | Host sessions/configuration/AgentManager/Gateway/history, Host ChatPanel task-reader lifecycle, Harness-owned round identity; current Host/Voice table and [round identity checks](../evidence/DEEP_ROUND_IDENTITY_CHECKS_20260914.json) | Voice source/generation/playback proof and media transport remain necessary adapters; AgentServer is the execution/application container |
+| Preserve safe recovery, real results, scope and cancellation | Recorded real SQLite/Git/file/Host checks, native caller-cancellation separation, input/frozen-target/receipt tests and [D-128 recovery correction](../evidence/DEEP_RECOVERY_SCOPE_CORRECTION_20260914.json) | Controlled model/lower-Agent inputs are identified; no new OS-restart or physical audio acceptance is claimed; an ephemeral answer need not be replayed |
+| Public contracts, duplicate implementation and storage/events | Current tables and scoped deletion/validation/subscription sections identify removed old models, executor, ledgers, fallback and duplicate projections | Persisted compatibility strings and transaction-specific validation retain their documented consumers/semantics; no reverse SDK dependency |
+| Same-basis counts and architecture/comparison | [Accounting](../architecture/UNIFIED_CODE_ACCOUNTING.md), module guide and feature comparison retain M4+M5/M7+M9; fresh count remains194456 vs195680 initial | Net reduction1224 includes necessary additions; test deletion is excluded; existing native file baseline is not counted as new |
+| Local reviewable delivery, preserve unrelated changes | Local paired runtime implementation Host944a506614ae / SDK05faf6123365, subsequent evidence/test/document commits, current source alignment below | History was not squashed or rewritten; multiple existing commits remain. No remote update, deployment or private-data migration |
+
+[Final source correspondence](../evidence/DEEP_FINAL_SOURCE_ALIGNMENT_20260914.json)
+checks12 key production files against their applicable recorded verification.
+Earlier Work hashes were deliberately replaced by the later native-owner evidence;
+no earlier artifact was edited to pretend it covered later code. Host Work service
+has not changed since its Runner ownership integration and is included in the
+subsequent installed-pair checks. Recent D-128/test/document changes do not change
+runtime bytecode or invalidate those unchanged execution boundaries.
+
+No required persistence scope decision remains. Excluded/unproved product evidence
+remains explicit: no newly deployed full browser/Provider/device journey, no new
+physical-latency claim, and no fresh external implementation review. The user's
+recorded session proves pre-dispatch cancellation, not running cancellation, and
+weather Work returned city clarification. Later controlled running-cancel evidence
+is separate. The15-second prepared-response timeout remains deferred and unchanged.
 
 ## Rejected checkpoint replacement (no production change retained)
 
@@ -125,7 +151,7 @@ and numerical stages in the following log retain their original evidence scope.
 |---|---|---|
 | Welcome-page session | App.handlePrepareLiveVoiceSession → createLiveVoiceConversation → createConversationSession (`session.create`) → registerCreatedConversation | Shared Host product session creation, public session IDs and Zustand stores already used. Consolidated selection/plan/swarmflow configuration copying with normal App creation in newConversationLifecycle.copyNewConversationSelections. Caller-specific draft/goal transfer and source clearing unchanged. |
 | Session/project authority | ServerSessionProjectAuthorityResolver calls get_session_metadata(cache_bust=True, enable_writeback=False), get_project_by_id(cache_bust=True), reads real Git revision | Host metadata/project storage is authoritative. Voice generation, committed-input/source proof and capability expiry are additional facts; public session labels alone must never authorize side effects. No new account/auth policy. |
-| Agent/configuration | AgentManager.get_agent/pin/unpin and production model resolver; RuntimeFormalAgentFacade validates retained Agent and public session generation | Reuse configured Host facade. Voice-specific provider/audio settings remain distinct from Agent model config. Narrow .4 dependency verifies paired wheel imports; no private config rewritten. |
+| Agent/configuration | AgentManager.get_agent/pin/unpin and production model resolver; RuntimeFormalAgentFacade validates retained Agent and public session generation | Reuse configured Host facade. Voice-specific provider/audio settings remain distinct from Agent model config. Current .9 paired-wheel evidence verifies native execution imports and behavior; no private config rewritten. |
 | AgentServer / connection | app_agentserver → AgentWebSocketServer creates AgentRuntime and composition registries; Gateway AgentClient/message handler routes authenticated RPC and push | AgentServer is the resident execution/container and connection composition owner, not a new algorithmic module or duplicate Agent. Voice media WebSocket/provider transport is a necessary media protocol; it does not replace Host session/config APIs. Local page/API/media origin remains 127.0.0.1 and same-origin. |
 | History / presentation | SessionFormalHistoryWriter → append_formal_history_record_idempotent in existing Host session_history; PresentationLedger/Native playback acknowledgements | Shared history storage, retained Voice proof that text/audio was actually presented. Agent completion, delivered notification and heard playback must stay separate. Formal execution disables automatic chat history; only verified projection writes user-visible history. |
 | Old execution bridge | AgentBridgePort created its own ThreadPoolExecutor; all located callers were test fakes | Removed production executor/request/handler/violation implementation; historical conformance fixture retained under tests/support. Production keeps only AgentEvent projection consumed by AgentBridgeRuntime and JiuWenSwarmAgentAdapter. This is production removal, not deletion of all test code. |
@@ -135,8 +161,9 @@ and numerical stages in the following log retain their original evidence scope.
 No new topic classifier, Task-card policy, authorization rule, recovery replay,
 provider selection or audio deadline/buffering policy is introduced. The broad
 Voice coordinator/Bridge and generic Task/Work management code still exist. Their
-remaining line count is not credited as deleted or natively unified. Unifying
-physical execution/management beyond the inspected seams remains PARTIAL.
+remaining line count is not credited as deleted. Native execution reuse is stated
+only for the verified seams above. Further unification of unrelated consumers is
+not a requirement of this packet; no unscoped physical product claim is made.
 
 ## Review and verification log
 
@@ -2050,3 +2077,10 @@ correction does not claim all old answers are recoverable or that current servic
 playback was stuck. No current service restart, deployment or remote update was
 performed. Production totals freshly rechecked remain194456,1224 below the original
 audit snapshot; removed test lines receive no production reduction credit.
+
+Final independent delivery review verified all12 source-alignment hashes against
+current files and the retained D-128 history/admission-cleanup assertions. It found
+no additional required production gap. Two residual current-table wording issues
+(old .4 package label and an unscoped PARTIAL sentence) were corrected. The reviewer
+performed read-only verification and did not rerun tests or claim physical product
+acceptance. This final correction changes documentation only.

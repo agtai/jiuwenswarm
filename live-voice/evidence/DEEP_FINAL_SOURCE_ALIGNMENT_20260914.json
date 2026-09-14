@@ -1,0 +1,92 @@
+{
+  "host": "a1a8b6368581a91f06e835665f29074512d1b3b6",
+  "sdk": "7c81d886d15b87a5ba9b2d899cbd5259fb7d5e5e",
+  "source_alignment": [
+    {
+      "file": "host/jiuwenswarm/runtime/service.py",
+      "evidence": "DEEP_FORMAL_NATIVE_CHECKS_20260914.json",
+      "sha256": "405be979af758fa8650c69b7e585efbfbeb932302ed85eb5ee0b1b44c72fc6f7",
+      "match": true
+    },
+    {
+      "file": "host/jiuwenswarm/server/agent_ws_server.py",
+      "evidence": "DEEP_FORMAL_NATIVE_CHECKS_20260914.json",
+      "sha256": "8a8e257cb71666c1d32941fc85328a19be04476363463a40e4c2335213a9cae1",
+      "match": true
+    },
+    {
+      "file": "host/jiuwenswarm/server/runtime/formal_tasks/p3_authenticated_composition.py",
+      "evidence": "DEEP_FORMAL_NATIVE_CHECKS_20260914.json",
+      "sha256": "1e689f4174e170cca7c3e3fbf8b1b403201c49a575d6a821ca1a88a1d1042e0f",
+      "match": true
+    },
+    {
+      "file": "sdk/openjiuwen/core/application/tasks/project_executor.py",
+      "evidence": "DEEP_FORMAL_NATIVE_CHECKS_20260914.json",
+      "sha256": "f399559768613ef3c8060cae68fa29e6bebea62965fc3e144504615a35a728b0",
+      "match": true
+    },
+    {
+      "file": "sdk/openjiuwen/core/common/background_tasks.py",
+      "evidence": "DEEP_FORMAL_NATIVE_CHECKS_20260914.json",
+      "sha256": "e2908f821df3dd7eade1cdc1e21e3bce45ce99a5410ec1268ade87c73290ca66",
+      "match": true
+    },
+    {
+      "file": "sdk/openjiuwen/core/common/task_manager/manager.py",
+      "evidence": "DEEP_FORMAL_NATIVE_CHECKS_20260914.json",
+      "sha256": "8dce76f575352a25b3376be7cd77db9c14d20f2cad60f899cd7a5efa85b4aec1",
+      "match": true
+    },
+    {
+      "file": "sdk/openjiuwen/core/common/task_manager/task.py",
+      "evidence": "DEEP_FORMAL_NATIVE_CHECKS_20260914.json",
+      "sha256": "b7e99a8ff702a3dae342c465b945dfbf7d5ce0a2906c8c986a7f58f239cf08ae",
+      "match": true
+    },
+    {
+      "file": "host/jiuwenswarm/channels/live_voice/agent_bridge_runtime.py",
+      "evidence": "DEEP_ROUND_IDENTITY_CHECKS_20260914.json",
+      "sha256": "29eb638fba1d45a4eab1d7e603d826768a3c651b63f7525b8ae435e3ca81950f",
+      "match": true
+    },
+    {
+      "file": "host/jiuwenswarm/channels/live_voice/agent_conversation_runtime.py",
+      "evidence": "DEEP_ROUND_IDENTITY_CHECKS_20260914.json",
+      "sha256": "4fdd9ebc31c6cfbc55491e0330a2481564650fb726adc03cb430d1100573fd45",
+      "match": true
+    },
+    {
+      "file": "host/jiuwenswarm/server/runtime/agent_adapter/jiuwenswarm_round_harness.py",
+      "evidence": "DEEP_ROUND_IDENTITY_CHECKS_20260914.json",
+      "sha256": "cebd0091075a9ebdb6116055c85e24474cc184ee866c29b8a1edfa1b86159983",
+      "match": true
+    },
+    {
+      "file": "sdk/openjiuwen/core/application/tasks/work_runtime.py",
+      "evidence": "DEEP_NATIVE_TASK_MANAGER_CHECKS_20260914.json",
+      "sha256": "c0b12d56de32989b0696411d8fab4eca8163da9059f28171443e770249e58114",
+      "match": true
+    },
+    {
+      "file": "sdk/openjiuwen/core/common/logging/events.py",
+      "evidence": "DEEP_NATIVE_TASK_MANAGER_CHECKS_20260914.json",
+      "sha256": "098b2bb54e56105c14ecad8056314bc622da07fa3f4291b02dd59f2a428b80c3",
+      "match": true
+    }
+  ],
+  "limits": [
+    "Hash correspondence reuses recorded boundary verification; it is not a new runtime test.",
+    "Earlier Work-owner hashes are superseded by native TaskManager integration and its paired checks.",
+    "No new deployment, physical audio, Provider, OS restart or external implementation verification."
+  ],
+  "host_work_service": {
+    "last_change": "cd6c11a7",
+    "sha256": "e17da743b655b6bae7422493c7b0d5a2b916a3aa0f5c2a15ec56c1fa174f05e5",
+    "evidence": [
+      "DEEP_NATIVE_TASK_MANAGER_PAIR_20260914.json",
+      "DEEP_FORMAL_NATIVE_CHECKS_20260914.json"
+    ],
+    "note": "The earlier DEEP_WORK_OWNER_CHECKS hash predates Host Runner ownership. Current service is unchanged since cd6c11a7; later .8/.9 paired installation checks include the Host service."
+  }
+}
