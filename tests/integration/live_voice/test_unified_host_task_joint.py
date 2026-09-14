@@ -158,7 +158,7 @@ class JointCheckpointAgent(_DirectAgentFacade):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("finish", ["complete", "cancel", "barge", "adjust"])
+@pytest.mark.parametrize("finish", ["complete", "cancel", "barge", "adjust", "voice"])
 async def test_unified_task_replay_scope_and_voice_close_share_host_lifetime(tmp_path, monkeypatch, finish):
     monkeypatch.setattr("openjiuwen.core.application.tasks.task_store.utc_now", lambda: NOW)
     monkeypatch.setattr("jiuwenswarm.server.runtime.session.session_history.get_agent_sessions_dir",
@@ -202,21 +202,45 @@ async def test_unified_task_replay_scope_and_voice_close_share_host_lifetime(tmp
     async def initialized():
         pass
 
+    pushed = []
+
     async def push(message):
+        pushed.append(message)
         return True
 
     runtime = AgentRuntime(agent_manager=manager, initializer=initialized)
     registry = AgentServerProductCompositionRegistry(
-        settings=ProductCompositionSettings(p2_enabled=True, p3_text_enabled=True, p3_mutation_enabled=True),
+        settings=ProductCompositionSettings(p2_enabled=True, p3_text_enabled=True, p3_mutation_enabled=True,
+            critical_input_enabled=finish == "voice"),
         p3_composition=composition, agent_manager=manager, runtime=runtime, push_text_event=push,
         p3_confirmation_owner=confirmations, p3_confirmation_forwarder=forwarder,
         commit_ledger=ledger, unified_journal=SqliteUnifiedCommittedInputJournal(database),
     )
 
+    from jiuwenswarm.channels.live_voice.batch_speech import FormalBatchSpeechService, UnavailableBatchSpeechProvider
+    from jiuwenswarm.common.schema.message import Message, ReqMethod
+    from jiuwenswarm.gateway.app_gateway import _inject_live_voice_gateway_voice_claim
+    speech = FormalBatchSpeechService(UnavailableBatchSpeechProvider())
+    receipts = {}
+
     async def submit(stem, text, **claims):
-        return await asyncio.wait_for(registry.handle_unified_submit(params={**_joint_product_p2_params(),
+        params = {**_joint_product_p2_params(),
             "commit_id": "commit-" + stem, "turn_id": "turn-" + stem,
-            "committed_at": NOW, "text": text, "input_kind": "text", "input_state": "final", **claims},
+            "committed_at": NOW, "text": text, "input_kind": "text", "input_state": "final", **claims}
+        if finish == "voice":
+            if stem not in receipts:
+                receipts[stem] = await speech.issue_streaming_voice_commit_receipt(
+                    operation_id="speech-" + stem, capture_id="capture-" + stem, capture_generation=1,
+                    session_id="session-1", correlation_id=params["correlation_id"],
+                    interaction_id=params["interaction_id"], text=text)
+            params.update(input_kind="speech", voice_commit_receipt=receipts[stem])
+            message = Message(id="gateway-" + stem, type="req", channel_id="web",
+                session_id="session-1", params=params, timestamp=0, ok=True,
+                req_method=ReqMethod.LIVE_VOICE_COMPOSITION_UNIFIED_SUBMIT)
+            await _inject_live_voice_gateway_voice_claim(message, speech)
+            params = message.params
+            assert "voice_commit_receipt" not in params
+        return await asyncio.wait_for(registry.handle_unified_submit(params=params,
             request_id="request-" + stem, session_id="session-1", channel_id="web"), 10)
 
     await composition.start()
@@ -235,6 +259,11 @@ async def test_unified_task_replay_scope_and_voice_close_share_host_lifetime(tmp
         created = await submit("confirm", confirmed_text)
         assert created.ok, created.payload
         task_id = created.payload["result"]["task_id"]
+        if finish == "voice":
+            origin = registry._voice_task_origins[task_id]
+            assert (origin.session_id, origin.interaction_id, origin.activation_id,
+                origin.activation_generation, origin.correlation_id) == (
+                "session-1", "interaction-joint", "activation-joint", 1, "correlation-joint")
         await _wait(lambda: bool(task_agent.requests))
         await composition.reconcile_once()
         assert store.get_task(task_id, _scope()).state.value == "running"
@@ -256,7 +285,20 @@ async def test_unified_task_replay_scope_and_voice_close_share_host_lifetime(tmp
         assert not wrong_submit.ok, wrong_submit.payload
         assert wrong_submit.payload["error"]["reason"] == "PROJECT_MISMATCH", wrong_submit.payload
         stale = await submit("confirm", "create joint task")
-        assert not stale.ok and stale.payload["error"]["reason"] == "UNIFIED_INPUT_ID_CONFLICT", stale.payload
+        # The Gateway rejects receipt/text rebinding before journal admission.
+        expected_rejection = "FORMAL_SPEECH_RECEIPT_REQUIRED" if finish == "voice" else "UNIFIED_INPUT_ID_CONFLICT"
+        assert not stale.ok and stale.payload["error"]["reason"] == expected_rejection, stale.payload
+        if finish == "voice":
+            forged = Message(id="forged-voice", type="req", channel_id="web", session_id="session-1",
+                params={**_joint_product_p2_params(), "commit_id": "forged-commit", "turn_id": "forged-turn",
+                    "committed_at": NOW, "text": "create joint task", "input_kind": "speech",
+                    "input_state": "final", "gateway_voice_claim": {"kind": "formal_speech_recognition"}},
+                timestamp=0, ok=True, req_method=ReqMethod.LIVE_VOICE_COMPOSITION_UNIFIED_SUBMIT)
+            await _inject_live_voice_gateway_voice_claim(forged, speech)
+            assert "gateway_voice_claim" not in forged.params
+            denied = await registry.handle_unified_submit(params=forged.params,
+                request_id="forged-voice", session_id="session-1", channel_id="web")
+            assert not denied.ok and denied.payload["error"]["reason"] == "FORMAL_SPEECH_RECEIPT_REQUIRED"
         assert durable_state() == before
         assert len(models.calls) == model_calls and len(dialogue_agent.entered) == agent_calls
         assert len(task_agent.requests) == 1 and not (project / "RESULT-joint.md").exists()
@@ -351,7 +393,7 @@ async def test_unified_task_replay_scope_and_voice_close_share_host_lifetime(tmp
         closed = await registry.handle_p2_close(params=_joint_product_p2_params(),
             request_id="close-voice", session_id="session-1")
         assert closed.ok, closed.payload
-        if finish in {"complete", "barge", "adjust"}:
+        if finish in {"complete", "barge", "adjust", "voice"}:
             assert store.get_task(task_id, _scope()).outcome is None
             assert not task_agent.release["joint"].is_set()
             task_agent.release["joint"].set()
@@ -378,9 +420,53 @@ async def test_unified_task_replay_scope_and_voice_close_share_host_lifetime(tmp
             saved = result.payload["result"]["task_result"]
             assert saved["task_id"] == task_id and saved["attempt_id"] == record.attempt_id
             assert saved["result_text"] == expected
+            if finish == "voice":
+                from tests.unit_tests.live_voice.test_product_composition_registry import (
+                    _presentation_progress_ack_params,
+                )
+                assert store.unread_events_page(task_id, _scope(), presentation_class="text", limit=500).watermark == -1
+                reconnect = _joint_product_p2_params(correlation_id="reconnect-correlation",
+                    interaction_id="reconnect-interaction", activation_id="reconnect-activation")
+                reopened = await registry.handle_p2_activate(params=reconnect,
+                    request_id="reconnect", session_id="session-1", channel_id="web")
+                assert reopened.ok, reopened.payload
+                progress = {"auth_token": PRODUCT_TOKEN, "session_id": "session-1", "task_id": task_id,
+                    "correlation_id": "reconnect-correlation", "origin_id": "reconnect-host-surface",
+                    "generation_id": "reconnect-generation", "generation": 1}
+                pushed.clear()
+                subscribed = await registry.handle_p3_progress_activate(params=progress,
+                    request_id="reconnect-progress", session_id="session-1", channel_id="web")
+                assert subscribed.ok, subscribed.payload
+                await _wait(lambda: bool(pushed))
+                event = pushed[0]["payload"]
+                assert event["task_id"] == task_id, event
+                assert event["source_event"]["seq"] == record.event_head, event
+                ack = {**_presentation_progress_ack_params(event), "auth_token": PRODUCT_TOKEN}
+                # Presentation ACK must postdate the event, unlike the fixture's
+                # otherwise frozen creation/execution clock.
+                ack_now = "2026-08-07T12:00:01Z"
+                monkeypatch.setattr(composition, "_clock", lambda: ack_now)
+                monkeypatch.setattr("jiuwenswarm.channels.live_voice.product_composition_registry.utc_now", lambda: ack_now)
+                before_ack = durable_state()
+                wrong_ack = await registry.handle_p3_progress_ack(params={**ack, "task_id": "foreign-task"},
+                    request_id="foreign-progress-ack", session_id="session-1", channel_id="web")
+                assert not wrong_ack.ok and durable_state() == before_ack
+                acknowledged = await registry.handle_p3_progress_ack(params=ack,
+                    request_id="reconnect-progress-ack", session_id="session-1", channel_id="web")
+                assert acknowledged.ok, acknowledged.payload
+                assert store.unread_events_page(task_id, _scope(), presentation_class="text", limit=500).watermark == event["source_event"]["seq"]
+                consumed = durable_state()
+                replay_ack = await registry.handle_p3_progress_ack(params=ack,
+                    request_id="reconnect-progress-ack", session_id="session-1", channel_id="web")
+                assert replay_ack.ok, replay_ack.payload
+                assert replay_ack.payload["result"] == {**acknowledged.payload["result"], "replayed": True}
+                assert durable_state() == consumed
+                assert store.unread_events_page(task_id, _scope(), presentation_class="voice", limit=500).watermark == -1
+                assert len(task_agent.requests) == 1
         assert (project / "README.md").read_text() == "baseline\n"
         assert len(task_agent.requests) == 1
     finally:
+        await speech.close()
         for release in dialogue_agent.release.values():
             release.set()
         for release in task_agent.release.values():

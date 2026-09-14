@@ -107,7 +107,7 @@ Current unified-input joint tests cover real SQLite Task creation/confirmation,
 replay/conflict, project rejection, Voice close followed by completion, and
 running cancellation while the original dialogue completes normally. These use
 controlled model/authority/lower-Agent dependencies. The broader Host/Voice
-registry audit and remaining old joint voice-origin/notification oracles remain open.
+registry audit and remaining spoken-notification oracles remain open.
 The frontend lifecycle child places the formal Task reader under Host ChatPanel,
 using the existing webClient and formalTaskStore. Voice consumes its snapshot
 with a synchronous notification fence; it no longer constructs, closes or polls
@@ -132,8 +132,17 @@ written. A fourth joint mode now adopts an accepted running adjustment through
 the real SDK model callback rail, with one persisted request/application, one
 Task/attempt, replay suppression, and the adjusted file/result after Voice close.
 The lower Agent and its rail binding are controlled; this does not independently
-prove Host adapter rail installation or Provider output. The old retired-entry
-voice-origin/notification test remains unclosed.
+prove Host adapter rail installation or Provider output. A fifth mode uses real
+speech-service receipt issuance and Gateway claim conversion with critical-input
+enabled. It verifies exact Voice task origin, altered-text receipt rejection and
+forged-browser-claim stripping with zero durable/Agent effects, then completion
+after Voice close. STT/media verification before receipt issuance is excluded.
+The same mode reconnects with a new activation after completion and receives the
+terminal event through Host text progress. Exact ACK advances only text
+consumption; replay has zero further SQLite writes and Voice remains unread.
+This is same-process reconnection with a controlled web sink, not browser render
+or restart evidence. The old retired-entry spoken-notification journey remains
+unclosed.
 
 The current Python package pair passes clean tracked-source wheel builds and
 temporary target installation; all loaded Host/SDK modules resolve to that

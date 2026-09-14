@@ -758,3 +758,57 @@ return content; the affected adjustment mode passed again (**1 passed in
 Production bytes and the current paired-packaging evidence are unchanged.
 Old retired-entry voice-origin/notification coverage and historical Registry
 failures remain open.
+
+### Gateway receipt to current unified Task origin (2026-09-14)
+
+Tier 1 test-only boundary extends the joint fixture with real
+FormalBatchSpeechService.issue_streaming_voice_commit_receipt and Gateway
+_inject_live_voice_gateway_voice_claim, then the existing unified handler with
+critical-input enabled. Model responses, lower Agents and project authority
+remain controlled; there is no demo bypass. Issuance is called at the verified
+STT seam, so this does not test upstream media/Provider recognition or the
+full Gateway transport/authentication envelope.
+
+The Voice mode creates and confirms a real SQLite Task and checks all origin
+identity fields against the activation. Exact receipt replay reuses the result.
+Reusing that receipt with different text is rejected before journal admission
+(`FORMAL_SPEECH_RECEIPT_REQUIRED`, earlier than text-route ID conflict). A
+browser-supplied claim without receipt is stripped by the real Gateway function
+and rejected downstream. Existing database-dump, model/Agent-count and project
+file assertions prove zero forbidden effects. Wrong project still rejects.
+Voice close leaves the Task running; releasing the controlled Agent completes
+its file and saved-result query as in the original complete mode.
+
+First combined run had four prior modes pass and the new mode fail only because
+it expected the later text-journal conflict reason. The earlier receipt denial
+was retained and asserted. Final exact Voice mode, including forged-claim and
+origin assertions, passed **1 test in 11.64s**; scoped Ruff passes. No production
+change or new physical acceptance. This closes the current receipt-to-origin
+seam, not notification delivery or the old combined retired-entry test.
+
+### Completed Voice Task to Host text notification (2026-09-14)
+
+Tier 1 test-only continuation of the preceding Voice joint: preserve the real
+SQLite unread state after Voice closes, complete the Task, reopen the same
+session with a new activation, and subscribe through handle_p3_progress_activate
+to the existing Host text sink. The pushed source sequence is asserted equal
+to the completed Task's event head. ACK uses the exact presentation binding;
+an unknown Task target rejects with unchanged SQLite, the correct ACK advances
+the text watermark, and exact replay returns replayed=true with no further
+SQLite writes. Voice watermark stays -1: text display does not claim played
+speech. No second Task execution occurs.
+
+The initial ACK failure was the fixture's frozen composition clock: Task Store
+requires observation strictly after its event. Only the test ACK clock advances
+one second. A subsequent replay assertion incorrectly expected the first
+response's replayed=false; the existing explicit replay marker is now asserted.
+No production logic was changed. Four prior joint modes passed in the combined
+run; the final affected Voice mode passed **1 test in 11.84s** after these oracle
+corrections. Scoped Ruff/diff checks pass at batch closure.
+
+Read-only review confirms these boundaries and limits: receipt issuance starts
+after STT/media verification, the web push sink is controlled, reconnection is
+same-process, and the wrong Task ID is nonexistent (not another real Task).
+This does not prove browser DOM rendering, process-restart notification recovery,
+cross-real-Task ACK isolation or spoken notification/playback. Existing dedicated
+tests remain their separate evidence; the old combined spoken journey is open.
