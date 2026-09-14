@@ -1,0 +1,36 @@
+{
+  "host_baseline": "e3474bdbb8e9dfe8cb3890056bc663d0ea58cb00",
+  "sdk_commit": "cbe90f6233ca4f9dd6e60805a8db86b64941409b",
+  "source_sha256": {
+    "openjiuwen/core/application/tasks/task_event_subscription.py": "d56244ed48007fce61a4c7c4d37425dacf83a9fe47e919a517f7ad2f37c587fb",
+    "tests/unit_tests/live_voice/test_p3_4_durability_store.py": "2400ce3121bc15c0021684507628e7baf55d0453d16d02613974a830b29bb14c"
+  },
+  "validation": {
+    "before": "Real SQLite recovery/reopen subscription failed with KeyError retry_of_attempt_id at original line 484",
+    "sdk_subscription_regressions": {
+      "passed": 68,
+      "seconds": 2.7,
+      "exit_code": 0
+    },
+    "host_recovery_reopen_and_stale_producer": {
+      "passed": 2,
+      "seconds": 4.1,
+      "exit_code": 0
+    },
+    "review": "Independent read-only review: no blocker; genesis already fully validated; first/retry behavior unchanged"
+  },
+  "production_net_change": {
+    "voice": 0,
+    "host": 0,
+    "sdk": 2,
+    "combined": 2
+  },
+  "current_net_added": 194476,
+  "initial_net_added": 195680,
+  "limitations": [
+    "Old-producer negative is event-source fault injection; recovery/reopen is real SQLite",
+    "Positive subscription ends at recovery_accepted, not recovered execution terminal or Web UI",
+    "No SDK schema/API/version/dependency change or wheel deployment",
+    "Host consumer-page management convergence remains open"
+  ]
+}

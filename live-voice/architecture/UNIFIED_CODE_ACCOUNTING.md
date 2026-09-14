@@ -83,7 +83,7 @@ AgentServer 中26行不可达的重复回退，由原有 `get_default_models()` 
 | Gateway G | 18,155 | 19,538 | 38,373 |
 | Realtime/语音适配 M3 | 14,427 | 14,427 | 14,427 |
 | 会话与业务协调 M4+M5 | 38,676 | 38,676 | 38,676 |
-| 工作管理 M6+M8 | 37,515 | 37,575 | 37,720 |
+| 工作管理 M6+M8 | 37,517 | 37,577 | 37,722 |
 | Agent 与项目执行 M7+M9 | 12,829 | 16,917 | 50,937 |
 | 公共契约、授权、配置、观测与 Host 装配 | 19,492 | 21,346 | 46,162 |
 
@@ -91,7 +91,14 @@ AgentServer 中26行不可达的重复回退，由原有 `get_default_models()` 
 
 ## 3. 可复现证据
 
-最新共享校验收敛：Voice **112,334**、Host **48,371**、SDK **33,769**，
+最新恢复订阅修复：Voice **112,334**、Host **48,371**、SDK **33,771**，
+合计 **194,476**，较审计前 **195,680** 净减少 **1,204** 行。
+本批 SDK 净增2行，按已有恢复事件契约选择前序 attempt 字段；未删除生产实现，
+不算管理能力收敛。真实 SQLite 恢复/重开后订阅和旧 attempt 隔离验证通过。
+[逐文件清单](../evidence/DEEP_RECOVERY_SUBSCRIPTION_20260914.json)与
+[模块分桶](../evidence/DEEP_RECOVERY_SUBSCRIPTION_MODULES_20260914.json)为当前口径。
+
+此前共享校验收敛：Voice **112,334**、Host **48,371**、SDK **33,769**，
 合计 **194,474**，较审计前 **195,680** 净减少 **1,206** 行。
 本批 Voice−32、SDK−106、Host不变，合计−138。SDK删除四处文本/scope/profile
 校验副本，由已有durability_identity的同一实现处理，保留领域错误适配；Voice
@@ -99,7 +106,7 @@ AgentServer 中26行不可达的重复回退，由原有 `get_default_models()` 
 状态或存储。新增共享参数/调用适配已计入净额，不能把删除行毛额当净减少。
 这是实际消重，不是单纯迁移，也不代表Controller/Team任务机制已经全面统一。
 [逐文件清单](../evidence/DEEP_VALIDATION_REUSE_20260914.json)及
-[模块分桶](../evidence/DEEP_VALIDATION_REUSE_MODULES_20260914.json)为当前口径。
+[模块分桶](../evidence/DEEP_VALIDATION_REUSE_MODULES_20260914.json)记录该阶段。
 
 
 此前 Work producer 管理收敛：Voice **112,366**、Host **48,371**、SDK **33,875**，

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import sqlite3
@@ -60,6 +61,7 @@ from tests.unit_tests.live_voice.test_persistent_task_core import (
     _downgrade_fixture_to_v3,
     _downgrade_fixture_to_v4,
     _observations,
+    _grant,
     _scope,
     _wave2_command,
 )
@@ -1070,8 +1072,10 @@ def test_two_store_instances_share_one_mutator_claim(tmp_path: Path) -> None:
     )
 
 
-def test_linked_recovery_requires_exact_facts_and_wins_cancel_race_once(
-    tmp_path: Path,
+@pytest.mark.asyncio
+@pytest.mark.parametrize("inject_old_attempt", [False, True])
+async def test_linked_recovery_requires_exact_facts_and_wins_cancel_race_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, inject_old_attempt: bool,
 ) -> None:
     store, selection, task, binding = _selected_task(tmp_path)
     checkpoint_prefix = _safe_recovery_prefix(store, task, binding)
@@ -1171,6 +1175,40 @@ def test_linked_recovery_requires_exact_facts_and_wins_cancel_race_once(
         .attempt_id
         == "attempt-linked-recovery"
     )
+    # The product UI uses this same SDK authority subscription after restart.
+    from openjiuwen.core.application.tasks.task_event_subscription import TaskEventSubscription
+
+    reopened = SqliteTaskStore(store.database_path)
+    before_subscription = _task_store_rows(store.database_path)
+    subscription = TaskEventSubscription(
+        source=reopened, scope=task.scope, task_id=task.task_id,
+        authorization=_grant("task.events", command_id=None, target=task.task_id),
+        enabled=True, authority_atomic_replay=True, clock=lambda: NOW,
+    )
+    try:
+        assert await subscription.start()
+        first = await subscription.next_event()
+        assert first.event_type == "task.recovery_accepted"
+        assert first.attempt_id == recovered_attempt.attempt_id
+        assert first.details["producer_attempt_id"] == task.attempt_id
+        assert subscription.snapshot().attempt_number == recovered_attempt.attempt_number
+        assert subscription._previous_attempt_id == task.attempt_id
+        if inject_old_attempt:
+            # Fault injection at the event-source boundary: an old producer's
+            # event must not be admitted into the recovered attempt epoch.
+            old_event = store.events(task.task_id, task.scope, attempt_id=task.attempt_id)[-1]
+            stale = replace(old_event, seq=first.seq + 1)
+            monkeypatch.setattr(reopened, "events", lambda *args, **kwargs: (stale,))
+            with pytest.raises(FormalTaskViolation) as old_attempt:
+                await asyncio.wait_for(subscription.next_event(), 2)
+            assert old_attempt.value.reason == "TASK_EVENT_ATTEMPT_STALE"
+            assert old_attempt.value.code is ErrorCode.STALE
+            assert subscription.snapshot().last_seq == first.seq
+            assert subscription.snapshot().queued_events == 0
+    finally:
+        await subscription.close()
+    assert _task_store_rows(store.database_path) == before_subscription
+
     prior = checkpoint_prefix.records[-1]
     later_checkpoint = D1Checkpoint.create(
         checkpoint_id="checkpoint-later-tip",

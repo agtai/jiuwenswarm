@@ -1284,3 +1284,39 @@ Final SDK source (after import formatting) passed the same 37-test boundary in
 task facts. The corresponding Host commit records the independent Voice contract
 reuse and paired accounting; .5 APIs and pins are unchanged. Full-goal status
 remains PARTIAL; neither commit proves Task/Work/Controller/Team unification.
+
+
+### Recovery event subscription correspondence (2026-09-14, bounded repair verified)
+
+Production Task event calls use authority replay in P3.create_product_subscription;
+voice/text durable consumer projection uses Store consumer pages. The SDK still
+also offers its documented default live-only mode. These modes intentionally
+start at different positions (current head, canonical attempt prefix, durable
+presentation watermark); no removal is justified solely by a mode not appearing
+in current Host construction calls. Host consumer-page lifecycle convergence
+remains unproved and is not closed by this repair.
+
+Code audit found authority replay recognizes recovery boundaries but initializes
+_previous_attempt_id using retry_of_attempt_id unconditionally. Store recovery
+boundaries instead persist producer_attempt_id. Tier 2 recovery-read boundary:
+reproduce using existing real SQLite recovery fixture, then select the canonical
+predecessor field for the already-validated boundary type. Preserve authorization,
+prefix/state validation, old-attempt rejection, replay and detach semantics. No
+new execution, mutation, state/schema, mode/default or timeout policy. Acceptance:
+reopened recovered Task subscribes successfully without Store/outbox writes; its
+old producer attempt remains fenced; retry and regular subscriptions regressions.
+
+
+Red/green: the real SQLite recovery/reopen subscription initially failed with
+KeyError retry_of_attempt_id at SDK line 484. After selecting producer_attempt_id
+for already-validated recovery boundaries, two real recovery scenarios passed
+(4.10s); SDK subscription regressions passed 68 tests (2.70s), all exit 0. Ruff
+and diff checks passed. Independent read-only review found no blocker. Old
+producer rejection uses event-source fault injection; the positive stops at
+recovery_accepted, not recovered execution terminal or full Web UI. All Task
+database tables remain unchanged by subscription. SDK commit cbe90f623; this
+Host evidence/test commit is its companion. No schema/API/version/dependency
+change or deployment. SDK production net +2; current combined net additions
+194,476 versus initial 195,680, reduction 1,204. This repair deletes no duplicate
+production implementation and does not close Task management convergence.
+[Exact-source checks](../evidence/DEEP_RECOVERY_SUBSCRIPTION_CHECKS_20260914.json).

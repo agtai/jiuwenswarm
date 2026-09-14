@@ -204,3 +204,10 @@ Registry 的当前输入受理由宿主 SqliteUnifiedCommittedInputJournal 的 f
 回退和 AgentOS 目录；AgentServer 删除了其后不可达的重复回退。正式任务仍由
 `ServerModelCatalogResolver` 检查精确身份和整个目录版本，调用与普通 Adapter
 相同的 `build_model_from_entry`；普通聊天缓存的宽松回退没有据此改变。
+
+
+09-14 恢复订阅对应修复：P3 产品订阅直接使用 SDK TaskEventSubscription，
+按 Store 的 task.recovery_accepted 读取 producer_attempt_id；重试仍读取
+retry_of_attempt_id。真实 SQLite 恢复重开和旧 attempt 拒绝已验证，
+订阅没有数据库写入。Host 持久消费分页与 SDK 完整前缀回放的管理收敛仍未完成。
+此项未重新核验 Hermes 或多模态外部实现，不改变其既有版本和证据边界。

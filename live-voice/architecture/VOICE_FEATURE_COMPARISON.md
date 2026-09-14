@@ -131,3 +131,10 @@ scope、严格摘要与正式授权仍必须验证。该验证覆盖受控模型
 
 LiveVoice 的正式模型目录使用宿主公共配置目录；删除的是其后不可达的重复
 回退，并未取消宿主环境变量/旧格式支持。这一消重不构成新的三方能力差异。
+
+
+09-14 恢复订阅对应修复：P3 产品订阅直接使用 SDK TaskEventSubscription，
+按 Store 的 task.recovery_accepted 读取 producer_attempt_id；重试仍读取
+retry_of_attempt_id。真实 SQLite 恢复重开和旧 attempt 拒绝已验证，
+订阅没有数据库写入。Host 持久消费分页与 SDK 完整前缀回放的管理收敛仍未完成。
+此项未重新核验 Hermes 或多模态外部实现，不改变其既有版本和证据边界。
