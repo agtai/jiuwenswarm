@@ -49,6 +49,11 @@ Task 权威读取（`.5`）：Host 产品投影 → SDK Store 聚合分页 → �
 重试；保留产品权限、能力与继承关系校验。M6+M8 的权威仍是既有 Store，未新增
 任务状态或数据库。普通分页及正式命令的旧请求校验不变。
 
+09-14 校验复用：Native carrier/runtime → 已有 `native_interaction_contract._identity`，
+仅保留领域错误转换；SDK checkpoint/effect/recovery/prefix → 同一
+`durability_identity` 文本、scope、profile 校验。独立 wire 模型及权限/执行状态
+仍保留；解析值不等于获得执行权限。这次删除的是重复算法，不是移动整份文件。
+
 ## 3. 每个模块怎样介绍
 
 | 模块 | 一句话责任 | 输入 → 输出 | 关键代码与运行位置 |

@@ -1,0 +1,56 @@
+{
+  "host_baseline": "723324229514861efbcbd60660db4d27f04202f3",
+  "sdk_commit": "a155ce486ae30e02596c1da5520a5449ec8832ba",
+  "host_sha256": {
+    "jiuwenswarm/channels/live_voice/native_interaction_carrier.py": "c891320423ca8e07d4cf63404e934e247da0e52adf85cf32a4a594dbf74d82df",
+    "jiuwenswarm/channels/live_voice/native_interaction_runtime.py": "a9b293c9fecd99d8c738c72edaf3a0235d9ece464e50c0ca55bf9217043adc38",
+    "tests/unit_tests/live_voice/test_native_identity_validation.py": "f49654c81e27e5716d66377651fe84eb95d82edb58b545842c4a72567fc51b29"
+  },
+  "sdk_sha256": {
+    "openjiuwen/core/application/tasks/durability/durability_identity.py": "067e3b946f4b9ba1bc2b2e1801af142d3075d1d77f4c60570b0985322bad71dd",
+    "openjiuwen/core/application/tasks/durability/durability_checkpoint.py": "79506326fb2cf23f78837758146ad3059a73ad9b213d427e1ba5d85650fade8a",
+    "openjiuwen/core/application/tasks/durability/durability_effects.py": "2ff1eb456c60d076fc9e11bc1efc9210beaa028c789a027dcfbc3e1573fdcc35",
+    "openjiuwen/core/application/tasks/durability/durability_readers.py": "8ec9c1b4e4e36c2e66e122960f9a8a1646c92542e9dba7e92a61a98f8b8b3c66",
+    "openjiuwen/core/application/tasks/durability/durability_recovery_facts.py": "e37dc7666f0f27c81f8ddf0fe7ee70c1c05235e87085edca2ac81b5daa24cc8d"
+  },
+  "validation": {
+    "sdk_characterization_before": 9,
+    "sdk_boundary_after": {
+      "passed": 37,
+      "seconds": 1.35,
+      "exit_code": 0
+    },
+    "host_real_sqlite": {
+      "passed": 5,
+      "seconds": 4.09,
+      "exit_code": 0,
+      "file": "tests/unit_tests/live_voice/test_p3_4_durability_store.py",
+      "selection": "checkpoint_is_immutable or raw_authority_free or linked_recovery_requires_exact or recovery_missing_checkpoint or real_cancel_fence_wins_concurrent"
+    },
+    "voice_characterization_before": 2,
+    "voice_after": {
+      "passed": 48,
+      "seconds": 3.67,
+      "exit_code": 0,
+      "files": [
+        "test_native_identity_validation.py",
+        "test_native_interaction_carrier.py",
+        "test_native_interaction_runtime.py"
+      ]
+    },
+    "review": "Independent read-only review: no blocker; Voice suppressed internal exception context changes, public error contract retained"
+  },
+  "production_net_change": {
+    "voice": -32,
+    "host": 0,
+    "sdk": -106,
+    "combined": -138
+  },
+  "current_net_added": 194474,
+  "initial_net_added": 195680,
+  "limitations": [
+    "Pure contract/internal validator reuse; not full task-manager convergence",
+    "No external Provider/audio or product latency claim",
+    "SDK exports/schema/version/dependency unchanged; no wheel installation repeated"
+  ]
+}

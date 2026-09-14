@@ -16,6 +16,10 @@ from jiuwenswarm.common.live_voice_lock_diagnostics import ObservedAsyncLock
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+from jiuwenswarm.common.schema.native_interaction_contract import (
+    NativeInteractionContractViolation,
+    _identity as _contract_identity,
+)
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     CONTRACT_VERSION,
     ContextRef,
@@ -64,8 +68,6 @@ from jiuwenswarm.server.runtime.presentation.presentation_ledger import (
 )
 
 
-_MAX_IDENTITY_CHARS = 256
-_MAX_IDENTITY_UTF8_BYTES = 1_024
 _MAX_NATIVE_RUNTIME_RECORDS = 4_096
 _MAX_NATIVE_RESPONSE_AUDIO_ITEMS = 64
 
@@ -163,30 +165,12 @@ class _RuntimeResponse:
 
 
 def _identity(value: object, field_name: str) -> str:
-    if (
-        type(value) is not str
-        or not value
-        or value != value.strip()
-        or len(value) > _MAX_IDENTITY_CHARS
-        or any(
-            unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
-            for character in value
-        )
-    ):
-        raise NativeInteractionRuntimeError(
-            "NATIVE_RUNTIME_IDENTITY_INVALID",
-            f"{field_name} must be a bounded canonical identity",
-        )
     try:
-        encoded = value.encode("utf-8")
-    except UnicodeEncodeError:
-        encoded = b"x" * (_MAX_IDENTITY_UTF8_BYTES + 1)
-    if len(encoded) > _MAX_IDENTITY_UTF8_BYTES:
+        return _contract_identity(value, field_name)
+    except NativeInteractionContractViolation:
         raise NativeInteractionRuntimeError(
-            "NATIVE_RUNTIME_IDENTITY_INVALID",
-            f"{field_name} must be a bounded canonical identity",
-        )
-    return value
+            "NATIVE_RUNTIME_IDENTITY_INVALID", f"{field_name} must be a bounded canonical identity",
+        ) from None
 
 
 def _transcript(value: object) -> str | None:

@@ -1220,3 +1220,67 @@ retain the allocation algorithm and add the direct service-call adaptation. Tota
 is 194612, net -1068 from the initial 195680. This is not broader Task/Work/native
 manager completion. SDK stays at 0b8cb556d and .5; no new SDK commit or install is
 needed for this Host-only internal change. No push or deployment.
+
+
+### Shared durability identity validation (2026-09-14, verified implementation)
+
+AST candidate audit and manual comparison found five copies of exact-string / UTF-8
+512-byte validation and four copies each of exact authenticated ScopeRef and
+DurabilityProfileBinding revalidation. Different exception types, reasons and
+field labels do not justify separate validation algorithms. Enhance the existing
+pure durability_identity module; callers bind their existing error contract.
+Delete duplicate _text/_scope/_profile bodies, keeping domain model/state/codec
+checks. No new validation framework, Store, executor, wire schema or authority.
+This is internal Task durability consolidation, not evidence that Controller or
+Team managers have been reused for persistent command/outbox semantics.
+
+Tier 2 validation-sensitive refactor: preserve exact type checks (including str
+subclass rejection), Unicode byte bounds, accepted whitespace/NUL behavior,
+authenticated-scope requirement, profile revalidation, exception type/reason/message
+and causes. Characterize before editing, run owning checkpoint/effect/recovery/
+prefix tests and affected real SQLite prefix integration. Runtime/Voice execution
+semantics and all timeout policies are excluded. SDK exports and .5 API stay stable.
+
+
+Related Voice validation scope (same validation batch): Native carrier/runtime
+identity validators duplicate native_interaction_contract._identity. Baseline
+characterization confirms identical accepted sets: exact str, trimmed, 256 chars /
+1024 UTF-8 bytes, rejecting Unicode Cc/Cf/Zl/Zp and invalid scalars. Call the
+existing contract helper and translate only to original carrier/runtime exceptions,
+reason and message (no cause). Delete duplicate bounds and validation bodies.
+Tier 2 input-admission refactor; preserve all turn/generation/audio/history gates.
+Run owning carrier/runtime tests, including rejected and stale zero-effect cases.
+No codec field, media/latency, authorization or lifetime changes.
+
+
+Validation closure: baseline SDK characterization 9 passed (an initial test-only
+wrong enum spelling was corrected to existing REQUEST_ASSERTED before production
+edits). After refactor, 37 SDK characterization/codec/prefix/recovery tests passed
+in 1.47s. Five Host real-SQLite cases passed in 4.09s: immutable/corrupt checkpoint,
+authority-free rejection, exact linked recovery, missing checkpoint and real
+cancel/recovery race. Final import cleanup retained 9 passing characterization
+cases. Voice baseline 2 passed; after calling the common contract, all 48 owning
+carrier/runtime cases passed in 3.67s, including identity replay/stale audio and
+zero forbidden history/terminal/media effects. Ruff and diff checks passed.
+
+Independent read-only review found no blocker. SDK exceptions/reasons/messages/
+causes and public __all__ are preserved; former accidental imported symbols had
+no located repository consumers. Voice errors retain type/reason/message/code
+and no explicit cause; internally the shared-contract exception becomes a
+suppressed __context__. No traceback-identity compatibility is claimed.
+
+Production net delta: Voice -32, Host 0, SDK -106; combined -138. This removes
+repeated validation algorithms, retains error adapters and enhances the existing
+identity helper rather than adding a new framework. Current combined net is
+194474 (-1206 from initial 195680). Controller/Team/coroutine-manager reuse remains
+bounded by actual execution semantics. In particular Coroutine TaskManager starts
+inside caller-owned AnyIO groups and cancels a CancelScope; its transient status
+cannot replace Work UNKNOWN/physical settlement or durable Task command/outbox
+facts. No schema/API version/dependency change or new SDK wheel deployment.
+
+
+Final SDK source (after import formatting) passed the same 37-test boundary in
+1.35s. SDK commit: a155ce486, refactor: share durability identity validation across
+task facts. The corresponding Host commit records the independent Voice contract
+reuse and paired accounting; .5 APIs and pins are unchanged. Full-goal status
+remains PARTIAL; neither commit proves Task/Work/Controller/Team unification.
