@@ -113,6 +113,7 @@ class NativeBusinessRouter:
             selection = self.contexts.select(scope=scope,
                 history=select_conversation_history(observed["history"]),
                 tasks=observed["tasks"], works=observed["works"],
+                capabilities=observed.get("capabilities"),
                 model={"model_identity": native.model_identity, "model_config_version": native.model_config_version})
             self._context_read_sequence += 1
             return selection, self._context_read_sequence

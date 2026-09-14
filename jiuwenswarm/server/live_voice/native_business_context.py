@@ -81,8 +81,10 @@ class NativeBusinessContextStore:
         self._capacity = capacity
         self._snapshots = OrderedDict()
 
-    def select(self, *, scope, history, tasks, works, model):
+    def select(self, *, scope, history, tasks, works, model, capabilities=None):
         facts = {"history": history, "tasks": tasks, "works": works, "model": model}
+        if capabilities is not None:
+            facts["capabilities"] = capabilities
         # Scope participates in identity even when two sessions have equal text.
         identity = _digest({"scope": scope.to_dict(), **facts})
         key = (scope, identity)

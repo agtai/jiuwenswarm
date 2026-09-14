@@ -254,6 +254,20 @@ def business_context_result():
     }
 
 
+def test_repurchase_capability_survives_gateway_and_provider_context_validation():
+    from jiuwenswarm.gateway.live_voice.native_interaction_runtime_client import _validate_business_context_result
+    from jiuwenswarm.server.live_voice.openai_realtime_native_engine import OpenAIRealtimeNativeInteractionEngine
+    result = business_context_result()
+    result["context"]["capabilities"] = ["repurchase"]
+    validated = _validate_business_context_result(result)
+    assert OpenAIRealtimeNativeInteractionEngine._business_context_copy(validated["context"])["capabilities"] == ["repurchase"]
+    result["context"]["capabilities"] = ["unrecognized"]
+    with pytest.raises(Exception, match="closed bounded data"):
+        _validate_business_context_result(result)
+    with pytest.raises(Exception, match="bounded JSON data"):
+        OpenAIRealtimeNativeInteractionEngine._business_context_copy(result["context"])
+
+
 def observe_business_client(agent=None):
     agent = agent or FakeAgentClient()
     client = GatewayNativeInteractionRuntimeClient(agent, native_model="gpt-realtime-2", timeout_seconds=0.2)

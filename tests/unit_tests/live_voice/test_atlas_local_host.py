@@ -9,6 +9,20 @@ from jiuwenswarm.server.live_voice.native_business_contract import NativeBusines
 
 
 @pytest.mark.asyncio
+async def test_capabilities_are_validated_and_preserved(tmp_path):
+    host = AtlasLocalHost(tmp_path / "unused")
+    result = {"history": [], "calls": [], "capabilities": ["repurchase"]}
+    async def observed(*args):
+        return result
+    host._call = observed
+    assert (await host.context(SimpleNamespace()))["capabilities"] == ["repurchase"]
+    for invalid in (["arbitrary instruction"], "repurchase", ["repurchase", "repurchase"]):
+        result["capabilities"] = invalid
+        with pytest.raises(NativeBusinessViolation):
+            await host.context(SimpleNamespace())
+
+
+@pytest.mark.asyncio
 async def test_pair_scope_pin_and_acceptance_unknown_never_redispatch(tmp_path):
     calls = []
     async def callback(request):

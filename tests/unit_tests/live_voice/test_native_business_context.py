@@ -6,6 +6,16 @@ from jiuwenswarm.server.live_voice.native_business_contract import NativeBusines
 
 SCOPE = ScopeRef("user", "project", "session", Assurance.AUTHENTICATED)
 
+def test_capabilities_participate_in_snapshot_identity_and_are_immutable():
+    store = NativeBusinessContextStore()
+    plain = store.select(scope=SCOPE, history=[], tasks=[], works=[], model={})
+    capabilities = ["repurchase"]
+    enabled = store.select(scope=SCOPE, history=[], tasks=[], works=[], model={}, capabilities=capabilities)
+    capabilities.clear()
+    assert enabled.context_id != plain.context_id
+    assert enabled.payload()["capabilities"] == ["repurchase"]
+    assert "capabilities" not in plain.payload()
+
 def test_history_includes_native_direct_answers_and_distinguishes_visible_text():
     records = [{"role":"user", "content":"original request"},
         {"role":"assistant", "content":"spoken answer", "formal_binding":{"surface":"native_audio"}},

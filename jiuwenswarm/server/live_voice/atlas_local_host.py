@@ -81,9 +81,11 @@ class AtlasLocalHost:
 
     async def context(self, binding):
         result = await self._call(binding, "context", {})
-        if (type(result) is not dict or set(result) != {"history", "calls"}
+        if (type(result) is not dict or set(result) not in ({"history", "calls"}, {"history", "calls", "capabilities"})
                 or type(result["history"]) is not list or type(result["calls"]) is not list
                 or len(result["calls"]) > 128):
+            raise NativeBusinessViolation("ATLAS_HOST_CONTEXT_INVALID")
+        if "capabilities" in result and result["capabilities"] not in ([], ["repurchase"]):
             raise NativeBusinessViolation("ATLAS_HOST_CONTEXT_INVALID")
         tasks, works, events = [], [], []
         for call in result["calls"]:
@@ -119,7 +121,8 @@ class AtlasLocalHost:
                     "reason": "ATLAS_RESULT_TRUNCATED" if call["textTruncated"] else None})
         if len(works) > 32:
             raise NativeBusinessViolation("ATLAS_HOST_WORK_CAPACITY")
-        return {"history": result["history"], "tasks": tasks, "works": works, "events": events}
+        return {"history": result["history"], "tasks": tasks, "works": works, "events": events,
+                **({"capabilities": result["capabilities"]} if "capabilities" in result else {})}
 
     async def execute(self, binding, delegate):
         action = delegate.business
