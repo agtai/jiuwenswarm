@@ -479,3 +479,44 @@ The new [per-file](../evidence/DEEP_INPUT_RECOVERY_20260914.json) and
 [module](../evidence/DEEP_INPUT_RECOVERY_MODULES_20260914.json) manifests use the
 same baselines. Earlier package artifacts still attest only their earlier source.
 No SDK source, timeout, buffer, Provider, credential, deployment or remote ref changed.
+
+## Host configuration continuation scope (2026-09-14, Tier 0)
+
+Trace: AgentWebSocketServer._live_voice_p3_model_catalog calls the existing
+common.config.get_default_models(get_config()). That owner handles list/legacy
+formats, decryption, environment fallback and AgentOS entries and returns at
+least one entry on every successful branch. The subsequent Voice-specific
+models.default/react/gpt-4 fallback is unreachable. Remove that duplicate
+production branch, retaining the wrapper for current server/test callers and
+fresh catalog reads. Formal ServerModelCatalogResolver keeps exact identity and
+whole-catalog drift checks; ordinary _resolve_model cache/fallback semantics are
+different and excluded. Verify actual common-config results for modern/legacy/
+environment/AgentOS cases and invalid formal selection with no model build.
+No provider/model selection policy, private config or authorization changes.
+
+The separate project-authority audit found unused clean/managed-worktree checks
+and factory reader allocation. Current code omits those checks since imported
+commit cedb4e1b3; earlier D-099 wording restricts arbitrary dirty worktrees, while
+the imported code and later repair evidence use captured current-tree execution.
+That historical policy correspondence needs explicit evidence before rewriting
+its decision narrative. No project-authority code is changed in this batch.
+
+Configuration result: removed26 net lines from AgentServer; no file relocation,
+new resolver or model policy. The shared catalog's existing format/environment
+fallback remains. Empty-name entries are still rejected by formal resolution;
+the unreachable gpt-4 branch never supplied a model for that case. Six new
+real-Host-catalog cases pass; six selected existing model identity/default/drift/
+builder cases pass (164 deselected, one dependency deprecation warning). Tests
+inject config/environment values, call the real common catalog, and verify zero
+model construction for unknown/drift/invalid selection. No private config or
+Provider call is used. Scoped review and diff checks pass; the new test passes
+Ruff. Whole-file AgentServer Ruff reports six pre-existing E402/F841 findings;
+comparison with the HEAD blob has identical codes, lines, columns and messages.
+No lint finding touches the changed method; unrelated cleanup is excluded.
+
+Latest accounting: Voice113158, Host48296, SDK33872; total195326,354 below initial.
+All26 lines are actual deletion of duplicate Host configuration fallback; no
+additional production enhancement or relocation in this child. Only the net
+change to the already-existing AgentServer file is counted, not its entire size.
+See [file manifest](../evidence/DEEP_HOST_CONFIG_20260914.json) and
+[module manifest](../evidence/DEEP_HOST_CONFIG_MODULES_20260914.json).

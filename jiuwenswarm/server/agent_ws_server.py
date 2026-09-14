@@ -11078,33 +11078,7 @@ class AgentWebSocketServer:
         """Read the current catalog; P3 resolves it exactly on every boundary."""
 
         config = get_config()
-        defaults = [dict(entry) for entry in get_default_models(config)]
-        if defaults:
-            return defaults
-        default_model_config = config.get("models", {}).get("default", {})
-        react_config = config.get("react", {})
-        model_client_config = dict(
-            default_model_config.get("model_client_config")
-            or react_config.get("model_client_config")
-            or {}
-        )
-        model_name = (
-            model_client_config.get("model_name")
-            or react_config.get("model_name")
-            or "gpt-4"
-        )
-        model_client_config["model_name"] = model_name
-        return [
-            {
-                "model_client_config": model_client_config,
-                "model_config_obj": (
-                    default_model_config.get("model_config_obj")
-                    or react_config.get("model_config_obj")
-                    or {}
-                ),
-                "is_default": True,
-            }
-        ]
+        return [dict(entry) for entry in get_default_models(config)]
 
     def _resolve_model(self, model_name: Optional[str] = None) -> Optional[Any]:
         """Resolve model from jiuwenswarm config.
