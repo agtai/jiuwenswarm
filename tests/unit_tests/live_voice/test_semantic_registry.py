@@ -1215,6 +1215,57 @@ def typed_final(stem, text):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("pending_before_disable", [False, True])
+async def test_unified_p3_off_with_real_confirmation_has_zero_task_effects(
+    semantic_runtime, pending_before_disable,
+):
+    """An old confirmation cannot bypass current flags; receipt Agent is tool-free."""
+    s = semantic_runtime
+    core = s.harness.composition._core
+    s.program = lambda data: model_output(data, operation="task.create",
+        arguments={"name": "Inventory report", "instruction": "Read inventory and save report.md."},
+        reference=next(iter(data["context"]["pending"]), None))
+    assert (await s.registry.handle_p2_activate(params=p2_params(), request_id="off-activate",
+        session_id="session-1", channel_id="web")).ok
+    if pending_before_disable:
+        proposed = await s.registry.handle_unified_submit(
+            params=typed_final("before-off", "Prepare the inventory report."),
+            request_id="before-off", session_id="session-1", channel_id="web")
+        assert proposed.ok, proposed.payload
+        await present_next(s, 0)
+        pending = await s.registry._semantic_continuity.pending(_scope())
+        assert len(pending) == 1 and pending[0]["operation"] == "task.create"
+    s.registry._settings = replace(s.registry._settings, p3_text_enabled=False, p3_mutation_enabled=False)
+    counts = core.store.counts()
+    executions = len(s.manager.agent.executions)
+    model_calls = len(s.calls)
+    params = typed_final("after-off", "Confirm that exact task." if pending_before_disable else "Prepare the inventory report.")
+    result = await s.registry.handle_unified_submit(params=params, request_id="after-off",
+        session_id="session-1", channel_id="web")
+    await core.drain_outbox()
+    assert core.store.counts() == counts and counts["tasks"] == 0
+    assert s.harness.executor.dispatches == s.harness.executor.cancels == s.harness.executor.adjustments == []
+    assert result.ok and result.payload["result"].get("task_id") is None, result.payload
+    assert len(s.calls) == model_calls + 1
+    if pending_before_disable:
+        assert s.calls[-1]["context"]["pending"][0]["id"] == pending[0]["id"]
+        assert s.calls[-1]["context"]["pending"][0]["version"] == pending[0]["version"]
+    assert len(s.manager.agent.executions) == executions + 1
+    execution = s.manager.agent.executions[-1]
+    assert execution.allow_tools is False
+    receipts = [json.loads(entry.content) for entry in execution.context.entries
+        if "P3_CONFIRMATION_ISSUER_UNAVAILABLE" in entry.content]
+    assert len(receipts) == 1, [entry.content for entry in execution.context.entries]
+    assert receipts[0]["ok"] is False and receipts[0]["operation"] == "task.create"
+    calls_after = len(s.calls), len(s.manager.agent.executions)
+    replay = await s.registry.handle_unified_submit(params=params, request_id="after-off",
+        session_id="session-1", channel_id="web")
+    assert replay.payload == result.payload
+    assert core.store.counts() == counts
+    assert (len(s.calls), len(s.manager.agent.executions)) == calls_after
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("frozen_route", ["task", "clarification"])
 @pytest.mark.parametrize("newer_input", [False, "unified", "p3"])
 async def test_frozen_semantics_survive_registry_rebuild_and_changed_task_set(

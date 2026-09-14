@@ -163,6 +163,12 @@ ledger, uncalled reservation/preflight and constant-false recovery branch.
 The selected registry group has 28 passes/27 failures both before and after;
 isolated baseline comparison confirms the same failing test IDs. Old semantic
 fixtures defaulting to dialogue remain validation debt, not a green claim.
+The obsolete P3-off fixture is now replaced by real composition/SQLite/
+confirmation checks: both a new request and a pending confirmation fail to
+create or dispatch after P3 is disabled, and replay adds no model/Agent effect.
+The paired enabled-create positive also passes. Current semantic-authority
+denial and unknown-exception privacy checks pass; the older business-denial
+spoken-ACK scenario remains open. No aggregate historical-suite pass is claimed.
 Module diagrams retain M4+M5 and M7+M9; accounting separates actual deletion,
 retained/migrated code and native-file additions. Earlier ownership extraction
 is recorded in [the preceding packet](reviews/TASK_WORK_UNIFICATION_20260913.md),

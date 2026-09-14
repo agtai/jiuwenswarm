@@ -812,3 +812,61 @@ same-process, and the wrong Task ID is nonexistent (not another real Task).
 This does not prove browser DOM rendering, process-restart notification recovery,
 cross-real-Task ACK isolation or spoken notification/playback. Existing dedicated
 tests remain their separate evidence; the old combined spoken journey is open.
+
+### Historical Registry failure triage: current semantic boundary (2026-09-14)
+
+Tier 1 test-only child: move exception injection from the no-longer-called
+read_current_background_task hook to resolve_production_semantics. The existing
+unknown-failure test now reaches the current production error boundary and
+proves generic UNIFIED_INPUT_FAILED with no private path exposure or Agent call.
+A separate current semantic-authority-denial test proves rejection, zero business
+handle/Agent calls and zero assistant history. Selected checks: **2 passed,
+234 deselected in 9.65s** before restoring the old permission test below;
+scoped Ruff/diff checks pass. Production is unchanged.
+
+The old permission-denial/spoken-ACK test is retained unchanged: the new
+semantic-authority rejection does not substitute for that product presentation
+scenario. Likewise the P3-off test remains unchanged and unresolved. Tracing an
+exploratory explicit task decision found a tool-disabled receipt Agent (not
+ordinary dialogue), carrying P3_CONFIRMATION_ISSUER_UNAVAILABLE. This fixture
+lacks a real confirmation issuer even with flags on, so that rejection cannot
+prove the flag boundary. The exploration was removed instead of weakening the
+test. Use the real composition/confirmation harness to establish that boundary.
+The default-dialogue fixture and retired current-task hook do not prove a new
+production regression. Final selected semantic-denial/privacy checks: **2
+passed, 235 deselected in 9.43s**. No full historical group rerun or revised
+aggregate passing count is claimed.
+
+### Real P3-off composition/confirmation boundary (2026-09-14)
+
+The Tier 1 test migration now uses semantic_runtime's real SQLite/Core,
+P3AuthenticatedComposition, BoundedP3ConfirmationOwner and forwarder, alongside
+the same controlled model/lower-Agent ports as existing semantic tests. Both
+P3 text and mutation flags turn off after activation: one case precedes its
+first Task request; another follows a real presented pending confirmation.
+Existing issuer/forwarder objects remain available, so missing construction
+cannot masquerade as current-flag enforcement. The normal enabled typed-create
+case is run beside them as the positive control.
+
+Each disabled case drains the real outbox and observes unchanged Task-store
+counts, zero Tasks, no executor dispatch/cancel/adjustment, no tool-enabled
+receipt Agent, and no returned Task ID. Exact replay neither changes counts nor
+invokes the semantic model/Agent again. This checks current gating in a live
+composition, not cold-start allocation or independent single-flag policies.
+The earlier failed P3-off lifecycle test was removed only after this replacement
+passed. The separate old permission-denial/spoken-ACK case remains.
+
+Final selected command covers the two disabled cases, enabled typed creation,
+semantic authority denial and generic exception privacy: **5 passed, 336
+deselected in 11.03s**. Scoped Ruff and diff review/checks pass. No production
+changes, new feature policy, Provider/audio acceptance or aggregate historical
+failure-set closure is claimed.
+
+Independent read-only review rejected the initial broad "failure or no Task ID"
+oracle because unrelated upstream failure could pass it. The final test requires
+one actual model call, one tool-disabled receipt Agent, an exact task.create
+failure receipt with P3_CONFIRMATION_ISSUER_UNAVAILABLE, and preservation of the
+pending operation/id/version. Real confirmation owner/forwarder already exist;
+the current mutation gate makes their issuer unavailable. Both revised disabled
+cases pass again (**2 passed, 103 deselected in 8.73s**). Scoped Ruff/diff checks
+pass. This closes the review finding without changing production semantics.

@@ -4874,41 +4874,6 @@ async def test_unified_post_admission_rejection_is_durably_replayed(
 
 
 @pytest.mark.asyncio
-async def test_unified_background_intent_fails_closed_when_p3_is_off(
-    tmp_path: Path,
-) -> None:
-    registry, composition, manager = _unified_registry(
-        tmp_path, p3_enabled=False, mutation_enabled=False
-    )
-    assert (
-        await registry.handle_p2_activate(
-            params=_p2_params(),
-            request_id="request-unified-off-activate",
-            session_id=SCOPE.session_id,
-            channel_id="web",
-        )
-    ).ok
-    _install_unified_history_writer(registry)
-
-    result = await registry.handle_unified_submit(
-        params=_unified_final_params(
-            stem="p3-off-create",
-            text="帮我根据这些要求制定三天的行程。",
-        ),
-        request_id="request-unified-off-create",
-        session_id=SCOPE.session_id,
-        channel_id="web",
-    )
-
-    assert result.ok
-    assert manager.agent.calls == 0
-    assert composition.read_current_calls == 0
-    assert composition.handle_calls == []
-    await _ack_unified_presentation(registry, sequence=0, stem="p3-off-create")
-    await _close_unified_route(registry, stem="p3-off-create")
-
-
-@pytest.mark.asyncio
 async def test_unified_background_permission_denial_is_spoken_and_resumes_via_ack(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4955,6 +4920,48 @@ async def test_unified_background_permission_denial_is_spoken_and_resumes_via_ac
         content.content_utf8 for content in history.assistants[0][0].contents
     ).decode("utf-8")
     assert spoken == "后台任务功能当前不可用。"
+    await _close_unified_route(registry, stem="permission-denied-create")
+
+
+
+@pytest.mark.asyncio
+async def test_unified_semantic_authority_denial_has_zero_execution_or_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, composition, manager = _unified_registry(tmp_path)
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-unified-denied-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    history = _install_unified_history_writer(registry)
+
+    async def deny_semantics(**_kwargs):
+        raise FormalTaskViolation(
+            "FORMAL_TASK_AUTHORIZATION_DENIED",
+            "must not be exposed as an RPC-only failure",
+            ErrorCode.PERMISSION_DENIED,
+        )
+    monkeypatch.setattr(composition, "resolve_production_semantics", deny_semantics)
+    result = await registry.handle_unified_submit(
+        params=_unified_final_params(
+            stem="permission-denied-create",
+            text="后台帮我制定三天行程。",
+        ),
+        request_id="request-unified-permission-denied",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+
+    assert not result.ok, result.payload
+    assert result.payload["error"]["reason"] == "FORMAL_TASK_AUTHORIZATION_DENIED"
+    assert manager.agent.calls == 0
+    assert composition.handle_calls == []
+    assert history.assistants == []
     await _close_unified_route(registry, stem="permission-denied-create")
 
 
@@ -5021,14 +5028,10 @@ async def test_unified_unknown_failure_never_exposes_exception_text(
         )
     ).ok
 
-    async def fail_current_read(**_kwargs: object) -> None:
+    async def fail_semantics(**_kwargs):
         raise RuntimeError(r"C:\private\itinerary\secret.txt")
 
-    monkeypatch.setattr(
-        composition,
-        "read_current_background_task",
-        fail_current_read,
-    )
+    monkeypatch.setattr(composition, "resolve_production_semantics", fail_semantics)
     rejected = await registry.handle_unified_submit(
         params=_unified_final_params(
             stem="safe-failure",
