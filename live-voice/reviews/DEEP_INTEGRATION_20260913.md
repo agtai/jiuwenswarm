@@ -1073,3 +1073,42 @@ batch. Same-basis manifest now totals 195067, 613 below initial 195680. These ar
 actual deleted implementation/state holders, not relocation. Persistent Task/Work
 management convergence remains PARTIAL; recovery tests do not expand physical
 provider, complete OS-process restart or audio-device acceptance evidence.
+
+### Remove unconsumed effect-delivery protocol (2026-09-14)
+
+The production tree has no consumer of AgentConversationRuntime's
+claim_conversation_effects/acknowledge_conversation_effects. Registry/leases/Gateway
+consume notification APIs and PresentationAck instead. The abandoned protocol
+retained a second effect backlog, claim ledger, replay/ACK model and close-time
+copy of CR effects. Its ACK only marked the batch; it neither cancelled execution
+nor wrote presented history. Delete that layer rather than relocate it. Keep
+CR.close, underlying CR effects, barge/interrupt/exact-round cancellation,
+notification leases/final-drain and actual presentation-history ACK unchanged.
+
+The four tests exclusively exercising the deleted claim/ACK protocol are retired.
+Four-cancellation-domain and multi-final tests now inspect the actual CR effect
+source directly. The disconnected final-drain test exercises real notification
+lease rejection, retained terminal delivery and exclusion of invalid presentation.
+The first edit accidentally removed other snapshot fields, immediately restored
+following test failures. A second run passed 89 cases; one rewritten notification
+call omitted its required limit and was corrected before targeted revalidation.
+No green suite claim is made from that intermediate run.
+
+Production net -387 physical lines; no new framework, compatibility implementation
+or execution state. This is removal of an unused Voice delivery protocol, not
+unification of persistent Task/Work management. Final accounting and current
+boundary validation must be refreshed after the coherent batch closes.
+
+
+Final targeted validation after supplying the real notification API limit:
+14 passed in 30.30s (the corrected final-drain case, eight recovery cases and
+five real Host joint cases). The other 89 runtime cases passed before that test-only
+correction. Ruff and diff checks passed. Independent read-only review confirmed
+all unrelated snapshot fields, CR.close, notification/final-drain, presentation ACK
+and cancel/interrupt paths remain. No production consumer of the removed protocol
+was found; no external Python-consumer compatibility claim is made.
+
+Refreshed same-basis evidence: Voice 112438, Host 48370, SDK 33872; aggregate 194680,
+1000 below the initial 195680. The -387 here is real production deletion; removed
+protocol-only test lines are excluded. Native Task/Work management audit remains
+open; no overall completion percentage is inferred from these deletions.

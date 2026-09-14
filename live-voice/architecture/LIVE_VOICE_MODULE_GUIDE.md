@@ -40,6 +40,9 @@ flowchart TB
 由两份账本重复持有。保留语音轮次/播放事实，未将其混同正式 Task 状态。
 Gateway 合成授权直接使用 BatchSpeech 已有摘要构建器，签发与校验共享字段绑定。
 该变化收敛 M4+M5 与 Gateway 内部实现，不代表 M6+M8 已全面统一。
+进一步删除无产品消费者的 effect claim/ACK 队列和重放账本；实际输出仍经通知
+租约交付并由 PresentationAck 决定历史，关闭仍执行 CR.close 和通知 final-drain。
+CR 的播放停止/响应取消事实及 Harness 精确 round 取消均保留。
 
 ## 3. 每个模块怎样介绍
 

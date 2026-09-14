@@ -24,7 +24,6 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 )
 from jiuwenswarm.channels.live_voice.agent_conversation_runtime import (
     AgentConversationNotification,
-    AgentConversationNotificationLease,
     AgentConversationRuntime,
     AgentConversationRuntimeViolation,
     AgentConversationShutdownStatus,
@@ -1743,23 +1742,6 @@ async def test_synchronous_after_dispatch_failure_revokes_agent_before_first_tur
     )
 
 
-async def claim_and_ack_effects(
-    current: AgentConversationRuntime,
-    lease: AgentConversationNotificationLease,
-    claim_id: str,
-):
-    claim = await current.claim_conversation_effects(lease, claim_id=claim_id)
-    effect_ids = tuple(effect.effect_id for effect in claim.effects)
-    acknowledged = await current.acknowledge_conversation_effects(
-        lease,
-        claim_id=claim_id,
-        effect_ids=effect_ids,
-    )
-    assert acknowledged.accepted is True
-    assert acknowledged.replayed is False
-    return claim.effects
-
-
 def cancel_command(
     handle,
     selected: TurnCommit,
@@ -2501,7 +2483,7 @@ async def test_exact_cancel_rejects_wrong_bindings_and_ack_is_not_terminal() -> 
 
 
 @pytest.mark.asyncio
-async def test_effect_hook_preserves_four_cancel_scopes_and_interrupted_prefix() -> (
+async def test_cr_preserves_four_cancel_scopes_and_interrupted_prefix() -> (
     None
 ):
     terminal_release = asyncio.Event()
@@ -2521,7 +2503,7 @@ async def test_effect_hook_preserves_four_cancel_scopes_and_interrupted_prefix()
         consumer_id="effect-owner", connection_epoch=0
     )
 
-    render = await claim_and_ack_effects(current, lease, "claim-render")
+    render = await current._cr.claim_effects()
     assert [effect.effect_type for effect in render] == ["ui.render"]
     ack = PresentationAck(
         ref=handle.response_ref,
@@ -2536,9 +2518,7 @@ async def test_effect_hook_preserves_four_cancel_scopes_and_interrupted_prefix()
         "barge-playback", handle.response_ref, cancel_response=False
     )
     assert playback_only.applied is True
-    playback_effects = await claim_and_ack_effects(
-        current, lease, "claim-playback-stop"
-    )
+    playback_effects = await current._cr.claim_effects()
     assert [effect.effect_type for effect in playback_effects] == ["playback.stop"]
     assert current.snapshot().harness.cancel_effects == 0
 
@@ -2546,9 +2526,7 @@ async def test_effect_hook_preserves_four_cancel_scopes_and_interrupted_prefix()
         "barge-response", handle.response_ref, cancel_response=True
     )
     assert response_cancel.applied is True
-    response_effects = await claim_and_ack_effects(
-        current, lease, "claim-response-cancel"
-    )
+    response_effects = await current._cr.claim_effects()
     assert [effect.effect_type for effect in response_effects] == ["response.cancel"]
     assert current.snapshot().harness.cancel_effects == 0
 
@@ -2564,7 +2542,7 @@ async def test_effect_hook_preserves_four_cancel_scopes_and_interrupted_prefix()
     assert task_scope.accepted is False
     assert task_scope.reason == "WRONG_CANCEL_SCOPE"
     assert current.snapshot().harness.cancel_effects == 0
-    assert (await claim_and_ack_effects(current, lease, "claim-wrong-task-scope")) == ()
+    assert (await current._cr.claim_effects()) == ()
 
     exact_round = await current.close_interaction(
         cancel_command(handle, selected, command_id="round-cancel-exact")
@@ -2575,7 +2553,7 @@ async def test_effect_hook_preserves_four_cancel_scopes_and_interrupted_prefix()
         WorkProgressEventV2.from_dict(terminal.progress_event.payload).outcome.value
         == "cancelled"
     )
-    assert (await claim_and_ack_effects(current, lease, "claim-exact-round")) == ()
+    assert (await current._cr.claim_effects()) == ()
     snapshot = current.snapshot()
     assert snapshot.harness.cancel_effects == 1
     assert not any(
@@ -2916,7 +2894,7 @@ async def test_same_interaction_multi_turn_is_nonblocking_and_fences_late_output
     lease = current.attach_notification_consumer(
         consumer_id="multi-effect-owner", connection_epoch=0
     )
-    effects = await claim_and_ack_effects(current, lease, "claim-multi-effects")
+    effects = await current._cr.claim_effects()
     assert [effect.effect_type for effect in effects] == [
         "playback.stop",
         "ui.render",
@@ -3228,296 +3206,6 @@ async def test_no_consumer_lease_retains_critical_tail_without_blocking_close() 
 
 
 @pytest.mark.asyncio
-async def test_effect_claim_cancellation_replays_and_superseded_owner_loses_nothing() -> (
-    None
-):
-    terminal_release = asyncio.Event()
-    current = runtime(
-        LowerFormalAdapter(terminal_release=terminal_release),
-        RecordingHistoryWriter(),
-    )
-    selected = await prepare(current)
-    first_lease = current.attach_notification_consumer(
-        consumer_id="effect-connection", connection_epoch=0
-    )
-    handle = await dispatch(current, selected)
-
-    async def wait_for_enqueued_presentation() -> None:
-        while not current.snapshot().conversation.presentation.records:
-            await asyncio.sleep(0)
-
-    await asyncio.wait_for(wait_for_enqueued_presentation(), timeout=1)
-
-    original_claim = current._cr.claim_effects  # noqa: SLF001
-    entered = asyncio.Event()
-    release = asyncio.Event()
-
-    async def blocked_claim(*, limit: int | None = None):
-        entered.set()
-        await release.wait()
-        return await original_claim(limit=limit)
-
-    current._cr.claim_effects = blocked_claim  # type: ignore[method-assign]  # noqa: SLF001
-    cancelled = asyncio.create_task(
-        current.claim_conversation_effects(
-            first_lease, claim_id="claim-cancelled-waiter"
-        )
-    )
-    await asyncio.wait_for(entered.wait(), timeout=1)
-    cancelled.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await cancelled
-    release.set()
-
-    replay = await asyncio.wait_for(
-        current.claim_conversation_effects(
-            first_lease, claim_id="claim-cancelled-waiter"
-        ),
-        timeout=1,
-    )
-    assert replay.replayed is True
-    assert [effect.effect_type for effect in replay.effects] == ["ui.render"]
-    replay_ids = tuple(effect.effect_id for effect in replay.effects)
-    assert (
-        await current.acknowledge_conversation_effects(
-            first_lease,
-            claim_id=replay.claim_id,
-            effect_ids=replay_ids,
-        )
-    ).replayed is False
-    assert (
-        await current.acknowledge_conversation_effects(
-            first_lease,
-            claim_id=replay.claim_id,
-            effect_ids=replay_ids,
-        )
-    ).replayed is True
-
-    playback = await current.barge_in(
-        "barge-for-reconnect", handle.response_ref, cancel_response=False
-    )
-    assert playback.applied is True
-    entered.clear()
-    release.clear()
-    stale = asyncio.create_task(
-        current.claim_conversation_effects(first_lease, claim_id="claim-stale-owner")
-    )
-    await asyncio.wait_for(entered.wait(), timeout=1)
-    second_lease = current.attach_notification_consumer(
-        consumer_id="effect-connection", connection_epoch=1
-    )
-    release.set()
-    with pytest.raises(AgentConversationRuntimeViolation) as superseded:
-        await asyncio.wait_for(stale, timeout=1)
-    assert superseded.value.reason == "EFFECT_CLAIM_SUPERSEDED"
-
-    recovered = await asyncio.wait_for(
-        current.claim_conversation_effects(
-            second_lease, claim_id="claim-recovered-owner"
-        ),
-        timeout=1,
-    )
-    assert [effect.effect_type for effect in recovered.effects] == ["playback.stop"]
-    assert recovered.effects[0].effect_id in playback.effect_ids
-    assert (
-        await current.acknowledge_conversation_effects(
-            second_lease,
-            claim_id=recovered.claim_id,
-            effect_ids=tuple(effect.effect_id for effect in recovered.effects),
-        )
-    ).accepted is True
-
-    response_cancel = await current.barge_in(
-        "response-cancel-before-reconnect",
-        handle.response_ref,
-        cancel_response=True,
-    )
-    unacknowledged = await current.claim_conversation_effects(
-        second_lease, claim_id="claim-delivered-before-reconnect"
-    )
-    assert [effect.effect_type for effect in unacknowledged.effects] == [
-        "response.cancel"
-    ]
-    assert unacknowledged.effects[0].effect_id in response_cancel.effect_ids
-    third_lease = current.attach_notification_consumer(
-        consumer_id="effect-connection", connection_epoch=2
-    )
-    with pytest.raises(AgentConversationRuntimeViolation) as stale_ack:
-        await current.acknowledge_conversation_effects(
-            second_lease,
-            claim_id=unacknowledged.claim_id,
-            effect_ids=tuple(effect.effect_id for effect in unacknowledged.effects),
-        )
-    assert stale_ack.value.reason == "UNTRUSTED_NOTIFICATION_CONSUMER"
-    redelivered = await current.claim_conversation_effects(
-        third_lease, claim_id="claim-after-reconnect"
-    )
-    assert redelivered.effects == unacknowledged.effects
-    assert (
-        await current.acknowledge_conversation_effects(
-            third_lease,
-            claim_id=redelivered.claim_id,
-            effect_ids=tuple(effect.effect_id for effect in redelivered.effects),
-        )
-    ).accepted is True
-    terminal_release.set()
-    assert (await handle.completion).terminal_outcome.value == "completed"
-    assert (await current.close(timeout_seconds=1)).status is (
-        AgentConversationShutdownStatus.CLOSED
-    )
-
-
-@pytest.mark.asyncio
-async def test_reconnect_preserves_unacknowledged_effect_order_before_existing_backlog() -> (
-    None
-):
-    terminal_release = asyncio.Event()
-    current = runtime(
-        LowerFormalAdapter(terminal_release=terminal_release),
-        RecordingHistoryWriter(),
-    )
-    first_turn = await prepare(current)
-    first_lease = current.attach_notification_consumer(
-        consumer_id="ordered-effect-connection", connection_epoch=0
-    )
-    first_handle = await dispatch(current, first_turn)
-
-    async def first_presentation_is_enqueued() -> None:
-        while not any(
-            record.state.value == "enqueued"
-            for record in current.snapshot().conversation.presentation.records
-        ):
-            await asyncio.sleep(0)
-
-    await asyncio.wait_for(first_presentation_is_enqueued(), timeout=1)
-    interrupted = await current.barge_in(
-        "ordered-effect-barge",
-        first_handle.response_ref,
-        cancel_response=True,
-    )
-    assert interrupted.applied is True
-    claimed = await current.claim_conversation_effects(
-        first_lease,
-        claim_id="claim-ordered-prefix",
-        limit=2,
-    )
-    assert [effect.effect_type for effect in claimed.effects] == [
-        "playback.stop",
-        "response.cancel",
-    ]
-
-    second_turn = commit(
-        turn_id="turn-ordered-backlog",
-        commit_id="commit-ordered-backlog",
-        interaction_id="interaction-ordered-backlog",
-        text="retain a newer effect in the backlog",
-    )
-    await prepare(current, second_turn)
-    second_handle = await dispatch(
-        current,
-        second_turn,
-        request_id="request-ordered-backlog",
-        response_id="response-ordered-backlog",
-    )
-
-    async def second_presentation_is_enqueued() -> None:
-        while not any(
-            record.unit.ref == second_handle.response_ref
-            and record.state.value == "enqueued"
-            for record in current.snapshot().conversation.presentation.records
-        ):
-            await asyncio.sleep(0)
-
-    await asyncio.wait_for(second_presentation_is_enqueued(), timeout=1)
-    backlog_only = await current.claim_conversation_effects(
-        first_lease,
-        claim_id="claim-populate-newer-backlog",
-        limit=0,
-    )
-    assert backlog_only.effects == ()
-    assert current.snapshot().pending_conversation_effects == 1
-
-    second_lease = current.attach_notification_consumer(
-        consumer_id="ordered-effect-connection", connection_epoch=1
-    )
-    recovered = await current.claim_conversation_effects(
-        second_lease,
-        claim_id="claim-ordered-recovery",
-    )
-    assert [effect.effect_type for effect in recovered.effects] == [
-        "playback.stop",
-        "response.cancel",
-        "ui.render",
-    ]
-    assert [effect.seq for effect in recovered.effects] == sorted(
-        effect.seq for effect in recovered.effects
-    )
-    assert (
-        await current.acknowledge_conversation_effects(
-            second_lease,
-            claim_id=recovered.claim_id,
-            effect_ids=tuple(effect.effect_id for effect in recovered.effects),
-        )
-    ).accepted is True
-
-    terminal_release.set()
-    await asyncio.wait_for(first_handle.completion, timeout=1)
-    await asyncio.wait_for(second_handle.completion, timeout=1)
-    assert (await current.close(timeout_seconds=1)).status is (
-        AgentConversationShutdownStatus.CLOSED
-    )
-
-
-@pytest.mark.asyncio
-async def test_final_drain_delivers_pending_stop_and_accepts_exact_effect_ack() -> None:
-    terminal_release = asyncio.Event()
-    current = runtime(
-        LowerFormalAdapter(terminal_release=terminal_release),
-        RecordingHistoryWriter(),
-    )
-    selected = await prepare(current)
-    lease = current.attach_notification_consumer(
-        consumer_id="final-effect-drain", connection_epoch=0
-    )
-    handle = await dispatch(current, selected)
-    stop = await current.barge_in(
-        "barge-before-close", handle.response_ref, cancel_response=False
-    )
-    assert stop.applied is True
-    terminal_release.set()
-    assert (await handle.completion).terminal_outcome.value == "completed"
-
-    closed = await current.close(timeout_seconds=1)
-    assert closed.status is AgentConversationShutdownStatus.CLOSED
-    drain_lease = closed.final_drain_lease
-    assert drain_lease is not None
-    assert drain_lease is not lease
-    before_claim = current.snapshot()
-    assert before_claim.pending_conversation_effects == 1
-    assert before_claim.active_notification_consumer is None
-
-    claim = await current.claim_conversation_effects(
-        drain_lease, claim_id="claim-final-stop"
-    )
-    assert [effect.effect_type for effect in claim.effects] == ["playback.stop"]
-    assert claim.effects[0].effect_id in stop.effect_ids
-    acknowledged = await current.acknowledge_conversation_effects(
-        drain_lease,
-        claim_id=claim.claim_id,
-        effect_ids=tuple(effect.effect_id for effect in claim.effects),
-    )
-    assert acknowledged.accepted is True
-    assert acknowledged.replayed is False
-    replayed = await current.claim_conversation_effects(
-        drain_lease, claim_id="claim-final-stop"
-    )
-    assert replayed.effects == claim.effects
-    assert replayed.replayed is True
-    assert replayed.acknowledged is True
-    assert current.snapshot().pending_conversation_effects == 0
-
-
-@pytest.mark.asyncio
 async def test_disconnected_transport_uses_distinct_exact_final_drain_capability() -> (
     None
 ):
@@ -3551,10 +3239,6 @@ async def test_disconnected_transport_uses_distinct_exact_final_drain_capability
     assert (
         after_rejections.queued_notifications == detached_snapshot.queued_notifications
     )
-    assert after_rejections.pending_conversation_effects == (
-        detached_snapshot.pending_conversation_effects
-    )
-    assert after_rejections.unacknowledged_effect_claims == 0
 
     stop = await current.barge_in(
         "barge-after-disconnect",
@@ -3574,123 +3258,16 @@ async def test_disconnected_transport_uses_distinct_exact_final_drain_capability
 
     forged_drain = replace(drain_lease)
     for stale_lease in (transport_lease, forged_drain):
-        with pytest.raises(AgentConversationRuntimeViolation) as stale_claim:
-            await current.claim_conversation_effects(
-                stale_lease,
-                claim_id="claim-stale-final-drain",
-            )
-        assert stale_claim.value.reason == "UNTRUSTED_NOTIFICATION_CONSUMER"
-        with pytest.raises(AgentConversationRuntimeViolation) as stale_ack:
-            await current.acknowledge_conversation_effects(
-                stale_lease,
-                claim_id="claim-stale-final-drain",
-                effect_ids=(),
-            )
-        assert stale_ack.value.reason == "UNTRUSTED_NOTIFICATION_CONSUMER"
-    after_stale_attempts = current.snapshot()
-    assert after_stale_attempts.pending_conversation_effects == (
-        before_stale_attempts.pending_conversation_effects
-    )
-    assert after_stale_attempts.unacknowledged_effect_claims == 0
-
-    claim = await current.claim_conversation_effects(
-        drain_lease,
-        claim_id="claim-disconnected-final-stop",
-    )
-    assert [effect.effect_type for effect in claim.effects] == ["playback.stop"]
-    assert claim.effects[0].effect_id in stop.effect_ids
-    acknowledged = await current.acknowledge_conversation_effects(
-        drain_lease,
-        claim_id=claim.claim_id,
-        effect_ids=tuple(effect.effect_id for effect in claim.effects),
-    )
-    assert acknowledged.accepted is True
-    assert current.snapshot().pending_conversation_effects == 0
-
-
-@pytest.mark.asyncio
-async def test_effect_delivery_inputs_are_canonical_bounded_and_zero_effect() -> None:
-    terminal_release = asyncio.Event()
-    current = runtime(
-        LowerFormalAdapter(terminal_release=terminal_release),
-        RecordingHistoryWriter(),
-        max_requests=1,
-    )
-    selected = await prepare(current)
-    lease = current.attach_notification_consumer(
-        consumer_id="bounded-effect-delivery", connection_epoch=0
-    )
-    handle = await dispatch(current, selected)
-
-    async def presentation_is_enqueued() -> None:
-        while not any(
-            record.state.value == "enqueued"
-            for record in current.snapshot().conversation.presentation.records
-        ):
-            await asyncio.sleep(0)
-
-    await asyncio.wait_for(presentation_is_enqueued(), timeout=1)
-    before_invalid_limits = current.snapshot()
-    for invalid_limit in (True, -1, 4, 10**100):
-        with pytest.raises(AgentConversationRuntimeViolation) as invalid:
-            await current.claim_conversation_effects(
-                lease,
-                claim_id="claim-invalid-limit",
-                limit=invalid_limit,
-            )
-        assert invalid.value.reason == "INVALID_EFFECT_LIMIT"
-        after_invalid = current.snapshot()
-        assert after_invalid.conversation.effects == (
-            before_invalid_limits.conversation.effects
-        )
-        assert after_invalid.pending_conversation_effects == (
-            before_invalid_limits.pending_conversation_effects
-        )
-        assert after_invalid.unacknowledged_effect_claims == 0
-
-    claim = await current.claim_conversation_effects(
-        lease,
-        claim_id="claim-bounded-effect-ack",
-    )
-    exact_ids = tuple(effect.effect_id for effect in claim.effects)
-    assert len(exact_ids) == 1
-    before_invalid_acks = current.snapshot()
-    invalid_ack_ids: tuple[object, ...] = (
-        [exact_ids[0]],
-        (exact_ids[0], exact_ids[0]),
-        (" leading-space",),
-        ("x" * 257,),
-        ("\U0001f600" * 129,),
-        ("\ud800",),
-        ("one", "two", "three", "four"),
-    )
-    for invalid_ids in invalid_ack_ids:
-        with pytest.raises(AgentConversationRuntimeViolation) as invalid:
-            await current.acknowledge_conversation_effects(
-                lease,
-                claim_id=claim.claim_id,
-                effect_ids=invalid_ids,  # type: ignore[arg-type]
-            )
-        assert invalid.value.reason == "INVALID_EFFECT_ACK"
-        after_invalid = current.snapshot()
-        assert after_invalid.pending_conversation_effects == (
-            before_invalid_acks.pending_conversation_effects
-        )
-        assert after_invalid.unacknowledged_effect_claims == 1
-        assert current._effect_claims[claim.claim_id].acknowledged is False
-
-    accepted = await current.acknowledge_conversation_effects(
-        lease,
-        claim_id=claim.claim_id,
-        effect_ids=exact_ids,
-    )
-    assert accepted.accepted is True
-    assert accepted.replayed is False
-    terminal_release.set()
-    await asyncio.wait_for(handle.completion, timeout=1)
-    assert (await current.close(timeout_seconds=1)).status is (
-        AgentConversationShutdownStatus.CLOSED
-    )
+        with pytest.raises(AgentConversationRuntimeViolation) as stale_read:
+            await current.drain_notifications_for(stale_lease, limit=4)
+        assert stale_read.value.reason == "UNTRUSTED_NOTIFICATION_CONSUMER"
+    assert current.snapshot() == before_stale_attempts
+    drained = await current.drain_notifications_for(drain_lease, limit=4)
+    assert any(item.progress_event is not None and
+        WorkProgressEventV2.from_dict(item.progress_event.payload).state.value == "terminal"
+        for item in drained)
+    assert not any(item.presentation_unit is not None for item in drained)
+    assert await current.drain_notifications_for(drain_lease, limit=4) == ()
 
 
 @pytest.mark.asyncio
