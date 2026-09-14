@@ -41,7 +41,7 @@ async def _matching_presentation(registry, response, prefix):
 @pytest.mark.parametrize("operation,rebuild,ack_before_rebuild", [
     (operation, rebuild, False)
     for operation in ("create", "status", "clarification") for rebuild in (False, True)
-] + [("clarification", True, True)])
+] + [(operation, True, True) for operation in ("create", "status", "clarification")])
 async def test_created_task_survives_unified_completion_loss_without_redispatch(
     semantic_runtime, monkeypatch, rebuild, operation, ack_before_rebuild, tmp_path,  # noqa: F811
 ):
@@ -96,22 +96,25 @@ async def test_created_task_survives_unified_completion_loss_without_redispatch(
     calls = len(s.calls), s.manager.agent.calls
     monkeypatch.setattr(journal, "complete", complete)
     original_unit = None
-    if ack_before_rebuild:
+    if ack_before_rebuild or (rebuild and operation != "clarification"):
         notice = await _matching_presentation(first, lost["response"], "original-poll")
         original_unit = notice["presentation_unit"]
         response = notice["response"]
-        original_ack_params = p2_params(response_id=response["response_id"],
-                response_generation=response["response_generation"], surface=original_unit["surface"],
-                unit_id=original_unit["unit_id"], contiguous_cursor=original_unit["seq"],
-                presented_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"))
-        ack = await first.handle_p2_presentation_ack(params=original_ack_params,
-            request_id="original-ack", session_id="session-1")
-        assert ack.ok, ack.payload
-        original_history = load_history_records("session-1")
-        assert sum(row["role"] == "assistant" and row["request_id"] == response["response_id"]
-            for row in original_history) == 1
-        assert sum(row["role"] == "user" and row["request_id"] == params["commit_id"]
-            for row in original_history) == 1
+        if ack_before_rebuild:
+            original_ack_params = p2_params(response_id=response["response_id"],
+                    response_generation=response["response_generation"], surface=original_unit["surface"],
+                    unit_id=original_unit["unit_id"], contiguous_cursor=original_unit["seq"],
+                    presented_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"))
+            ack = await first.handle_p2_presentation_ack(params=original_ack_params,
+                request_id="original-ack", session_id="session-1")
+            assert ack.ok, ack.payload
+            original_history = load_history_records("session-1")
+            assert sum(row["role"] == "assistant" and row["request_id"] == response["response_id"]
+                for row in original_history) == 1
+            assert sum(row["role"] == "user" and row["request_id"] == params["commit_id"]
+                for row in original_history) == 1
+    # Capture the no-replay baseline after any original output has actually arrived.
+    calls = len(s.calls), s.manager.agent.calls
     manager = s.manager
     active = first
     if rebuild:
@@ -140,6 +143,10 @@ async def test_created_task_survives_unified_completion_loss_without_redispatch(
         recovered = await active.handle_unified_submit(params=params, request_id="retry",
             session_id="session-1", channel_id="web")
         assert recovered.ok, recovered.payload
+        assert not active._unified_operations
+        assert params["commit_id"] not in active._critical_input_commit_generations
+        if ack_before_rebuild:
+            assert load_history_records("session-1") == original_history
         assert recovered.payload["result"].get("task_id") == lost["task_id"]
         assert recovered.payload["result"]["response"] == lost["response"]
         with sqlite3.connect(journal.database_path) as connection:
@@ -152,40 +159,46 @@ async def test_created_task_survives_unified_completion_loss_without_redispatch(
         assert s.harness.executor.dispatches == []
         task = core.store.get_task(lost["task_id"] or task_id, _scope())
         assert task.spec.name == "Inventory recovery"
-        if operation == "clarification":
-            text = "Please specify the inventory section you want to discuss."
+        if operation in {"create", "status", "clarification"}:
+            text = ("Please specify the inventory section you want to discuss."
+                if operation == "clarification" else s.manager.agent.final)
             assert sum(row["role"] == "assistant" and row["content"] == text
+                and row["request_id"] == lost["response"]["response_id"]
                 for row in load_history_records("session-1")) == int(ack_before_rebuild)
-            notice = await _matching_presentation(active, lost["response"], "recovered-poll")
-            unit = notice["presentation_unit"]
-            if ack_before_rebuild:
-                assert unit["unit_id"] == original_unit["unit_id"]
-            response = notice["response"]
-            ack_params = p2_params(response_id=response["response_id"],
-                response_generation=response["response_generation"], surface=unit["surface"],
-                unit_id=unit["unit_id"], contiguous_cursor=unit["seq"],
-                presented_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"))
-            if ack_before_rebuild:
-                ack_params = original_ack_params
-            before = load_history_records("session-1")
-            wrong = await active.handle_p2_presentation_ack(
-                params={**ack_params, "response_generation": response["response_generation"] + 1},
-                request_id="wrong-recovered-ack", session_id="session-1")
-            assert not wrong.ok and load_history_records("session-1") == before
-            ack = await active.handle_p2_presentation_ack(params=ack_params,
-                request_id="recovered-ack", session_id="session-1")
-            assert ack.ok, ack.payload
-            assert not ack.payload["result"]["history_pending"]
-            after = load_history_records("session-1")
-            assert sum(row["role"] == "assistant" and row["content"] == text for row in after) == 1
-            replay_ack = await active.handle_p2_presentation_ack(params=ack_params,
-                request_id="recovered-ack", session_id="session-1")
-            assert replay_ack.ok and load_history_records("session-1") == after
-            assert sum(row["role"] == "user" and row["request_id"] == params["commit_id"]
-                for row in after) == 1
-            if ack_before_rebuild:
-                assert after == original_history
-            assert core.store.counts() == counts
+            # Restart preserves business acceptance and acknowledged history, not
+            # an obligation to redeliver an ephemeral Agent answer.
+            if operation == "clarification" or not rebuild:
+                notice = await _matching_presentation(active, lost["response"], "recovered-poll")
+                unit = notice["presentation_unit"]
+                if ack_before_rebuild:
+                    assert unit["unit_id"] == original_unit["unit_id"]
+                response = notice["response"]
+                ack_params = p2_params(response_id=response["response_id"],
+                    response_generation=response["response_generation"], surface=unit["surface"],
+                    unit_id=unit["unit_id"], contiguous_cursor=unit["seq"],
+                    presented_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"))
+                if ack_before_rebuild:
+                    ack_params = original_ack_params
+                before = load_history_records("session-1")
+                wrong = await active.handle_p2_presentation_ack(
+                    params={**ack_params, "response_generation": response["response_generation"] + 1},
+                    request_id="wrong-recovered-ack", session_id="session-1")
+                assert not wrong.ok and load_history_records("session-1") == before
+                ack = await active.handle_p2_presentation_ack(params=ack_params,
+                    request_id="recovered-ack", session_id="session-1")
+                assert ack.ok, ack.payload
+                assert not ack.payload["result"]["history_pending"]
+                after = load_history_records("session-1")
+                assert sum(row["role"] == "assistant" and row["content"] == text
+                    and row["request_id"] == lost["response"]["response_id"] for row in after) == 1
+                replay_ack = await active.handle_p2_presentation_ack(params=ack_params,
+                    request_id="recovered-ack", session_id="session-1")
+                assert replay_ack.ok and load_history_records("session-1") == after
+                assert sum(row["role"] == "user" and row["request_id"] == params["commit_id"]
+                    for row in after) == 1
+                if ack_before_rebuild:
+                    assert after == original_history
+                assert core.store.counts() == counts
         await core.drain_outbox()
         assert s.harness.executor.dispatches == [task.attempt_id]
         assert core.store.counts()["tasks"] == 1

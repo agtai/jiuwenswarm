@@ -1746,6 +1746,13 @@ generation ACK cannot mutate history. Reconstruction is not full OS crash eviden
 
 #### Reproduced gap and scope decision (2026-09-14)
 
+> Superseded requirement interpretation: the user subsequently accepted D-128.
+> Missing ephemeral answer redelivery is not a required product defect or a
+> blocker for integration. The observations below remain historical test evidence;
+> the proposed storage enhancement is not being implemented. Task/history safety
+> remains mandatory. See the D-128 recovery correction at the end of this audit.
+
+
 The Tier 1 assumption above was disproved. The expanded real-SQLite test first
 reported 4 failed / 6 passed (82.44 s): create/status presentation was absent after
 Registry/runtime reconstruction, with or without the original ACK. A refined
@@ -2020,3 +2027,26 @@ frozen stages. Domain transaction/UNKNOWN/physical-cleanup and played-ACK facts
 still have separate semantic reasons. No blanket claim that all Controller/Team
 management is unified is made. P2 presentation persistence remains the outstanding
 user scope decision; this review does not expand physical product acceptance.
+
+#### D-128 recovery correction: unsupported redelivery oracle removed
+
+The user explicitly permits removing the requirement to recover the original
+ephemeral P2 Agent answer and continuing integration. The earlier blocking
+interpretation was mistaken: task recovery does not imply automatic answer
+redelivery. No answer persistence or latency/storage change is implemented.
+
+Two obsolete Demo-fixture tests are removed. The real recovery owner keeps ten
+cases, including acknowledged create/status histories across reconstruction.
+Independent review found two retained assertions initially too weak: full saved
+history equality and input operation/generation cleanup. Both are now explicit.
+The final ten cases pass (19.25s); no Task/Agent redispatch, no fabricated history,
+and exactly one eventual outbox dispatch remain mandatory. Same-runtime answer
+presentation and existing durable clarification ACK recovery remain tested.
+Affected discovery collects230 cases; this is not a230-pass claim.
+[Exact source, logs, review and accounting](../evidence/DEEP_RECOVERY_SCOPE_CORRECTION_20260914.json).
+
+The previous P2 storage decision is withdrawn as an integration blocker. This
+correction does not claim all old answers are recoverable or that current service
+playback was stuck. No current service restart, deployment or remote update was
+performed. Production totals freshly rechecked remain194456,1224 below the original
+audit snapshot; removed test lines receive no production reduction credit.

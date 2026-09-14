@@ -1,0 +1,34 @@
+{
+  "host_parent": "e5fcd5367655b2087068ff1bac396542e170509b",
+  "sdk_head": "7c81d886d15b87a5ba9b2d899cbd5259fb7d5e5e",
+  "authority": "User explicitly permits removing ephemeral-answer redelivery test requirement; D-128 records that decision. No persistence enhancement.",
+  "source_sha256": {
+    "tests/unit_tests/live_voice/test_semantic_input_recovery.py": "5a18dd83f386c59c2df590853b55b9746132c104ca6a5c3ee7b645b66c7203d1",
+    "tests/unit_tests/live_voice/test_product_composition_registry.py": "6d913184c9d63152057c2320fd05a34962766f4b7eccc59e635b4267d4e0ef59"
+  },
+  "checks": {
+    "recovery": "10 passed in 19.25s after full acknowledged-history equality and admission cleanup assertions; earlier 10 passed in 15.17s overlaps",
+    "discovery": "230 collected in 14.44s across the two affected modules, not a passing-suite claim",
+    "review": "Independent read-only review found two missing retained assertions; both added before final passing run.",
+    "native_production_source": "Seven production files in DEEP_FORMAL_NATIVE_CHECKS_20260914.json still match recorded SHA-256; no runtime code changed in this correction.",
+    "counts": "Fresh code_ownership_counts.py final-d128: Voice112101, Host48048, SDK34307; combined194456, unchanged.",
+    "limits": "Real SQLite/Registry reconstruction and controlled Agent. Not an OS restart, live playback queue inspection or physical audio test."
+  },
+  "removed_tests": [
+    "test_unified_presentation_crash_window_recovers_without_duplicate_effect",
+    "test_unified_presentation_crash_rebuilds_runtime_with_same_effect_identity"
+  ],
+  "preserved": [
+    "Durable accepted Task and response identity",
+    "Input journal pending to completed and admission cleanup",
+    "No semantic/Agent redispatch and one eventual outbox dispatch",
+    "Complete acknowledged history unchanged after reconstruction",
+    "No unacknowledged assistant history fabricated",
+    "Existing same-runtime presentation and persisted clarification/ACK recovery"
+  ],
+  "logs_sha256": {
+    "livevoice-recovery-scope-correction.log": "cf04c2f18df1a3dd7c68e3aa1ce982e0798d86f0f8af1fa60c49e8d9bed62d0a",
+    "livevoice-recovery-scope-final.log": "81b114dfab48e4f2411e1f2ef4229a9efe9aaba598be9046b1a91d76d38df5b2",
+    "livevoice-recovery-scope-discovery.log": "d3d6999dfeb1a8b3a32fde322b9e53d17dcfc979d677abd9b6e29921f3768596"
+  }
+}

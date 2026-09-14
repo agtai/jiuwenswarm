@@ -2265,3 +2265,20 @@
   Do not downgrade while deferred work remains. Offline SQLite/Git/file and
   serialized gateway tests establish those local seams, not Provider/model/audio
   acceptance. WebSocket and model/VAD settings are outside this change.
+
+
+## D-128 Recovery acceptance does not require replaying ephemeral Agent answers
+
+- 2026-09-14: the user explicitly permits removing the test requirement that
+  a reconstructed P2 runtime must redeliver the original Agent answer, and asks
+  to continue integration. That test expectation is not an independently accepted
+  product requirement. Do not add answer persistence just to satisfy it.
+- Preserve durable Task/Work acceptance, queryable results, no duplicate execution,
+  scope/stale-request fences and truthful history. Previously acknowledged history
+  stays saved; reconstruction must not invent acknowledgement or add unheard text.
+- Existing same-runtime presentation and directly persisted clarification recovery
+  remain supported. No runtime behavior, storage schema, retention, media latency
+  or Native Realtime policy changes are authorized by this test correction.
+- Remove only the unsupported redelivery oracle; retain/migrate its necessary
+  business and history assertions using the current real-Store recovery boundary.
+  The previous proposed P2 persistence work is not a blocker for this integration.

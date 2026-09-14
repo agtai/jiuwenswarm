@@ -83,8 +83,9 @@ Hermes 另有 Chained：客户端录音 → STT → 普通 Agent turn → 流式
 | 历史与结果（归各模块，不另画框） | Task/Work 完成事实、聊天文字、音频呈现分别保存；已听记录依据播放回执 | 普通 Agent 历史、客户端 transcript/commentary 游标；未见对应 Host 音频 ACK 账本 | TaskFullDuplexRuntime 先写 UI/历史再按连接播放；JoyAI commitAndSpeak 先提交文字再决定 TTS | 都有历史，但“生成/展示”不是“已经播放”。LiveVoice 的 ACK 也只证明客户端报告播放进度，不证明人类确实听懂 |
 
 本地恢复证据边界：Task/Work 的持久结果、接受回执恢复和原答复展示恢复须分别判断。
-当前 P2 路径在重建后丢失已生成的 Agent 展示内容；该缺口尚未修复，不能以本地
-checkpoint/ACK 机制概括为全部答复可恢复，也不能据此推断 Native 或外部方案行为。
+当前 P2 路径不持久保存全部 Agent 展示内容。用户已确认原答复重投不是本轮必需保证，
+不为该测试新增存储；任务/结果恢复与真实历史保障仍保留。不能以本地 checkpoint/ACK
+概括为全部答复可恢复，也不能据此推断 Native 或外部方案行为。
 参见[当前审计](../reviews/DEEP_INTEGRATION_20260913.md#reproduced-gap-and-scope-decision-2026-09-14)。
 
 ## 4. 每个关键差异怎样解释
