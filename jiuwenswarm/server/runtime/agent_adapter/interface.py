@@ -1455,16 +1455,37 @@ class JiuWenSwarm:
             is_stream=True,
         )
         inputs, _memory_mode, _raw_query = self._build_inputs(background_request)
-        await prepare_session(background_request.session_id)
         checkpoint_rail = None
+        child = instance = None
         from contextlib import ExitStack
 
         checkpoint_scope = ExitStack()
         checkpoint = None
+        prepared = False
         try:
             from openjiuwen.core.application.tasks.execution_checkpoint import current_background_task_checkpoint
 
             checkpoint = current_background_task_checkpoint(background_request.session_id)
+            if checkpoint is not None:
+                from openjiuwen.core.application.tasks.execution_checkpoint import TaskCheckpointRail, file_effect_plan_tool
+                from openjiuwen.core.single_agent.agent_callback_manager import scoped_agent_rail
+                from openjiuwen.core.single_agent.rail.base import AgentCallbackEvent
+
+                # Preparation starts the Harness supervisor. Its descendants
+                # must inherit this scope, not the caller's later context.
+                # Bind the exact root before submitting any task input.
+                task_rail = TaskCheckpointRail(
+                    checkpoint, root_agent=None,
+                    binding_is_current=lambda: (
+                        child is not None and checkpoint_rail is not None
+                        and child._stream_event_rail is checkpoint_rail and child._instance is instance
+                    ),
+                    session_identity=lambda ctx: checkpoint_rail._resolve_sid(ctx, ctx.session),
+                )
+                checkpoint_scope.enter_context(scoped_agent_rail(
+                    task_rail, before_events=frozenset({AgentCallbackEvent.BEFORE_TOOL_CALL})))
+            await prepare_session(background_request.session_id)
+            prepared = True
             if checkpoint is not None:
                 child = adapter._get_cached_session_adapter(background_request.session_id)
                 checkpoint_rail = getattr(child, "_stream_event_rail", None)
@@ -1472,18 +1493,7 @@ class JiuWenSwarm:
                 root_agent = getattr(instance, "_react_agent", None)
                 if checkpoint_rail is None or root_agent is None:
                     raise RuntimeError("BACKGROUND_TASK_CHECKPOINT_UNAVAILABLE")
-
-                from openjiuwen.core.application.tasks.execution_checkpoint import TaskCheckpointRail, file_effect_plan_tool
-                from openjiuwen.core.single_agent.agent_callback_manager import scoped_agent_rail
-                from openjiuwen.core.single_agent.rail.base import AgentCallbackEvent
-
-                checkpoint_scope.enter_context(scoped_agent_rail(TaskCheckpointRail(
-                    checkpoint, root_agent=root_agent,
-                    binding_is_current=lambda: (
-                        child._stream_event_rail is checkpoint_rail and child._instance is instance
-                    ),
-                    session_identity=lambda ctx: checkpoint_rail._resolve_sid(ctx, ctx.session),
-                ), before_events=frozenset({AgentCallbackEvent.BEFORE_TOOL_CALL})))
+                task_rail.root_agent = root_agent
                 if checkpoint.file_plan is not None:
                     plan_tool = file_effect_plan_tool()
                     instance.ability_manager.add_ability(plan_tool.card, plan_tool)
@@ -1504,7 +1514,7 @@ class JiuWenSwarm:
         finally:
             checkpoint_scope.close()
             cleanup_session = getattr(adapter, "cleanup_session_adapter", None)
-            if callable(cleanup_session):
+            if prepared and callable(cleanup_session):
                 await cleanup_session(background_request.session_id)
 
     def _formal_session_rail(self, session_id: str) -> Any | None:
