@@ -870,3 +870,51 @@ pending operation/id/version. Real confirmation owner/forwarder already exist;
 the current mutation gate makes their issuer unavailable. Both revised disabled
 cases pass again (**2 passed, 103 deselected in 8.73s**). Scoped Ruff/diff checks
 pass. This closes the review finding without changing production semantics.
+
+### Failure receipt and actual Host history (2026-09-14)
+
+Tier 1 test-only continuation: the real P3-off cases now use the existing
+SessionFormalHistoryWriter and an isolated temporary Host session-history root.
+The controlled tool-disabled receipt Agent returns an explicit no-task-started
+message. Before the actual presentation-unit ACK, that assistant message is
+absent from Host history; after ACK exactly one matching row exists. Task-store
+counts remain unchanged and no executor dispatch occurs. The pending-before-off
+case also acknowledges its earlier proposal before disabling the gates.
+
+An initial assertion against semantic continuity history failed. That table is
+not the Host transcript and was not substituted for the requested history
+boundary. The final check reads real Session History files, preserving its real
+idempotent writer. **2 passed, 103 deselected in 8.79s**. This uses controlled
+Agent output and protocol presentation ACK, not real playback, microphone or
+Provider evidence. The separate business-permission-denial scenario remains
+open; no new policy or production change is made.
+
+### Business permission revocation, feedback and continuation (2026-09-14)
+
+The same Tier 1 real-composition test now includes a third case: after presenting
+a real pending create confirmation, remove only task.create from the existing
+authenticator principal's allowed operations. Keep flags, owner/forwarder,
+project scope and agent.chat permission intact. The strict model receives the
+same pending id/version and returns its confirmation; real authentication/
+authorization yields FORMAL_TASK_AUTHORIZATION_DENIED in the exact task.create
+receipt. No outer route or handler error is stubbed.
+
+Assertions retain zero Task/dispatch/cancel/adjustment, exact no-effect replay,
+one tool-disabled receipt Agent, real temporary Session History absent before
+ACK and present exactly once after ACK. A following ordinary dialogue is
+accepted and reaches the Agent without creating a Task. Its tools-enabled flag
+is only dispatch configuration evidence, not a real tool execution claim.
+The former read_current_background_task-based denial/spoken-ACK test is removed
+after this reachable replacement passes. The controlled reply text and protocol
+ACK do not establish Provider wording, physical sound or user acceptance.
+
+Final selected group: three rejection modes plus enabled typed create,
+semantic denial and exception privacy, **6 passed, 335 deselected in 11.62s**.
+Production and production accounting are unchanged. The earlier historical
+failure manifest remains immutable; no aggregate all-green claim is made.
+
+Independent read-only review found no remaining blocker and confirmed the
+controlled-expression/physical-playback boundary. The receipt reason is also
+checked as an exact JSON field; the three affected cases pass again (**3 passed,
+103 deselected in 9.39s**). Scoped Ruff/diff checks pass. "Absent before ACK"
+refers to that denial assistant record, not other user/proposal history.

@@ -167,8 +167,13 @@ The obsolete P3-off fixture is now replaced by real composition/SQLite/
 confirmation checks: both a new request and a pending confirmation fail to
 create or dispatch after P3 is disabled, and replay adds no model/Agent effect.
 The paired enabled-create positive also passes. Current semantic-authority
-denial and unknown-exception privacy checks pass; the older business-denial
-spoken-ACK scenario remains open. No aggregate historical-suite pass is claimed.
+denial and unknown-exception privacy checks pass. Real principal task.create
+revocation after a pending confirmation now produces a tool-disabled failure
+receipt with zero Task execution; protocol ACK writes the message once through
+the actual Host history writer, and ordinary dialogue can continue. This replaces
+the old business-denial fixture's unreachable error hook, with controlled Agent
+output/ACK rather than physical playback evidence. No aggregate historical-suite
+pass is claimed.
 Module diagrams retain M4+M5 and M7+M9; accounting separates actual deletion,
 retained/migrated code and native-file additions. Earlier ownership extraction
 is recorded in [the preceding packet](reviews/TASK_WORK_UNIFICATION_20260913.md),

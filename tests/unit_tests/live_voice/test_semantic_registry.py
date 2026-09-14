@@ -1215,27 +1215,44 @@ def typed_final(stem, text):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("pending_before_disable", [False, True])
-async def test_unified_p3_off_with_real_confirmation_has_zero_task_effects(
-    semantic_runtime, pending_before_disable,
+@pytest.mark.parametrize("denial,pending_before_disable", [("flags", False), ("flags", True), ("permission", True)])
+async def test_unified_create_denial_with_real_confirmation_has_zero_task_effects(
+    semantic_runtime, denial, pending_before_disable, tmp_path, monkeypatch,
 ):
-    """An old confirmation cannot bypass current flags; receipt Agent is tool-free."""
+    """Old confirmation cannot bypass current flags/grants; receipt is tool-free."""
     s = semantic_runtime
+    from jiuwenswarm.channels.live_voice.formal_history_writer import SessionFormalHistoryWriter
+    from jiuwenswarm.server.runtime.session.session_history import load_history_records
+    monkeypatch.setattr("jiuwenswarm.server.runtime.session.session_history.get_agent_sessions_dir",
+        lambda: tmp_path / "session-history")
     core = s.harness.composition._core
     s.program = lambda data: model_output(data, operation="task.create",
         arguments={"name": "Inventory report", "instruction": "Read inventory and save report.md."},
         reference=next(iter(data["context"]["pending"]), None))
     assert (await s.registry.handle_p2_activate(params=p2_params(), request_id="off-activate",
         session_id="session-1", channel_id="web")).ok
+    route = s.registry._p2_routes[("session-1", p2_params()["interaction_id"])]
+    route.activation_lease._runtime._history_writer = SessionFormalHistoryWriter()
+    sequence = 0
     if pending_before_disable:
         proposed = await s.registry.handle_unified_submit(
             params=typed_final("before-off", "Prepare the inventory report."),
             request_id="before-off", session_id="session-1", channel_id="web")
         assert proposed.ok, proposed.payload
-        await present_next(s, 0)
+        sequence = await present_next(s, sequence)
         pending = await s.registry._semantic_continuity.pending(_scope())
         assert len(pending) == 1 and pending[0]["operation"] == "task.create"
-    s.registry._settings = replace(s.registry._settings, p3_text_enabled=False, p3_mutation_enabled=False)
+    reason = "P3_CONFIRMATION_ISSUER_UNAVAILABLE"
+    if denial == "flags":
+        s.registry._settings = replace(s.registry._settings, p3_text_enabled=False, p3_mutation_enabled=False)
+    else:
+        authenticator = s.harness.composition._authenticator
+        principal = authenticator._principal
+        monkeypatch.setattr(authenticator, "_principal", replace(principal,
+            allowed_operations=principal.allowed_operations - {"task.create"}))
+        reason = "FORMAL_TASK_AUTHORIZATION_DENIED"
+    failure_text = "Task creation is unavailable; no background task was started."
+    s.manager.agent.final = failure_text
     counts = core.store.counts()
     executions = len(s.manager.agent.executions)
     model_calls = len(s.calls)
@@ -1254,15 +1271,32 @@ async def test_unified_p3_off_with_real_confirmation_has_zero_task_effects(
     execution = s.manager.agent.executions[-1]
     assert execution.allow_tools is False
     receipts = [json.loads(entry.content) for entry in execution.context.entries
-        if "P3_CONFIRMATION_ISSUER_UNAVAILABLE" in entry.content]
+        if reason in entry.content]
     assert len(receipts) == 1, [entry.content for entry in execution.context.entries]
     assert receipts[0]["ok"] is False and receipts[0]["operation"] == "task.create"
+    assert receipts[0]["reason"] == reason
     calls_after = len(s.calls), len(s.manager.agent.executions)
     replay = await s.registry.handle_unified_submit(params=params, request_id="after-off",
         session_id="session-1", channel_id="web")
     assert replay.payload == result.payload
     assert core.store.counts() == counts
     assert (len(s.calls), len(s.manager.agent.executions)) == calls_after
+    history = load_history_records("session-1")
+    assert not any(row["role"] == "assistant" and row["content"] == failure_text for row in history)
+    await present_next(s, sequence)
+    history = load_history_records("session-1")
+    assert sum(row["role"] == "assistant" and row["content"] == failure_text for row in history) == 1, history
+    assert core.store.counts() == counts
+    assert s.harness.executor.dispatches == []
+    if denial == "permission":
+        s.program = lambda data: model_output(data)
+        continued = await s.registry.handle_unified_submit(
+            params=typed_final("after-denial", "Explain what an inventory report means."),
+            request_id="after-denial", session_id="session-1", channel_id="web")
+        assert continued.ok, continued.payload
+        await asyncio.wait_for(s.manager.agent.wait_for_calls(calls_after[1] + 1), 2)
+        assert s.manager.agent.executions[-1].allow_tools is True
+        assert core.store.counts() == counts
 
 
 @pytest.mark.asyncio

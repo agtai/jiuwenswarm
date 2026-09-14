@@ -4874,57 +4874,6 @@ async def test_unified_post_admission_rejection_is_durably_replayed(
 
 
 @pytest.mark.asyncio
-async def test_unified_background_permission_denial_is_spoken_and_resumes_via_ack(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    registry, composition, manager = _unified_registry(tmp_path)
-    assert (
-        await registry.handle_p2_activate(
-            params=_p2_params(),
-            request_id="request-unified-denied-activate",
-            session_id=SCOPE.session_id,
-            channel_id="web",
-        )
-    ).ok
-    history = _install_unified_history_writer(registry)
-
-    async def deny_current(**_kwargs: object) -> None:
-        raise FormalTaskViolation(
-            "FORMAL_TASK_AUTHORIZATION_DENIED",
-            "must not be exposed as an RPC-only failure",
-            ErrorCode.PERMISSION_DENIED,
-        )
-
-    monkeypatch.setattr(composition, "read_current_background_task", deny_current)
-    result = await registry.handle_unified_submit(
-        params=_unified_final_params(
-            stem="permission-denied-create",
-            text="后台帮我制定三天行程。",
-        ),
-        request_id="request-unified-permission-denied",
-        session_id=SCOPE.session_id,
-        channel_id="web",
-    )
-
-    assert result.ok
-    assert manager.agent.calls == 0
-    assert composition.handle_calls == []
-    await _ack_unified_presentation(
-        registry,
-        sequence=0,
-        stem="permission-denied-create",
-    )
-    assert len(history.assistants) == 1
-    spoken = b"".join(
-        content.content_utf8 for content in history.assistants[0][0].contents
-    ).decode("utf-8")
-    assert spoken == "后台任务功能当前不可用。"
-    await _close_unified_route(registry, stem="permission-denied-create")
-
-
-
-@pytest.mark.asyncio
 async def test_unified_semantic_authority_denial_has_zero_execution_or_history(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
