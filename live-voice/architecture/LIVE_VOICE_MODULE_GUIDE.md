@@ -144,6 +144,11 @@ SDK Agent。正式 Task 则由持久 outbox 和 SDK 项目执行器管理独立 
 Host 的 `process_background_code_task_stream`；不能把这个路径画成普通会话队列。
 AgentServer 装配 Runtime、Gateway WS、授权入口及通知转发；AgentCore 是进程内 SDK。
 
+项目受理使用宿主会话元数据、项目注册和真实root/HEAD校验。D-120已明确取代早期
+干净工作区限制；暂存、未暂存及未跟踪输入由SDK执行器快照和冲突保护处理。
+Host中无调用的clean/managed检查及reader分配已删除；旧SDK只读证明API保留兼容，
+不是当前授权来源。真实Git/SQLite验证覆盖原index与文件保留、写回冲突和恢复不重放。
+
 checkpoint 现使用 SDK `AgentCallbackManager.execute` 的 `scoped_agent_rail` 与
 `TaskCheckpointRail`。根 Agent registry-only 实验曾被错根回调绕过，已撤销；
 最终实现使用可撤销的执行上下文，因此切换回调 Agent 仍会检查。工具检查先于

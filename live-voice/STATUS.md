@@ -115,6 +115,13 @@ the reader. Host-only/consumer-detach, polling, stale-session, UNKNOWN replay an
 fail-closed target tests cover this boundary. This does not close the remaining
 project-authority audit, historical backend validation debt or product candidate.
 
+Project authority correspondence is now verified against D-120 and accepted R5
+commit ae4b32331501: user edits are authorized snapshot inputs, not blanket
+denials. Uncalled Host clean/managed checks and factory allocation are removed;
+real root/HEAD/scope and Executor conflict protection remain. Five resolver/
+factory checks and seven real-Git/SQLite snapshot, collision and recovery cases
+pass. The SDK legacy proof API remains callable for package compatibility.
+
 The frozen-input recovery child now keeps server generation/context identity in
 the existing Host journal, independently of model records. P3 and unified input
 share a persisted sequence; conflicting unified input cannot advance it. Current

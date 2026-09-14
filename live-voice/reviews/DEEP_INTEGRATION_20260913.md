@@ -602,3 +602,44 @@ the duplicate Voice snapshot and ownership entry are removed. See the current
 [module manifest](../evidence/DEEP_FRONTEND_HOST_MODULES_20260914.json).
 Broader backend historical tests, project-authority evidence and final paired
 packaging remain open. No SDK, timeout, credentials, deployment or remote update.
+
+## Project authority correspondence (2026-09-14)
+
+Historical correspondence is now verified, superseding the earlier uncertainty:
+D-120 explicitly supersedes D-098/D-099's blanket exclusion of user edits. The
+[accepted R5 packet](REALTIME_R5_PROJECT_SNAPSHOTS_20260907.md) records acceptance
+of tracked/untracked and staged/unstaged contents, with exclusive execution,
+isolated seeding and Task-only writeback. Commit `ae4b32331501` implements that
+decision by removing `_require_admissible_worktree` calls and requiring the
+Executor to own snapshot/conflict protection. `a4029b7c14bd` subsequently fixes
+byte/index fidelity, not a new authorization policy. Current code agrees with
+D-120; reinstating a clean-tree admission check would regress accepted behavior.
+
+Tier-0 cleanup scope: delete Host's uncalled private clean/managed methods and
+unused factory allocation, retaining accepted constructor arguments as no-op
+source compatibility. Keep real project/session/allow-list/root/HEAD checks and
+the actual Executor snapshot/writeback guarantees. Verify factory D2 Store
+binding without a managed-reader allocation, existing resolver rejection and
+compatibility cases, and current real-Git authorized-snapshot tests. The SDK
+exported `DirectProjectManagedBaselineReader` remains a read-only legacy proof
+API for existing package callers; Host no longer uses it as admission authority.
+Keeping its callable proof behavior avoids breaking the previous package pair;
+this is retained compatibility implementation, not native unification credit.
+No change to authorization, current project data or persisted schemas.
+
+Result: Host removes70 net production lines, no relocation. The five selected
+resolver/factory cases pass (165 deselected), including allow-list rejection,
+dirty-input compatibility, current grant/redaction and real D2 Store binding
+with the SDK legacy reader constructor forbidden. Seven authorized-snapshot
+cases pass in32.46s using real Git, files, SQLite and SDK FsOperation with a
+controlled Agent carrier: mixed staged/unstaged inputs and exact index retention,
+save-as after restart, visible-input/output collisions with no partial write,
+ignored-cache behavior and applied-effect recovery without repeated file tools.
+Scoped Ruff, cold diff review and diff checks pass. No protection mechanism was
+replaced by a mock or removed; tests exercise the still-authoritative executor.
+
+Latest counts Voice113084, Host48370, SDK33872, total195326 (354 below initial).
+See [files](../evidence/DEEP_PROJECT_AUTHORITY_20260914.json) and
+[modules](../evidence/DEEP_PROJECT_AUTHORITY_MODULES_20260914.json). This closes
+the historical policy-correspondence uncertainty, not all Host/Voice integration
+or outstanding backend tests. Final package evidence still predates these edits.

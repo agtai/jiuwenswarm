@@ -123,7 +123,7 @@ from jiuwenswarm.server.runtime.agent_adapter.p3_model_resolution import (
 )
 from openjiuwen.core.application.tasks.persistent_task_core import PersistentTaskCore
 from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (DirectProjectCodeExecutorAdapter)
-from openjiuwen.core.application.tasks.project_executor import (DirectProjectManagedBaselineReader, FORMAL_PROJECT_EXECUTOR_ID, ProjectExecutionBinding)
+from openjiuwen.core.application.tasks.project_executor import (FORMAL_PROJECT_EXECUTOR_ID, ProjectExecutionBinding)
 from jiuwenswarm.server.runtime.formal_tasks.production_task_classifier import (
     ProductionTaskIntentClassifier,
 )
@@ -6118,6 +6118,13 @@ def test_product_factory_selects_exact_same_store_backed_d2_candidate(
 ) -> None:
     """Catches product composition advertising D2 without its Store authority."""
 
+    def forbidden_legacy_reader(*_args, **_kwargs):
+        raise AssertionError("D-120 must not allocate the retired admission reader")
+
+    monkeypatch.setattr(
+        "openjiuwen.core.application.tasks.project_executor.DirectProjectManagedBaselineReader",
+        forbidden_legacy_reader,
+    )
     _configure_enabled_factory(monkeypatch, 3600)
     database = tmp_path / "factory-d2.sqlite3"
     monkeypatch.setattr(
@@ -6135,11 +6142,6 @@ def test_product_factory_selects_exact_same_store_backed_d2_candidate(
     assert type(store) is SqliteTaskStore
     assert type(direct) is DirectProjectCodeExecutorAdapter
     assert direct._durability_store is store
-    assert (
-        type(composition._authority_resolver._managed_worktree_reader)
-        is DirectProjectManagedBaselineReader
-    )
-    assert composition._authority_resolver._managed_worktree_reader._store is store
     candidates = direct.capability_profiles()
     assert tuple(profile.durability_level for profile in candidates) == ("D0", "D2")
     assert composition._executor_profiles == (candidates[-1],)
