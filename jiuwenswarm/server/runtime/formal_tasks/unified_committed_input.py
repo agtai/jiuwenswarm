@@ -22,6 +22,7 @@ from typing import Mapping
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
+    ContextRef,
     ErrorCode,
     ScopeRef,
     canonical_json_bytes,
@@ -40,6 +41,7 @@ class UnifiedInputAdmission:
     replay_result: dict[str, object] | None
     in_progress: bool = False
     semantic_binding: dict[str, object] | None = None
+    server_input: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +119,19 @@ class SqliteUnifiedCommittedInputJournal:
                     "ALTER TABLE unified_committed_inputs "
                     "ADD COLUMN semantic_binding_json TEXT"
                 )
+            if "server_input_json" not in columns:
+                connection.execute(
+                    "ALTER TABLE unified_committed_inputs ADD COLUMN server_input_json TEXT"
+                )
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS unified_input_sequence (
+                    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                    generation INTEGER NOT NULL CHECK(generation>=0)
+                )
+            """)
+            connection.execute(
+                "INSERT OR IGNORE INTO unified_input_sequence VALUES (1, 0)"
+            )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS unified_request_bindings (
@@ -765,6 +780,61 @@ class SqliteUnifiedCommittedInputJournal:
             )
         return payload
 
+    @staticmethod
+    def _server_input_record(value, *, voice_identity, fingerprint, scope):
+        """Validate server metadata independently of semantic/model records."""
+        try:
+            record = json.loads(value)
+            body = record["body"]
+            if (set(record) != {"body", "sha256"}
+                    or set(body) != {"scope", "context_refs", "input_generation"}
+                    or body["scope"] != scope.to_dict()
+                    or type(body["input_generation"]) is not int
+                    or not 0 < body["input_generation"] <= 9_007_199_254_740_991
+                    or type(body["context_refs"]) is not list
+                    or len(value.encode("utf-8")) > 131_072):
+                raise ValueError
+            for ref in body["context_refs"]:
+                if ContextRef.from_dict(ref).scope != scope:
+                    raise ValueError
+            digest = hashlib.sha256(canonical_json_bytes(
+                [voice_identity, fingerprint.hex(), body]
+            )).hexdigest()
+            if record["sha256"] != digest:
+                raise ValueError
+            return body
+        except (ValueError, TypeError, KeyError, AttributeError) as error:
+            raise FormalTaskViolation(
+                "UNIFIED_INPUT_SERVER_IDENTITY_INVALID",
+                "persisted server input identity failed validation", ErrorCode.CONFLICT,
+            ) from error
+
+    @staticmethod
+    def _allocate_input_generation(connection, minimum=1):
+        current = connection.execute(
+            "SELECT generation FROM unified_input_sequence WHERE singleton=1"
+        ).fetchone()
+        if current is None or type(current[0]) is not int:
+            raise FormalTaskViolation("UNIFIED_INPUT_SERVER_IDENTITY_INVALID",
+                "input sequence is unavailable", ErrorCode.UNAVAILABLE)
+        generation = max(current[0] + 1, minimum)
+        if generation > 9_007_199_254_740_991:
+            raise FormalTaskViolation("CRITICAL_INPUT_GENERATION_EXHAUSTED",
+                "input sequence exhausted", ErrorCode.UNAVAILABLE)
+        connection.execute("UPDATE unified_input_sequence SET generation=? WHERE singleton=1",
+                           (generation,))
+        return generation
+
+    def next_input_generation(self):
+        """One sequence for ordinary P3 and unified ingress, across live owners.
+
+        Reservation gaps are harmless. Only admission freezes an input identity;
+        reserving a generation does not authorize or execute an input.
+        """
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return self._allocate_input_generation(connection)
+
     def admit(
         self,
         *,
@@ -773,8 +843,16 @@ class SqliteUnifiedCommittedInputJournal:
         fingerprint: bytes,
         created_at: str,
         semantic_binding: Mapping[str, object] | None = None,
+        server_input: Mapping[str, object] | None = None,
     ) -> UnifiedInputAdmission:
         self._validate_identity(request_id, voice_identity_sha256, fingerprint)
+        scope = None
+        if server_input is not None:
+            scope = ScopeRef.from_dict(server_input["scope"])
+            minimum = server_input["input_generation"]
+            if type(minimum) is not int or not 0 < minimum <= 9_007_199_254_740_991:
+                raise FormalTaskViolation("INVALID_UNIFIED_INPUT_GENERATION",
+                    "server input generation is invalid", ErrorCode.INVALID_ARGUMENT)
         semantic_json = (
             None
             if semantic_binding is None
@@ -821,6 +899,18 @@ class SqliteUnifiedCommittedInputJournal:
                     ErrorCode.CONFLICT,
                 )
             if voice_row is not None:
+                restored_input = None
+                if server_input is not None:
+                    if voice_row["server_input_json"] is None:
+                        if voice_row["status"] != "completed":
+                            raise FormalTaskViolation("UNIFIED_INPUT_SERVER_IDENTITY_MISSING",
+                                "legacy input has no independently frozen server identity",
+                                ErrorCode.UNAVAILABLE)
+                    else:
+                        restored_input = self._server_input_record(
+                            voice_row["server_input_json"], voice_identity=voice_identity_sha256,
+                            fingerprint=fingerprint, scope=scope,
+                        )
                 if request_binding is None:
                     connection.execute(
                         """
@@ -835,6 +925,7 @@ class SqliteUnifiedCommittedInputJournal:
                         False,
                         self._decode_result(voice_row),
                         semantic_binding=self._decode_semantic_binding(voice_row),
+                        server_input=restored_input,
                     )
                 lease_expires_at = voice_row["lease_expires_at"]
                 now = time.time()
@@ -858,21 +949,38 @@ class SqliteUnifiedCommittedInputJournal:
                         True,
                         None,
                         semantic_binding=self._decode_semantic_binding(voice_row),
+                        server_input=restored_input,
                     )
                 return UnifiedInputAdmission(
                     False,
                     None,
                     in_progress=True,
                     semantic_binding=self._decode_semantic_binding(voice_row),
+                    server_input=restored_input,
                 )
+            server_json = None
+            selected_input = None
+            if server_input is not None:
+                # Serialized with admission across journal instances. The caller's
+                # floor includes ordinary P3 inputs in this live Registry.
+                selected_input = dict(server_input)
+                selected_input["input_generation"] = self._allocate_input_generation(
+                    connection, minimum
+                )
+                server_json = json.dumps({"body": selected_input, "sha256":
+                    hashlib.sha256(canonical_json_bytes(
+                        [voice_identity_sha256, fingerprint.hex(), selected_input]
+                    )).hexdigest()}, ensure_ascii=False)
+                self._server_input_record(server_json, voice_identity=voice_identity_sha256,
+                    fingerprint=fingerprint, scope=scope)
             now = time.time()
             connection.execute(
                 """
                 INSERT INTO unified_committed_inputs(
                     request_id, voice_identity_sha256, fingerprint, status,
                     result_json, created_at, completed_at, execution_owner,
-                    lease_expires_at, semantic_binding_json
-                ) VALUES(?, ?, ?, 'pending', NULL, ?, NULL, ?, ?, ?)
+                    lease_expires_at, semantic_binding_json, server_input_json
+                ) VALUES(?, ?, ?, 'pending', NULL, ?, NULL, ?, ?, ?, ?)
                 """,
                 (
                     request_id,
@@ -882,6 +990,7 @@ class SqliteUnifiedCommittedInputJournal:
                     self._execution_owner,
                     now + self._LEASE_SECONDS,
                     semantic_json,
+                    server_json,
                 ),
             )
             connection.execute(
@@ -898,6 +1007,7 @@ class SqliteUnifiedCommittedInputJournal:
             semantic_binding=(
                 None if semantic_binding is None else dict(semantic_binding)
             ),
+            server_input=selected_input,
         )
 
     def renew(

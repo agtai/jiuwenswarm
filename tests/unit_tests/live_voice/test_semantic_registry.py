@@ -1215,6 +1215,163 @@ def typed_final(stem, text):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("frozen_route", ["task", "clarification"])
+@pytest.mark.parametrize("newer_input", [False, "unified", "p3"])
+async def test_frozen_semantics_survive_registry_rebuild_and_changed_task_set(
+    semantic_runtime, monkeypatch, frozen_route, newer_input
+):
+    """D-107 freezes after admission; recovery cannot reinterpret a later task list."""
+    s = semantic_runtime
+    core = s.harness.composition._core
+    a = (await control_with_confirmation(
+        s, "freeze-a", "task.create",
+        {"name": "Inventory A", "instruction": "Read inventory and save a.md."},
+    ))["task_id"]
+    await core.drain_outbox()
+    a_before = core.store.get_task(a, _scope())
+    assert a_before.state.value == "running"
+    first = s.registry
+    assert (await first.handle_p2_activate(
+        params=p2_params(), request_id="freeze-activate", session_id="session-1",
+        channel_id="web",
+    )).ok
+    s.program = lambda data: model_output(data)
+    preceding = await first.handle_unified_submit(
+        params=typed_final("freeze-preceding", "Explain what an inventory is."),
+        request_id="freeze-preceding", session_id="session-1", channel_id="web",
+    )
+    assert preceding.ok, preceding.payload
+    await present_next(s, 0)
+    route = next(iter(first._p2_routes.values()))
+    original_context = await route.activation_lease.select_formal_context(route.binding)
+    assert original_context.entries  # Actual CR committed user, without invented references.
+    first_agent_calls = s.manager.agent.calls
+    s.program = lambda data: (
+        model_output(data, operation="task.cancel", target=a)
+        if frozen_route == "task" else
+        {**model_output(data, route="clarification"), "message": "Which task?"}
+    )
+    journal = first._unified_journal
+    bind = journal.bind_semantic
+    frozen = []
+
+    class ProcessLost(BaseException):
+        pass
+
+    def lose_after_freeze(**kwargs):
+        bind(**kwargs)
+        frozen.append(kwargs["semantic_binding"])
+        raise ProcessLost()
+
+    monkeypatch.setattr(journal, "bind_semantic", lose_after_freeze)
+    params = typed_final("freeze-recovery", "Cancel the specified inventory task.")
+    with pytest.raises(ProcessLost):
+        await first.handle_unified_submit(
+            params=params, request_id="freeze-first", session_id="session-1",
+            channel_id="web",
+        )
+    assert len(frozen) == 1
+    assert core.store.get_task(a, _scope()) == a_before
+    assert s.harness.executor.cancels == []
+    b = (await control_with_confirmation(
+        s, "freeze-b", "task.create",
+        {"name": "Inventory B", "instruction": "Read inventory and save b.md."},
+    ))["task_id"]
+    await core.drain_outbox()
+    b_before = core.store.get_task(b, _scope())
+    assert b_before.state.value == "running"
+    calls_before = len(s.calls)
+    await first.stop()
+    await first._runtime.close()
+    with sqlite3.connect(journal.database_path) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM unified_committed_inputs WHERE status='pending'"
+        ).fetchone() == (1,)
+        connection.execute(
+            "UPDATE unified_committed_inputs SET lease_expires_at=0 WHERE status='pending'"
+        )
+    # A new model decision would now pick B. Neither a frozen exact target nor
+    # frozen clarification is allowed to take that decision during recovery.
+    s.program = lambda data: model_output(data, operation="task.cancel", target=b)
+    manager = _AgentManager()
+    restarted = AgentServerProductCompositionRegistry(
+        settings=first._settings, p3_composition=s.harness.composition,
+        agent_manager=manager, runtime=_shared_test_runtime(manager),
+        push_text_event=first._push_text_event,
+        p3_confirmation_owner=first._p3_confirmation_owner,
+        p3_confirmation_forwarder=first._p3_confirmation_forwarder,
+        commit_ledger=TurnCommitLedger(),
+    )
+    try:
+        assert restarted._unified_journal.database_path == journal.database_path
+        assert (await restarted.handle_p2_activate(
+            params=p2_params(), request_id="freeze-reactivate", session_id="session-1",
+            channel_id="web",
+        )).ok
+        route = next(iter(restarted._p2_routes.values()))
+        new_context = await route.activation_lease.select_formal_context(route.binding)
+        assert new_context.entries != original_context.entries
+        if newer_input:
+            s.program = lambda data: {
+                **model_output(data, route="clarification"), "message": "New input received."
+            }
+            if newer_input == "p3":
+                newer = await restarted.handle_p3_intent(
+                    params={**_production_registry_text_params(
+                        stem="freeze-newer", text="Wait for my next instruction."),
+                        "interaction_id": "semantic-interaction"},
+                    request_id="freeze-newer", session_id="session-1",
+                )
+            else:
+                newer = await restarted.handle_unified_submit(
+                    params=typed_final("freeze-newer", "Wait for my next instruction."),
+                    request_id="freeze-newer", session_id="session-1", channel_id="web",
+                )
+            assert newer.ok, newer.payload
+            calls_before = len(s.calls)
+            s.program = lambda data: model_output(data, operation="task.cancel", target=b)
+        recovered = await restarted.handle_unified_submit(
+            params=params, request_id="freeze-retry", session_id="session-1",
+            channel_id="web",
+        )
+        if newer_input:
+            assert not recovered.ok, recovered.payload
+            assert recovered.payload["error"]["reason"] == "CRITICAL_TOKEN_INPUT_REJECTED"
+            assert len(s.calls) == calls_before
+            assert core.store.get_task(a, _scope()) == a_before
+            assert core.store.get_task(b, _scope()) == b_before
+            assert s.harness.executor.cancels == []
+            assert manager.agent.calls == 0 and s.manager.agent.calls == first_agent_calls
+            return
+        assert recovered.ok, recovered.payload
+        assert frozen[0]["body"]["input"]["commit"]["context_refs"] == [
+            entry.ref.to_dict() for entry in original_context.entries
+        ]
+        assert len(s.calls) == calls_before
+        assert core.store.get_task(b, _scope()) == b_before
+        if frozen_route == "task":
+            assert core.store.get_task(a, _scope()).cancel_requested
+            await core.drain_outbox()
+            assert s.harness.executor.cancels == [a_before.attempt_id]
+            assert core.store.get_task(a, _scope()).outcome.value == "cancelled"
+        else:
+            assert core.store.get_task(a, _scope()) == a_before
+            assert s.harness.executor.cancels == []
+        assert core.store.get_task(b, _scope()) == b_before
+        assert core.store.counts()["tasks"] == 2
+        assert s.manager.agent.calls == first_agent_calls
+        assert manager.agent.calls == (1 if frozen_route == "task" else 0)
+        assert all(not execution.allow_tools for execution in manager.agent.executions)
+        with sqlite3.connect(journal.database_path) as connection:
+            assert connection.execute(
+                "SELECT status FROM unified_committed_inputs"
+            ).fetchall() == [("completed",), ("completed",)]
+    finally:
+        await restarted.stop()
+        await restarted._runtime.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["task.status", "task.adjust", "task.cancel"])
 @pytest.mark.parametrize("measurement_available", [True, False])
 async def test_unified_task_measurement_keeps_exact_receipt_and_admission_clock(

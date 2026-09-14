@@ -6585,13 +6585,14 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
             "critical_token_policy": critical_policy,
         }
 
-    def _critical_input_provenance_locked(
+    async def _critical_input_provenance_locked(
         self,
         provenance: Mapping[str, object],
         *,
         commit_id: str | None = None,
         interaction_id: str | None = None,
         retain_identity: bool = False,
+        reserve_generation: bool = True,
     ) -> tuple[dict[str, object], int]:
         retained = (
             self._critical_input_commit_generations.get(commit_id)
@@ -6607,15 +6608,24 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
                 )
             generation = retained[1]
         else:
-            if self._critical_input_sequence >= MAX_SAFE_INTEGER:
+            if not reserve_generation:
+                # Unified admission allocates and freezes atomically after the
+                # fingerprint check. Rejected input must not advance the sequence.
+                generation = 1
+            elif self._unified_journal is not None:
+                generation = await asyncio.to_thread(
+                    self._unified_journal.next_input_generation
+                )
+            elif self._critical_input_sequence >= MAX_SAFE_INTEGER:
                 raise FormalTaskViolation(
                     "CRITICAL_INPUT_GENERATION_EXHAUSTED",
                     "the bounded critical-input generation is exhausted",
                     ErrorCode.UNAVAILABLE,
                 )
-            self._critical_input_sequence += 1
-            generation = self._critical_input_sequence
-            if retain_identity:
+            else:
+                self._critical_input_sequence += 1
+                generation = self._critical_input_sequence
+            if retain_identity and reserve_generation:
                 assert commit_id is not None and interaction_id is not None
                 self._critical_input_commit_generations[commit_id] = (
                     interaction_id,
@@ -7379,7 +7389,13 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
         business_task_id = None
         l0_task_id = l0_attempt_id = None
         agent_context = context
-        agent_commit = commit
+        # Semantic identity remains frozen. The Agent executes against the
+        # currently selected formal context, as it already does for Task receipts.
+        # Restored refs are identities, not restored context content or grants.
+        agent_commit = TurnCommit.from_dict({
+            **commit.to_dict(),
+            "context_refs": [entry.ref.to_dict() for entry in context.entries],
+        }) if tuple(commit.context_refs) != tuple(entry.ref for entry in context.entries) else commit
         allow_tools = (
             decision.route == "dialogue" and decision.continuation_action != "decline"
         )
@@ -7959,11 +7975,12 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
                     route=parsed[5],
                 )
                 guarded_provenance, input_generation = (
-                    self._critical_input_provenance_locked(
+                    await self._critical_input_provenance_locked(
                         provenance,
                         commit_id=commit_id,
                         interaction_id=interaction_id,
                         retain_identity=True,
+                        reserve_generation=False,
                     )
                 )
                 retained_commit_id = commit_id
@@ -8000,6 +8017,11 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
                 voice_identity_sha256=voice_identity,
                 fingerprint=fingerprint,
                 created_at=committed_at,
+                server_input={
+                    "scope": retained.binding.scope.to_dict(),
+                    "context_refs": [entry.ref.to_dict() for entry in context.entries],
+                    "input_generation": input_generation,
+                },
             )
             admission_monotonic = time.monotonic()
             l0_commit_admission = _L0CommitAdmissionClock(
@@ -8052,6 +8074,31 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
                             ErrorCode.CONFLICT,
                         )
                 else:
+                    # The journal freezes server-generated identity separately
+                    # from model semantics. Current ingress supplies every other
+                    # commit field and still passes the live gate/final authority.
+                    server_input = admission.server_input
+                    if server_input is None:
+                        raise FormalTaskViolation(
+                            "UNIFIED_INPUT_SERVER_IDENTITY_MISSING",
+                            "server input identity unavailable", ErrorCode.UNAVAILABLE,
+                        )
+                    input_generation = server_input["input_generation"]
+                    self._critical_input_sequence = max(
+                        self._critical_input_sequence, input_generation
+                    )
+                    self._critical_input_commit_generations[commit_id] = (
+                        interaction_id, input_generation
+                    )
+                    guarded_provenance = dict(provenance)
+                    guarded_provenance["critical_token_input"] = {
+                        "input_generation": input_generation
+                    }
+                    commit = TurnCommit.from_dict({
+                        **commit.to_dict(),
+                        "hypothesis_provenance": guarded_provenance,
+                        "context_refs": server_input["context_refs"],
+                    })
                     if (
                         len(self._unified_operations)
                         >= self._PRODUCT_OPERATION_CAPACITY
@@ -11310,7 +11357,7 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
                     )
                 return commit
             guarded_provenance, input_generation = (
-                self._critical_input_provenance_locked(
+                await self._critical_input_provenance_locked(
                     {
                         "provider": "product.web.text",
                         "kind": "committed_task_intent",

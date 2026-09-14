@@ -108,6 +108,13 @@ replay/conflict, project rejection, Voice close followed by completion, and
 running cancellation while the original dialogue completes normally. These use
 controlled model/authority/lower-Agent dependencies. The broader Host/Voice
 registry audit and remaining old joint adjustment/barge-in oracles remain open.
+The frozen-input recovery child now keeps server generation/context identity in
+the existing Host journal, independently of model records. P3 and unified input
+share a persisted sequence; conflicting unified input cannot advance it. Current
+ingress, the live gate and final Task authority remain mandatory. Real SQLite/CR
+recovery, changed Task/context sets, mixed-entry stale rejection, Native Registry
+and Host lifetime regressions pass (144 tests in the scoped command). This does
+not prove automatic CR-history restoration or new Provider/audio acceptance.
 Registry retired P2 admission cleanup removes 126 production lines: an unwritten
 ledger, uncalled reservation/preflight and constant-false recovery branch.
 The selected registry group has 28 passes/27 failures both before and after;

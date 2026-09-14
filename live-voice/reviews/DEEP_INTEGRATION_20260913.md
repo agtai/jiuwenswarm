@@ -326,6 +326,15 @@ Scoped Ruff and diff whitespace checks also pass.
 
 ## Registry retired-admission deletion result
 
+Next verification scope (Tier 2, tests only): use the current semantic model
+boundary and real SQLite journal to fault after semantic freeze, recreate the
+Registry/Host presentation runtime, change the available Task set, and prove
+recovery cannot select a new target or re-invoke the model. D-107 allows analysis
+again before freeze; no old keyword/current-task policy will be restored. A
+frozen clarification must remain non-mutating. No production durability or
+authorization policy change is authorized by these tests; any real discrepancy
+will be triaged before changing its owned contract.
+
 Implemented the bounded deletion above: 126 production lines removed from
 product_composition_registry.py. No replacement owner/framework was added.
 The current Host unified journal owns admission/fingerprint/effect recovery;
@@ -361,3 +370,112 @@ Current code accounting: Voice113111, Host48212, SDK33872; combined195195,
 485 fewer than the initial195680. The new per-file/module manifests preserve
 the same official baselines and line metric. Earlier wheel evidence remains
 tied to its earlier source; this batch has no dependency/package-layout changes.
+
+## Frozen semantic recovery audit (2026-09-14, incomplete)
+
+The existing dedicated semantic Registry suite passes 97 tests. It uses the real
+parser, journal, confirmation owner and Task SQLite with controlled model and
+executor; `native_business_enabled=False` explicitly selects the supported
+semantic delegate contract. This is not current Native business/Provider/audio
+acceptance, and it does not close the 27 historical Registry failures above.
+
+A new two-case fault test reaches `journal.bind_semantic`, commits the frozen
+record, then raises a process-loss exception before any business effect. It
+creates another Task, closes Registry/Host runtime and rebuilds them against the
+same journal and authenticated composition. Both exact-cancel and clarification
+replays currently fail with `SEMANTIC_RECORD_INVALID`. Diagnosis compared the
+independently reconstructed commit with the frozen commit: the only difference
+in this fixture is `hypothesis_provenance.critical_token_input.input_generation`
+(original 3, rebuilt 1). `_critical_input_provenance_locked` currently assigns
+that identity from an in-memory counter. The canonical digest correctly rejects
+the changed commit. No fallback model interpretation or wrong-target effect was
+observed; successful recovery is nevertheless **unproved and incomplete**.
+
+Do not fix this by excluding generation from the digest, resetting test counters,
+accepting model-record TurnCommits into the ledger, or copying an authorization
+grant. D-107 requires an independently verified commit and current deterministic
+authorization. A possible bounded repair belongs to the existing journal's
+admission transaction: retain only the server-generated identity metadata before
+semantic parsing, then reconstruct the same commit from freshly verified ingress
+plus that metadata. This needs a deliberate Tier 3 child scope covering generation
+ordering, context-ref identity, old rows, exact request/fingerprint and scope,
+corruption, cancelled/stale input, and the separate Native path. No production
+change, schema change or weakened validation has been made for this diagnosis.
+
+Independent read-only review confirmed this direction implements D-107 rather
+than introducing product/authorization policy. Record the next child boundary
+as **Tier 3: durable server input identity**. The existing journal admission
+transaction owns generation/context-ref metadata, bound to authenticated scope
+and fingerprint; the existing critical gate owns stale-input rejection and the
+formal owner owns final authorization. No model-derived grant or second journal
+is allowed. Owned surfaces are the Host journal, Registry admission adapter and
+their real SQLite/Registry tests. Dependencies: existing context-ref validation,
+critical-input sequencing shared with ordinary P3, and Native owner admission.
+Acceptance includes the two failing recovery cases, changed real context refs,
+concurrent instances/expired takeover, newer-input then stale retry, corrupt or
+conflicting identity with zero protected effects, old-row fail-closed behavior,
+and unchanged Native admission/replay. Generation ordering must be designed
+explicitly; merely raising a local counter to a recovered value is insufficient
+evidence of cross-instance ordering. No SDK change or irreversible migration is
+presumed. This scope remains pending implementation and verification.
+
+Independent mapping of the old failures also retains these evidence gaps:
+create feature-off/permission/ACK/privacy paths; actionable dirty-project byte
+protection; post-presentation journal-completion failure and rebuilt runtime;
+Cascade Gateway-issued speech receipt ingress; actual result-artifact content;
+and malformed/failed formal-handler L0 emission through the full call chain.
+Old pre-freeze current-task expectations are superseded by D-107's explicit
+permission to parse again before freeze. Old demo bypass and implicit language
+policy expectations must not be restored just to turn historical tests green.
+
+## Durable server input identity result (2026-09-14)
+
+The Tier 3 child above is implemented. The existing journal admission transaction
+now freezes bounded generation/context-ref metadata independently of semantic
+records, with scope/fingerprint/digest validation. One SQLite sequence serves
+ordinary P3 and unified input. Unified input allocates only after fingerprint
+validation in the same admission transaction; an earlier reservation attempt
+changed SQLite on rejected input and was corrected after the real Host joint
+oracle caught it. Reservations for ordinary P3 confer no permission. Native
+continues to receive its commit from its existing owner, without this metadata.
+
+Registry uses current verified ingress plus independently frozen server metadata
+to construct the commit, then retains the existing gate, exact semantic digest
+and final formal authorization. It never imports a TurnCommit/permission from
+model output. Old pending rows lacking metadata fail closed; completed legacy
+results remain readable without backfill. Schema additions are nullable metadata
+and a bounded sequence; no old rows, Task data or private runtime data are rewritten.
+
+Recovery tests now prove original-A cancellation after B creation, unchanged B,
+frozen clarification with no mutation, no semantic reparse, and stale rejection
+after a newer unified **or ordinary P3** input in the same interaction. Real CR
+acknowledgement creates the original context; reconstruction changes its refs.
+The permitted Task-result answer uses one Agent call with tools disabled, rather
+than incorrectly expecting no result-expression Agent call under D-115.
+
+Independent review found a separate no-Task dialogue projection mismatch. That
+is repaired using the existing Task-answer approach: original semantic commit
+remains exact, Agent execution refs match current formal context. A dedicated
+test obtains a genuine CR snapshot from a delayed preceding-answer ACK and feeds
+it through a controlled context-selection port after reconstruction. It proves
+no semantic reparse, one normal dialogue Agent execution and zero Task effects;
+it does **not** claim the Host automatically restores CR history after restart.
+The reviewer read the final production diff and found no new blocking issue;
+Main's mixed-P3/unified real-gate cases also pass.
+
+Final scoped command (Host editable environment imports sibling SDK .4):
+
+```powershell
+.venv/Scripts/python.exe -m pytest -q -o addopts= -o log_cli=false tests/unit_tests/live_voice/test_unified_committed_input.py tests/unit_tests/live_voice/test_semantic_registry.py tests/unit_tests/live_voice/test_semantic_input_recovery.py tests/unit_tests/live_voice/test_native_business_registry.py tests/integration/live_voice/test_unified_host_task_joint.py --tb=short
+```
+
+Result: **144 passed** in 97.51s. Scoped Ruff and diff checks pass. This supersedes
+the child fault failures and its implementation-pending statement above, not the
+broader 27 historical Registry failures, integration audit or physical acceptance.
+Current production counts: Voice113158, Host48322, SDK33872; total195352 (328 below
+initial195680). The child adds157 net lines: Voice47 adaptation and Host110
+necessary durability enhancement; no code migration or duplicate-removal credit.
+The new [per-file](../evidence/DEEP_INPUT_RECOVERY_20260914.json) and
+[module](../evidence/DEEP_INPUT_RECOVERY_MODULES_20260914.json) manifests use the
+same baselines. Earlier package artifacts still attest only their earlier source.
+No SDK source, timeout, buffer, Provider, credential, deployment or remote ref changed.

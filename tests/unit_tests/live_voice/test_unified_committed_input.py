@@ -3,6 +3,8 @@
 import hashlib
 import sqlite3
 import time
+import json
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -18,6 +20,76 @@ def digest(value: str) -> str:
 
 def fingerprint(value: str) -> bytes:
     return hashlib.sha256(value.encode("utf-8")).digest()
+
+
+def server_input(generation=1, project="project-1"):
+    return {"scope": {"subject_id": "user-1", "session_id": "session-1",
+                      "project_id": project, "assurance": "authenticated"},
+            "context_refs": [], "input_generation": generation}
+
+
+def test_server_identity_is_atomic_across_instances_and_expired_takeover(tmp_path):
+    path = tmp_path / "server-identity.sqlite3"
+    owners = [SqliteUnifiedCommittedInputJournal(path) for _ in range(2)]
+    def admit(index):
+        return owners[index].admit(request_id=str(index), voice_identity_sha256=digest(str(index)),
+            fingerprint=fingerprint(str(index)), created_at="2030-01-01T00:00:00Z",
+            server_input=server_input())
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(admit, range(2)))
+    assert {r.server_input["input_generation"] for r in results} == {1, 2}
+    with owners[0]._connect() as connection:
+        connection.execute("UPDATE unified_committed_inputs SET lease_expires_at=0")
+    recovered = owners[1].admit(request_id="recovery", voice_identity_sha256=digest("0"),
+        fingerprint=fingerprint("0"), created_at="2030-01-01T00:00:00Z",
+        server_input=server_input(100))
+    assert recovered.execute and recovered.server_input == results[0].server_input
+    fresh = owners[0].admit(request_id="fresh", voice_identity_sha256=digest("fresh"),
+        fingerprint=fingerprint("fresh"), created_at="2030-01-01T00:00:00Z",
+        server_input=server_input(100))
+    assert fresh.server_input["input_generation"] == 100
+
+
+@pytest.mark.parametrize("change", ["scope", "digest", "generation", "legacy"])
+def test_server_identity_rejects_conflicts_without_journal_writes(tmp_path, change):
+    journal = SqliteUnifiedCommittedInputJournal(tmp_path / "identity-conflict.sqlite3")
+    args = dict(voice_identity_sha256=digest("input"), fingerprint=fingerprint("input"),
+                created_at="2030-01-01T00:00:00Z")
+    journal.admit(request_id="first", server_input=server_input(), **args)
+    with journal._connect() as connection:
+        if change in {"digest", "generation"}:
+            record = json.loads(connection.execute(
+                "SELECT server_input_json FROM unified_committed_inputs").fetchone()[0])
+            if change == "digest":
+                record["sha256"] = "0" * 64
+            else:
+                record["body"]["input_generation"] = 999
+            connection.execute("UPDATE unified_committed_inputs SET server_input_json=?",
+                               (json.dumps(record),))
+        elif change == "legacy":
+            connection.execute("UPDATE unified_committed_inputs SET server_input_json=NULL")
+        connection.execute("UPDATE unified_committed_inputs SET lease_expires_at=0")
+    with journal._connect() as connection:
+        before = tuple(connection.iterdump())
+    with pytest.raises(FormalTaskViolation) as rejected:
+        journal.admit(request_id="retry", server_input=server_input(
+            project="wrong-project" if change == "scope" else "project-1"), **args)
+    assert rejected.value.reason == ("UNIFIED_INPUT_SERVER_IDENTITY_MISSING"
+        if change == "legacy" else "UNIFIED_INPUT_SERVER_IDENTITY_INVALID")
+    with journal._connect() as connection:
+        assert tuple(connection.iterdump()) == before
+
+
+def test_legacy_completed_input_remains_readable_without_identity_backfill(tmp_path):
+    journal = SqliteUnifiedCommittedInputJournal(tmp_path / "legacy-completed.sqlite3")
+    args = dict(voice_identity_sha256=digest("old"), fingerprint=fingerprint("old"))
+    journal.admit(request_id="old", created_at="2030-01-01T00:00:00Z", **args)
+    journal.complete(**args, result={"ok": True}, completed_at="2030-01-01T00:00:01Z")
+    replay = journal.admit(request_id="old", created_at="2030-01-01T00:00:00Z",
+                           server_input=server_input(), **args)
+    assert not replay.execute and replay.replay_result == {"ok": True}
+    with journal._connect() as connection:
+        assert connection.execute("SELECT server_input_json FROM unified_committed_inputs").fetchone()[0] is None
 
 
 def test_closed_result_lookup_preserves_original_rpc_binding_without_writes(tmp_path):
