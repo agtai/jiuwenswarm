@@ -1,0 +1,51 @@
+{
+  "parent_host": "bdf9f7e269402e8a593fd5b252c4766cfd166bb1",
+  "scope": "Test-only D-107/D-108/D-116 oracle correspondence, not production or storage policy change.",
+  "test_source_sha256": {
+    "tests/unit_tests/live_voice/test_semantic_registry.py": "03d1ba0ffeb9dbacd8548ee01ddba4930c0a3c9f95c6f7594078124d427ed489",
+    "tests/unit_tests/live_voice/test_product_composition_registry.py": "620378a27a8f7d351bfd92f2ea9c51dcf1d1095fa652608f9387e7e18901bfaf"
+  },
+  "checks": {
+    "recovery_matrix": "7 passed in 20.81s",
+    "final_result_immutability": "1 passed in 12.69s; overlaps recovery matrix, after adding result-record equality",
+    "measurement": "9 passed in 13.18s",
+    "discovery": "334 collected in 18.97s after all six removals; earlier 337 was intermediate discovery, neither is a passing-suite claim",
+    "ruff": "Both changed test files passed",
+    "initial_failures": "Fixture rejected before recovery: missing result, then missing artifact evidence. Corrected controlled observation; no production fix.",
+    "consent_policy": "3 passed in 15.15s: ignored/absent retired settings, rejected forged speech bypass and exact real-Store multi-Task control.",
+    "mutation": "Test-process-only removal of frozen semantic binding: 1 expected failure in 5.91s, rejected on semantic-binding conflict after reparsing. Unmodified fresh-process control: 1 passed in 10.85s. No production source mutation.",
+    "review": "Independent read-only review of all six original functions and replacements: no blocking unique safety oracle lost; three failed-receipt L0 and presentation recovery tests retained. Reviewer did not run tests."
+  },
+  "removed_tests": [
+    "test_unified_cancel_recovery_keeps_its_durable_original_task_target",
+    "test_unified_recovery_never_drifts_a_null_task_target_to_a_new_current",
+    "test_unified_task_commit_milestone_keeps_journal_admission_clock",
+    "test_unified_default_cancel_keeps_confirmation_boundary_and_zero_mutation",
+    "test_unified_demo_cancel_is_direct_but_only_reports_stop_requested",
+    "test_unified_demo_policy_bypass_is_backend_owned_and_one_current_task"
+  ],
+  "authority": "D-107 permits parsing after crash before semantic freeze, forbids reinterpreting a frozen decision and forbids effects before freeze.",
+  "logs_sha256": {
+    "livevoice-frozen-terminal-recovery.log": "e4187616dbe0bd62dbe9ab28e6c65c943f097fdeef555e2584c6f9726758a2d3",
+    "livevoice-frozen-terminal-recovery-final.log": "2b612146409440b9b582a3623a926cdf6768f2083c94242750d2a3a2113397c3",
+    "livevoice-frozen-recovery-matrix.log": "a9d483bcc684c779c9ea0fd492150b08c47383a3f0963fbcaaf0869d1a51d43a",
+    "livevoice-frozen-terminal-result-immutable.log": "524addd9ced4e9c2faaf9c2ca04eb8924bc3a15707bb4ecadb1a93de8c71fd0b",
+    "livevoice-current-measurement-oracles.log": "602044fc1def44c333c0f9612160ef5b9f2cd76964df52f0ce541d6608ba99d0",
+    "livevoice-frozen-oracle-discovery.log": "68c7273376b020540c0c51653aa27db81cac86366e55b097513954729c8183a3",
+    "livevoice-current-consent-policy.log": "104e3bf28579c547c95bc2baee337b11e2df8814621faecdc76a6c07a6a36c43",
+    "livevoice-frozen-oracle-discovery-final.log": "f91b5c86f03a5a15982187ed9032e1787b183c82bb4f285917f3adeb80a712b1",
+    "livevoice-frozen-reparse-mutation.log": "251f9b743cfb492ba30bc99b710b1d45c10da9418ee56b6aad68ff700ea15522",
+    "livevoice-frozen-reparse-control.log": "148b6b40ba019e80cb449e1420fa54172916382ede43f33e331a8a38c851f79d"
+  },
+  "limits": [
+    "Executor result/artifact observation controlled; Store and Registry reconstruction real.",
+    "No physical file execution, OS restart, Provider/audio or new package-install evidence.",
+    "Presentation recovery decision and WIP tests excluded.",
+    "Production line delta zero."
+  ],
+  "policy_authorities": [
+    "D-107 semantic freeze and multi-Task context",
+    "D-108 removes speech Demo bypass",
+    "D-116 exact committed local cancellation supplies consent through existing confirmation consumer"
+  ]
+}

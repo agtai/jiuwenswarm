@@ -1897,3 +1897,59 @@ The historical27-failure artifact is immutable. Of its25 distinct function names
 presentation-crash oracles remain open, and their expanded failing replacement
 stays uncommitted pending the user decision. No tests are xfailed or skipped.
 Test deletion is not production code reduction or full fusion evidence.
+
+
+#### Frozen semantic target and terminal result oracle boundary (Tier 1)
+
+D-107 explicitly distinguishes admission from semantic freezing: “Crash before a
+record is frozen may retry parsing; no protected effect may precede the freeze.”
+The two old recovery tests interrupt journal.admit and assume a lexical current/
+null Task pointer was already fixed. That is not the current accepted boundary.
+Their safety obligations after a semantic decision are owned by
+`test_frozen_semantics_survive_registry_rebuild_and_changed_task_set`: real SQLite,
+Registry reconstruction, changed Task list, exact original target/clarification,
+current authority and stale newer-input rejection, without semantic-model replay.
+
+Extended that existing test with an originally running Task completing before the
+retry. The completion is a controlled Executor observation applied through the real
+Store, including required result text/artifact evidence. Initial fixture versions
+were rejected before recovery: first no completed result, then text without artifact
+evidence. Those failures are not runtime-recovery defects. Corrected case passes
+(10.01s); the full seven-case group passes(20.81s). Added an explicit immutable-result
+record comparison after draining outbox; its affected case passes(12.69s), overlapping
+the seven. The original Task/result stay completed, the new Task stays unchanged,
+no cancellation is dispatched, and the accepted frozen decision is not reparsed.
+This does not claim actual file execution from the controlled artifact observation.
+
+Current Task measurement/admission-clock and canonical-return identity tests pass
+nine cases(13.18s). Retired the old clock-only oracle plus the two obsolete
+pre-semantic-pointer recovery tests after reading the exact D-107 authority.
+The three old failed-receipt L0 oracles remain until their unique wiring checks
+are fully mapped; both presentation-crash tests still remain. No production
+behavior or line count changed, and no permission/storage decision was inferred
+from the automatic continuation. Pending P2 presentation recovery is untouched.
+
+[Source/log hashes and discovery](../evidence/DEEP_FROZEN_ORACLE_MAPPING_20260914.json): final affected discovery collects 334 cases (18.97s); the earlier 337 was intermediate. Neither is a whole-suite pass. The presentation WIP remains outside this boundary.
+
+
+D-108/D-116 consent correspondence: production ProductCompositionSettings has no
+Demo bypass field; the old test-helper argument is ignored. Current settings and
+forged-speech-bypass tests plus real-Store exact multi-Task control pass3 cases
+(15.15s). Retired three contradictory tests requiring a trusted Demo bypass,
+one-current-Task gate or unconditional extra cancellation confirmation. Existing
+confirmation/authority consumers remain mandatory; exact committed local consent
+is not a general bypass. No production change or new policy was introduced.
+
+Independent read-only review compared all six original functions with their current
+replacements and found no blocking lost safety assertion. The three failed-receipt
+L0 tests remain: helper-level validation and successful wiring do not alone prove
+the failed-return callsite never inherits a selected attempt. Both presentation
+recovery oracles also remain. The reviewer did not execute tests.
+
+A test-process-only mutation discarded the frozen semantic binding during recovery.
+The new completed-original case failed as expected (5.91s): reparsing attempted to
+replace the persisted decision and hit the existing semantic-binding conflict.
+This proves detection of broken replay, not that wrong-target execution occurred;
+the independent journal guard still prevented it. An unmodified fresh-process
+control passed (10.85s). Production files were not patched. Ruff and scoped diff
+checks pass; production accounting remains unchanged.

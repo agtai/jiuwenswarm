@@ -1300,14 +1300,24 @@ async def test_unified_create_denial_with_real_confirmation_has_zero_task_effect
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("frozen_route", ["task", "clarification"])
-@pytest.mark.parametrize("newer_input", [False, "unified", "p3"])
+@pytest.mark.parametrize("frozen_route,newer_input,original_terminal", [
+    (route, newer, False) for route in ("task", "clarification")
+    for newer in (False, "unified", "p3")
+] + [pytest.param("task", False, True, id="original-completed-before-retry")])
 async def test_frozen_semantics_survive_registry_rebuild_and_changed_task_set(
-    semantic_runtime, monkeypatch, frozen_route, newer_input
+    semantic_runtime, monkeypatch, frozen_route, newer_input, original_terminal
 ):
     """D-107 freezes after admission; recovery cannot reinterpret a later task list."""
     s = semantic_runtime
     core = s.harness.composition._core
+    dispatched = {}
+    dispatch = s.harness.executor.dispatch
+
+    async def retain_dispatch(item):
+        dispatched[item.task_id] = item
+        return await dispatch(item)
+
+    monkeypatch.setattr(s.harness.executor, "dispatch", retain_dispatch)
     a = (await control_with_confirmation(
         s, "freeze-a", "task.create",
         {"name": "Inventory A", "instruction": "Read inventory and save a.md."},
@@ -1358,6 +1368,20 @@ async def test_frozen_semantics_survive_registry_rebuild_and_changed_task_set(
     assert len(frozen) == 1
     assert core.store.get_task(a, _scope()) == a_before
     assert s.harness.executor.cancels == []
+    if original_terminal:
+        from tests.unit_tests.live_voice.test_p3_authenticated_composition import _observations
+        from openjiuwen.core.application.tasks.formal_task_models import TerminalOutcome, TaskResultArtifact
+        result_text = "Inventory A completed before the recovered cancellation."
+        terminal = replace(
+            _observations(dispatched[a], outcome=TerminalOutcome.COMPLETED)[-1],
+            result_text=result_text,
+            result_artifacts=(TaskResultArtifact("a.md", hashlib.sha256(result_text.encode()).hexdigest()),),
+        )
+        core.store.apply_observations((terminal,))
+        a_before = core.store.get_task(a, _scope())
+        assert a_before.outcome is TerminalOutcome.COMPLETED
+        result_before = core.store.task_result(a, _scope())
+        assert result_before[0].value == "available" and result_before[1] is not None
     b = (await control_with_confirmation(
         s, "freeze-b", "task.create",
         {"name": "Inventory B", "instruction": "Read inventory and save b.md."},
@@ -1434,7 +1458,12 @@ async def test_frozen_semantics_survive_registry_rebuild_and_changed_task_set(
         ]
         assert len(s.calls) == calls_before
         assert core.store.get_task(b, _scope()) == b_before
-        if frozen_route == "task":
+        if original_terminal:
+            await core.drain_outbox()
+            assert core.store.get_task(a, _scope()) == a_before
+            assert core.store.task_result(a, _scope()) == result_before
+            assert s.harness.executor.cancels == []
+        elif frozen_route == "task":
             assert core.store.get_task(a, _scope()).cancel_requested
             await core.drain_outbox()
             assert s.harness.executor.cancels == [a_before.attempt_id]
