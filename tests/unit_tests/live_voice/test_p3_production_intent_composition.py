@@ -587,7 +587,7 @@ def test_store_reader_keeps_cancel_pending_decision_task_readable(
     assert "task.cancel" not in fact.supported_operations
 
 
-def test_store_reader_converges_completion_between_task_and_result_reads(
+def test_store_reader_atomic_snapshot_excludes_concurrent_completion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -599,12 +599,11 @@ def test_store_reader_converges_completion_between_task_and_result_reads(
         attempt_id=attempt_id,
         suffix="result-race",
     )
-    original_result = store.task_result
     completed = False
 
-    def complete_before_result_read(observed_task_id: str, observed_scope: ScopeRef):
+    def complete_after_task_rows(name: str):
         nonlocal completed
-        if not completed:
+        if name == "list_task_authority_snapshots_page.after_tasks" and not completed:
             completed = True
             _complete_selected_task(
                 store,
@@ -614,9 +613,8 @@ def test_store_reader_converges_completion_between_task_and_result_reads(
                 selection=selection,
                 suffix="result-race",
             )
-        return original_result(observed_task_id, observed_scope)
 
-    monkeypatch.setattr(store, "task_result", complete_before_result_read)
+    monkeypatch.setattr(store, "_hit", complete_after_task_rows)
     reader = StoreProductionTaskAuthorityReader(
         store=store,
         principal_id=SCOPE.subject_id,
@@ -627,46 +625,36 @@ def test_store_reader_converges_completion_between_task_and_result_reads(
     fact = next(item for item in authority.tasks if item.task_id == task_id)
 
     assert completed
+    assert fact.state.value == "running"
+    assert fact.result_digest is None and fact.outcome is None
+    fact = reader.get_task(SCOPE, task_id)
+    assert fact is not None
     assert fact.state.value == "terminal"
     assert fact.outcome is TerminalOutcome.COMPLETED
     assert fact.result_digest is not None
 
 
-def test_store_reader_persistent_generation_churn_fails_closed_without_writes(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    store = SqliteTaskStore(tmp_path / "production-reader-persistent-race.sqlite3")
-    _seed_selected_task(store, tmp_path, suffix="persistent-race")
-    original_page = store.list_task_read_snapshots_page
-    call_count = 0
+def test_store_reader_atomic_collection_excludes_concurrent_insert(tmp_path: Path, monkeypatch) -> None:
+    store = SqliteTaskStore(tmp_path / "production-reader-insert-race.sqlite3")
+    original_id, _ = _seed_selected_task(store, tmp_path, suffix="initial")
+    inserted = []
+    counts_after_write = []
 
-    def alternating_page(scope: ScopeRef, *, limit: int, cursor: str | None = None):
-        nonlocal call_count
-        page = original_page(scope, limit=limit, cursor=cursor)
-        call_count += 1
-        if call_count % 2 == 1:
-            return page
-        rows, next_cursor, has_more = page
-        task, attempt, admission = rows[0]
-        assert admission is not None
-        changed = replace(admission, queued=not admission.queued)
-        return (((task, attempt, changed),), next_cursor, has_more)
+    def insert_after_task_rows(name):
+        if name == "list_task_authority_snapshots_page.after_tasks" and not inserted:
+            inserted.append("inserting")
+            task_id, _ = _seed_selected_task(store, tmp_path, suffix="concurrent")
+            inserted[0] = task_id
+            counts_after_write.append(store.counts())
 
-    monkeypatch.setattr(store, "list_task_read_snapshots_page", alternating_page)
-    reader = StoreProductionTaskAuthorityReader(
-        store=store,
-        principal_id=SCOPE.subject_id,
-        scope=SCOPE,
-    )
-    before = store.counts()
-
-    with pytest.raises(FormalTaskViolation) as stale:
-        reader.list_visible_tasks(SCOPE)
-
-    assert stale.value.reason == "PRODUCTION_TASK_AUTHORITY_CHANGED"
-    assert call_count == 6
-    assert store.counts() == before
+    monkeypatch.setattr(store, "_hit", insert_after_task_rows)
+    reader = StoreProductionTaskAuthorityReader(store=store, principal_id=SCOPE.subject_id, scope=SCOPE)
+    first = reader.list_visible_tasks(SCOPE)
+    assert {fact.task_id for fact in first.tasks} == {original_id}
+    assert store.counts() == counts_after_write[0]
+    second = reader.list_visible_tasks(SCOPE)
+    assert {fact.task_id for fact in second.tasks} == {original_id, inserted[0]}
+    assert store.counts() == counts_after_write[0]
 
 
 def test_store_reader_projects_completed_result_digest(tmp_path: Path) -> None:
@@ -703,111 +691,32 @@ def test_store_reader_projects_completed_result_digest(tmp_path: Path) -> None:
     assert "task.create_successor" in fact.supported_operations
 
 
-def test_store_reader_rejects_corrupt_auxiliary_authority_without_writes(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_store_reader_rejects_corrupt_auxiliary_authority_without_writes(tmp_path: Path, monkeypatch) -> None:
     store = SqliteTaskStore(tmp_path / "reader-corrupt.sqlite3")
-    task_id, _attempt_id = _seed_selected_task(store, tmp_path, suffix="corrupt-reader")
-    page = store.list_task_read_snapshots_page(SCOPE, limit=64)
-    assert len(page[0]) == 1
-    task, attempt, admission = page[0][0]
+    _seed_selected_task(store, tmp_path, suffix="corrupt-reader")
+    page, _, _ = store.list_task_authority_snapshots_page(SCOPE, limit=64)
+    snapshot = page[0]
+    task, attempt = snapshot.task, snapshot.attempt
     assert attempt.selection is not None
-    original_events_page = store.events_page
-    head_page = original_events_page(
-        task_id,
-        SCOPE,
-        after_seq=task.event_head - 1,
-        limit=1,
+    corruptions = (
+        (replace(snapshot, attempt=replace(attempt, selection=replace(attempt.selection,
+            adapter_id="forged-production-adapter"))), "PRODUCTION_TASK_CAPABILITY_AUTHORITY_CORRUPT"),
+        (replace(snapshot, event_head=replace(snapshot.event_head, task_id="foreign-task")),
+            "PRODUCTION_TASK_EVENT_AUTHORITY_CORRUPT"),
+        (replace(snapshot, result_availability=TaskResultAvailability.AVAILABLE, result=None),
+            "PRODUCTION_TASK_RESULT_AUTHORITY_CORRUPT"),
+        (replace(snapshot, task=replace(task, predecessor_task_id="missing-predecessor", revision_number=2)),
+            "PRODUCTION_TASK_LINEAGE_AUTHORITY_INCOMPLETE"),
     )
     before = store.counts()
-
-    with monkeypatch.context() as scoped:
-        corrupt_selection = replace(
-            attempt.selection,
-            adapter_id="forged-production-adapter",
-        )
-        corrupt_page = (
-            ((task, replace(attempt, selection=corrupt_selection), admission),),
-            None,
-            False,
-        )
-        scoped.setattr(
-            store,
-            "list_task_read_snapshots_page",
-            lambda *_args, **_kwargs: corrupt_page,
-        )
-        with pytest.raises(FormalTaskViolation) as profile_error:
-            StoreProductionTaskAuthorityReader(
-                store=store,
-                principal_id=SCOPE.subject_id,
-                scope=SCOPE,
-            ).list_visible_tasks(SCOPE)
-        assert profile_error.value.reason == (
-            "PRODUCTION_TASK_CAPABILITY_AUTHORITY_CORRUPT"
-        )
-
-    with monkeypatch.context() as scoped:
-        corrupt_event = replace(head_page[0][0], task_id="foreign-task")
-        scoped.setattr(
-            store,
-            "events_page",
-            lambda *_args, **_kwargs: (
-                (corrupt_event,),
-                head_page[1],
-                head_page[2],
-                head_page[3],
-            ),
-        )
-        with pytest.raises(FormalTaskViolation) as head_error:
-            StoreProductionTaskAuthorityReader(
-                store=store,
-                principal_id=SCOPE.subject_id,
-                scope=SCOPE,
-            ).list_visible_tasks(SCOPE)
-        assert head_error.value.reason == "PRODUCTION_TASK_EVENT_AUTHORITY_CORRUPT"
-
-    with monkeypatch.context() as scoped:
-        scoped.setattr(
-            store,
-            "task_result",
-            lambda *_args, **_kwargs: (
-                TaskResultAvailability.AVAILABLE,
-                None,
-                None,
-            ),
-        )
-        with pytest.raises(FormalTaskViolation) as result_error:
-            StoreProductionTaskAuthorityReader(
-                store=store,
-                principal_id=SCOPE.subject_id,
-                scope=SCOPE,
-            ).list_visible_tasks(SCOPE)
-        assert result_error.value.reason == "PRODUCTION_TASK_RESULT_AUTHORITY_CORRUPT"
-
-    with monkeypatch.context() as scoped:
-        corrupt_task = replace(
-            task,
-            predecessor_task_id="missing-predecessor",
-            revision_number=2,
-        )
-        corrupt_page = (((corrupt_task, attempt, admission),), None, False)
-        scoped.setattr(
-            store,
-            "list_task_read_snapshots_page",
-            lambda *_args, **_kwargs: corrupt_page,
-        )
-        with pytest.raises(FormalTaskViolation) as lineage_error:
-            StoreProductionTaskAuthorityReader(
-                store=store,
-                principal_id=SCOPE.subject_id,
-                scope=SCOPE,
-            ).list_visible_tasks(SCOPE)
-        assert lineage_error.value.reason == (
-            "PRODUCTION_TASK_LINEAGE_AUTHORITY_INCOMPLETE"
-        )
-
-    assert store.counts() == before
+    for corrupt, reason in corruptions:
+        with monkeypatch.context() as scoped:
+            scoped.setattr(store, "list_task_authority_snapshots_page", lambda *args, **kwargs: ((corrupt,), None, False))
+            with pytest.raises(FormalTaskViolation) as raised:
+                StoreProductionTaskAuthorityReader(store=store, principal_id=SCOPE.subject_id,
+                    scope=SCOPE).list_visible_tasks(SCOPE)
+            assert raised.value.reason == reason
+            assert store.counts() == before
 
 
 @pytest.mark.parametrize(
@@ -828,14 +737,15 @@ def test_store_reader_rejects_revision_and_duplicate_successor_lineage(
     second_id, _ = _seed_selected_task(store, tmp_path, suffix=f"{corruption}-b")
     if corruption == "duplicate":
         _seed_selected_task(store, tmp_path, suffix=f"{corruption}-c")
-    page, cursor, more = store.list_task_read_snapshots_page(SCOPE, limit=64)
-    by_id = {item[0].task_id: item for item in page}
-    first_revision = by_id[first_id][0].revision_number
+    page, cursor, more = store.list_task_authority_snapshots_page(SCOPE, limit=64)
+    by_id = {item.task.task_id: item for item in page}
+    first_revision = by_id[first_id].task.revision_number
     changed = []
     successor_index = 0
-    for task, attempt, admission in page:
+    for snapshot in page:
+        task = snapshot.task
         if task.task_id == first_id:
-            changed.append((task, attempt, admission))
+            changed.append(snapshot)
             continue
         if corruption == "revision" and task.task_id == second_id:
             changed_task = replace(
@@ -850,14 +760,14 @@ def test_store_reader_rejects_revision_and_duplicate_successor_lineage(
                 predecessor_task_id=first_id,
                 revision_number=first_revision + 1,
             )
-        changed.append((changed_task, attempt, admission))
+        changed.append(replace(snapshot, task=changed_task))
     if corruption == "duplicate":
         assert successor_index == 2
     frozen_page = (tuple(changed), cursor, more)
     before = store.counts()
     monkeypatch.setattr(
         store,
-        "list_task_read_snapshots_page",
+        "list_task_authority_snapshots_page",
         lambda *_args, **_kwargs: frozen_page,
     )
 

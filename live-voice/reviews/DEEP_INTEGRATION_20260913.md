@@ -1112,3 +1112,60 @@ Refreshed same-basis evidence: Voice 112438, Host 48370, SDK 33872; aggregate 19
 1000 below the initial 195680. The -387 here is real production deletion; removed
 protocol-only test lines are excluded. Native Task/Work management audit remains
 open; no overall completion percentage is inferred from these deletions.
+
+
+### Store-owned atomic Task authority projection (.5, 2026-09-14)
+
+The Host StoreProductionTaskAuthorityReader previously queried a Task/Attempt page,
+event heads and results separately, read the page again, then retried up to three
+times on observed drift. Replace that application-level convergence mechanism with
+an enhancement to the existing SqliteTaskStore: list_task_authority_snapshots_page
+returns Task/Attempt/admission/head/result from its existing _snapshot_reader
+transaction. The old ordinary and Task/Attempt page methods also reuse the same
+keyset query and bounds/scope validation; their API and transaction behavior stay
+unchanged. No new store, scheduler, authoritative cache or persistent schema.
+
+This is an authority-read consistency boundary (Tier 3), not a new authorization
+policy. Host retains exact scope/principal checks, bounded complete-set admission,
+capability/dispatch and lineage projections, event seq/state/outcome checks and
+completed-result requirements. Subsequent mutation preconditions remain required:
+a read snapshot is not permission to execute an old command. Single-page atomicity
+does not imply multiple pages share a transaction; Host rejects a truncated set.
+
+Delete Host's second page read, convergence retry loop, separate result/head reads
+and redundant reconstruction of the same SDK state enums. Keep the application
+policy projection because Store state does not itself define product operations.
+SDK production net +3 lines (existing paging duplication removed while adding the
+aggregate read); Host production net -69. This is real reuse of a Store transaction,
+not moving the Host algorithm into a new module.
+
+Validation: 15 Host projection tests, including real SQLite writes completing a
+Task or inserting a Task after the initial SELECT. First read returns coherent
+old facts; next read sees new facts, with no extra reader writes. Seven standalone
+SDK tests cover existing-page equivalence, exact scope/cursor, invalid bounds and
+missing event-head rejection without repair. Four existing Task/Attempt snapshot
+mutation tests pass. Host projection plus real joint Task flow: 20 passed in
+25.76s. The former fake alternating-page stale test is superseded by real atomic
+collection evidence; corruption/profile/result/lineage oracles remain. Independent
+read-only review found no blocker and explicitly noted single-page and SDK-version
+limits. No external Provider/audio evidence added.
+
+Host and SDK dependency/version pins advance to 0.1.17+livevoice.5: the Host now
+requires the aggregate method. Fresh paired-wheel install verification and final
+accounting are pending closure of this batch. AgentCore has no Host dependency.
+
+
+Paired `.5` packaging closure: fresh tracked worktree staging built both wheels,
+installed with no dependencies into a new temporary target, then imported in
+Python isolated mode. All loaded Host/SDK modules originated in that target;
+1016 Host and 2409 SDK Python files matched staged source hashes. The installed
+Host authority reader successfully called the installed SDK aggregate method
+against real empty SQLite. Dependency pins and installed .5 metadata matched.
+See DEEP_ATOMIC_TASK_PAIR_20260914.json. Third-party dependencies come from the
+existing venv; no full dependency resolution, live deployment, frontend build or
+Provider test is claimed. Final net aggregate is 194614 (-1066 from initial).
+
+SDK implementation commit: `0b8cb556d` (`feat: expose atomic task authority
+snapshots from existing store`). The paired Host commit consumes that `.5` API;
+both belong to this atomic-read change. Neither repository was pushed and no
+history was rewritten.

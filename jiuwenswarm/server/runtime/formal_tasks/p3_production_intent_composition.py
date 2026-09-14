@@ -53,8 +53,7 @@ from jiuwenswarm.server.runtime.formal_tasks.production_task_intent import (
     TrustedConfirmationConsumptionReceipt,
     TrustedProductionOriginReceipt,
 )
-from openjiuwen.core.application.tasks.formal_task_models import FormalAttemptState as AttemptState, FormalTaskState as TaskState
-from openjiuwen.core.application.tasks.task_store import SqliteTaskStore
+from openjiuwen.core.application.tasks.task_store import SqliteTaskStore, TaskAuthorityReadSnapshot
 
 
 _QUERY_OPERATIONS = frozenset(
@@ -69,7 +68,6 @@ _NO_EXECUTOR_PROFILE_DIGEST = hashlib.sha256(
         }
     )
 ).hexdigest()
-_AUTHORITY_SNAPSHOT_CONVERGENCE_ATTEMPTS = 3
 
 
 def production_context_fingerprint(context: ResolvedTaskContext) -> str:
@@ -287,9 +285,8 @@ class StoreProductionTaskAuthorityReader:
     """Project authenticated Store facts into the production resolver Port.
 
     The adapter is deliberately read-only and bounded.  One complete visible
-    set is read twice around the auxiliary event/result reads, so no Task-set,
-    lifecycle, capability or lineage drift can be labelled one authority
-    generation.
+    set, current attempts, event heads and results are read from one Store-owned
+    SQLite snapshot. The application only projects product authority facts.
     """
 
     def __init__(
@@ -382,54 +379,20 @@ class StoreProductionTaskAuthorityReader:
                 ErrorCode.PERMISSION_DENIED,
             )
 
-    def _read_complete_page(
-        self,
-    ) -> tuple[
-        tuple[
-            tuple[
-                PersistentTaskRecord,
-                PersistentAttemptRecord,
-                PersistentAdmissionRecord | None,
-            ],
-            ...,
-        ],
-        str | None,
-        bool,
-    ]:
-        page = self._store.list_task_read_snapshots_page(
-            self._scope,
-            limit=self._capacity,
-        )
+    def _read_complete_page(self) -> tuple[TaskAuthorityReadSnapshot, ...]:
+        page = self._store.list_task_authority_snapshots_page(self._scope, limit=self._capacity)
         if page[1] is not None or page[2]:
             raise _reader_violation(
                 "PRODUCTION_TASK_AUTHORITY_CAPACITY_EXCEEDED",
                 "the complete visible Task set exceeds its closed authority bound",
                 ErrorCode.CAPABILITY_UNAVAILABLE,
             )
-        return page
+        return page[0]
 
-    def _read_head(self, task: PersistentTaskRecord):
-        events, frozen_head, next_after_seq, has_more = self._store.events_page(
-            task.task_id,
-            self._scope,
-            after_seq=task.event_head - 1,
-            limit=1,
-        )
+    def _read_head(self, task: PersistentTaskRecord, event):
         if (
-            frozen_head != task.event_head
-            or next_after_seq is not None
-            or has_more
-            or len(events) != 1
-            or events[0].seq != task.event_head
-        ):
-            raise _reader_violation(
-                "PRODUCTION_TASK_AUTHORITY_CHANGED",
-                "Task event authority changed during its bounded read",
-                ErrorCode.STALE,
-            )
-        event = events[0]
-        if (
-            event.task_id != task.task_id
+            event.seq != task.event_head
+            or event.task_id != task.task_id
             or event.attempt_id != task.attempt_id
             or event.scope != self._scope
             or event.state != task.state.value
@@ -580,15 +543,17 @@ class StoreProductionTaskAuthorityReader:
             operations.add("task.create_successor")
         return frozenset(operations)
 
-    def _list_visible_tasks_once(self, scope: ScopeRef) -> TaskAuthorityRead:
+    def list_visible_tasks(self, scope: ScopeRef) -> TaskAuthorityRead:
         self._require_scope(scope)
-        first, first_cursor, first_more = self._read_complete_page()
+        snapshots = self._read_complete_page()
+        records = tuple((item.task, item.attempt, item.admission) for item in snapshots)
         heads: dict[str, object] = {}
         result_digests: dict[str, str | None] = {}
         operation_versions: dict[str, frozenset[tuple[str, str]]] = {}
         profile_digests: dict[str, str] = {}
         dispatch: dict[str, tuple[str, str | None, frozenset[str]]] = {}
-        for task, attempt, admission in first:
+        for snapshot in snapshots:
+            task, attempt, admission = snapshot.task, snapshot.attempt, snapshot.admission
             if (
                 task.scope != self._scope
                 or task.attempt_id != attempt.attempt_id
@@ -598,10 +563,8 @@ class StoreProductionTaskAuthorityReader:
                     "PRODUCTION_TASK_LIFECYCLE_AUTHORITY_CORRUPT",
                     "Task and current Attempt authority are inconsistent",
                 )
-            heads[task.task_id] = self._read_head(task)
-            availability, result, _reason = self._store.task_result(
-                task.task_id, self._scope
-            )
+            heads[task.task_id] = self._read_head(task, snapshot.event_head)
+            availability, result = snapshot.result_availability, snapshot.result
             if availability is TaskResultAvailability.AVAILABLE:
                 if result is None:
                     raise _reader_violation(
@@ -623,19 +586,7 @@ class StoreProductionTaskAuthorityReader:
             operation_versions[task.task_id] = versions
             dispatch[task.task_id] = self._dispatch_control(task, attempt, admission)
 
-        second, second_cursor, second_more = self._read_complete_page()
-        if (
-            first != second
-            or first_cursor != second_cursor
-            or first_more != second_more
-        ):
-            raise _reader_violation(
-                "PRODUCTION_TASK_AUTHORITY_CHANGED",
-                "visible Task authority changed during its bounded read",
-                ErrorCode.STALE,
-            )
-
-        for task, _attempt, _admission in second:
+        for task, _attempt, _admission in records:
             result_digest = result_digests[task.task_id]
             if task.outcome is TerminalOutcome.COMPLETED and result_digest is None:
                 raise _reader_violation(
@@ -652,11 +603,11 @@ class StoreProductionTaskAuthorityReader:
                 )
 
         successors: dict[str, str] = {}
-        task_ids = {task.task_id for task, _attempt, _admission in second}
+        task_ids = {task.task_id for task, _attempt, _admission in records}
         revisions = {
-            task.task_id: task.revision_number for task, _attempt, _admission in second
+            task.task_id: task.revision_number for task, _attempt, _admission in records
         }
-        for task, _attempt, _admission in second:
+        for task, _attempt, _admission in records:
             predecessor = task.predecessor_task_id
             if predecessor is None:
                 continue
@@ -677,7 +628,7 @@ class StoreProductionTaskAuthorityReader:
             successors[predecessor] = task.task_id
 
         facts: list[AuthenticatedTaskFact] = []
-        for task, attempt, _admission in second:
+        for task, attempt, _admission in records:
             event = heads[task.task_id]
             control, admission_fingerprint, queue_operations = dispatch[task.task_id]
             result_digest = result_digests[task.task_id]
@@ -695,7 +646,7 @@ class StoreProductionTaskAuthorityReader:
                     task_id=task.task_id,
                     stable_reference=task.task_id,
                     name=task.spec.name,
-                    state=TaskState(task.state.value),
+                    state=task.state,
                     outcome=task.outcome,
                     revision_number=task.revision_number,
                     event_head=task.event_head,
@@ -706,7 +657,7 @@ class StoreProductionTaskAuthorityReader:
                         else None
                     ),
                     attempt_id=attempt.attempt_id,
-                    attempt_state=AttemptState(attempt.state.value),
+                    attempt_state=attempt.state,
                     attempt_outcome=attempt.outcome,
                     capability_profile_digest=profile_digests[task.task_id],
                     supported_operations=operations,
@@ -754,26 +705,6 @@ class StoreProductionTaskAuthorityReader:
                 self._collection_model_binding_fingerprint
             ),
         )
-
-    def list_visible_tasks(self, scope: ScopeRef) -> TaskAuthorityRead:
-        """Return one coherent generation after bounded transient convergence.
-
-        Scheduler admission and terminal settlement may advance while the
-        adapter performs its deliberately bounded auxiliary reads.  Retry only
-        that explicit stale-generation signal; corruption, scope, capacity and
-        every other authority failure still fail closed immediately.
-        """
-
-        for attempt in range(_AUTHORITY_SNAPSHOT_CONVERGENCE_ATTEMPTS):
-            try:
-                return self._list_visible_tasks_once(scope)
-            except FormalTaskViolation as error:
-                if (
-                    error.reason != "PRODUCTION_TASK_AUTHORITY_CHANGED"
-                    or attempt + 1 == _AUTHORITY_SNAPSHOT_CONVERGENCE_ATTEMPTS
-                ):
-                    raise
-        raise AssertionError("unreachable authority convergence loop")
 
     def get_task(self, scope: ScopeRef, task_id: str) -> AuthenticatedTaskFact | None:
         authority = self.list_visible_tasks(scope)

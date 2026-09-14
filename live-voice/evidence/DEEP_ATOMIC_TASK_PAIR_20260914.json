@@ -1,0 +1,42 @@
+{
+  "host": {
+    "commit": "79dcac3d9721c0e859701e274d8b22884158dafa",
+    "tracked_worktree_inputs": 4999,
+    "status": " M jiuwenswarm/server/runtime/formal_tasks/p3_production_intent_composition.py\n M pyproject.toml\n M tests/unit_tests/live_voice/test_p3_production_intent_composition.py\n"
+  },
+  "sdk": {
+    "commit": "f91bc2d5ea9650781d54db92e7acf2170b09df57",
+    "tracked_worktree_inputs": 5820,
+    "status": " M docs/dev/persistent-application-tasks.md\n M openjiuwen/core/application/tasks/task_store.py\n M pyproject.toml\n?? tests/integration_tests/application_tasks/test_task_authority_snapshot.py\n"
+  },
+  "openjiuwen-0.1.17+livevoice.5-py3-none-any.whl": {
+    "sha256": "eb552fc95469479b8299a94d03eab0ceb645ed7ac42f8fd26e9a5f57fe757b8d"
+  },
+  "workswarm-0.2.5b1-py3-none-any.whl": {
+    "sha256": "e9c32077e659649067e913a5f69a0b0c62bf57f8e44a7354d46f371d6e22a8c9"
+  },
+  "result": "CURRENT_PAIRED_IMPORT_OK",
+  "modules": {
+    "jiuwenswarm.server.runtime.work.service": "jiuwenswarm\\server\\runtime\\work\\service.py",
+    "jiuwenswarm.server.runtime.agent_adapter.runtime_formal": "jiuwenswarm\\server\\runtime\\agent_adapter\\runtime_formal.py",
+    "jiuwenswarm.server.runtime.agent_adapter.jiuwenswarm_round_harness": "jiuwenswarm\\server\\runtime\\agent_adapter\\jiuwenswarm_round_harness.py",
+    "jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition": "jiuwenswarm\\server\\runtime\\formal_tasks\\p3_authenticated_composition.py",
+    "openjiuwen.core.application.tasks": "openjiuwen\\core\\application\\tasks\\__init__.py",
+    "openjiuwen.core.application.tasks.execution_checkpoint": "openjiuwen\\core\\application\\tasks\\execution_checkpoint.py",
+    "openjiuwen.core.single_agent": "openjiuwen\\core\\single_agent\\__init__.py"
+  },
+  "installed_python_files_matched": {
+    "jiuwenswarm": 1016,
+    "openjiuwen": 2409
+  },
+  "sdk_version": "0.1.17+livevoice.5",
+  "host_sdk_requirements": [
+    "openjiuwen==0.1.17+livevoice.5",
+    "openjiuwen==0.1.17+livevoice.5; extra == \"harmony\"",
+    "openjiuwen[postgres,zmq]; extra == \"distribute\"",
+    "openjiuwen[claude]; extra == \"claude\"",
+    "openjiuwen[codex]; extra == \"codex\""
+  ],
+  "scope": "Fresh tracked packaging inputs, no build cache; no-deps target installation uses existing venv third-party dependencies. Isolated Python imports assert all loaded Host/SDK modules come from target. Python package boundary only; no frontend dist, dependency resolution, deployment or Provider acceptance.",
+  "aggregate_consumer_probe": "Installed Host StoreProductionTaskAuthorityReader reads empty real SQLite through installed SDK list_task_authority_snapshots_page; SDK version .5 asserted."
+}

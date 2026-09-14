@@ -1,6 +1,6 @@
 # LiveVoice：模块、运行位置与数据流
 
-> 2026-09-13 代码审计后的模块导读。SDK 配套版本 `0.1.17+livevoice.4`；深度融合仍为 PARTIAL。
+> 2026-09-13 代码审计后的模块导读。SDK 配套版本 `0.1.17+livevoice.5`；深度融合仍为 PARTIAL。
 > 对应[统一记录](../reviews/TASK_WORK_UNIFICATION_20260913.md)和[代码量清单](UNIFIED_CODE_ACCOUNTING.md)。这是源码说明；当前产品验收边界仍由 [STATUS](../STATUS.md) 管理。
 
 ## 1. 介绍颗粒度
@@ -43,6 +43,11 @@ Gateway 合成授权直接使用 BatchSpeech 已有摘要构建器，签发与�
 进一步删除无产品消费者的 effect claim/ACK 队列和重放账本；实际输出仍经通知
 租约交付并由 PresentationAck 决定历史，关闭仍执行 CR.close 和通知 final-drain。
 CR 的播放停止/响应取消事实及 Harness 精确 round 取消均保留。
+
+Task 权威读取（`.5`）：Host 产品投影 → SDK Store 聚合分页 → 同一 SQLite
+快照中的 Task / Attempt / admission / 事件头 / 结果。删除 Host 双读和三次收敛
+重试；保留产品权限、能力与继承关系校验。M6+M8 的权威仍是既有 Store，未新增
+任务状态或数据库。普通分页及正式命令的旧请求校验不变。
 
 ## 3. 每个模块怎样介绍
 
