@@ -918,3 +918,158 @@ controlled-expression/physical-playback boundary. The receipt reason is also
 checked as an exact JSON field; the three affected cases pass again (**3 passed,
 103 deselected in 9.39s**). Scoped Ruff/diff checks pass. "Absent before ACK"
 refers to that denial assistant record, not other user/proposal history.
+
+### Created Task before unified-result completion loss (2026-09-14)
+
+Tier 1 test-only recovery child: real semantic Registry/confirmation/SQLite Core
+creates one Task, then an injected BaseException at unified journal.complete
+interrupts result sealing after the durable Task effect. Unlike an ordinary
+Exception, the injected loss does not execute the generic result-error sealing
+fallback. The test restores the method and expires only the pending test lease.
+One mode retries in the original Registry; the other stops its Registry/runtime
+and constructs new ones against the same SQLite journal and existing Core/
+composition/confirmation services. This is component reconstruction, not full
+OS-process crash, reboot or deployment evidence.
+
+Both modes return a Task ID that resolves to the original expected Store spec,
+with unchanged Task counts and no new semantic or receipt-Agent call. The new
+Registry's Agent sees no call. Draining the real outbox after recovery invokes
+the controlled executor exactly once for that Task's original attempt, and no
+second Task is created. No second execution owner or recovery journal was added.
+The test does not claim the old response can be played after reconstruction;
+it proves durable Task receipt/effect recovery only. Old presentation/history
+crash-window cases retain their separate remaining boundary.
+
+Final affected recovery file: **3 passed in 9.52s**, including the existing
+changed-context frozen-dialogue case. Scoped Ruff/diff checks pass. Production
+bytes, package pairing and production accounting remain unchanged.
+
+Read-only review found no blocker and confirmed the pre-dispatch boundary.
+Final strengthening captures the original receipt's Task ID and compares it
+directly after recovery, and checks the exact journal row changes from pending
+to completed. Both cases pass again (**2 passed, 1 deselected in 8.95s**), with
+scoped Ruff/diff checks. This is not running-executor or post-external-effect
+recovery evidence.
+
+### Recovery effects are identified by stored execution path (2026-09-14)
+
+The same test now covers create receipt, existing-Task status answer and direct
+clarification, each with same-Registry retry and Registry/runtime reconstruction.
+All use isolated temporary Host history paths. Initial status exploration reused
+the create request ID and was rejected before the intended failure window; the
+test now uses distinct request IDs. Checking the actual journal effect exposed
+a second incorrect assumption: Cascade Task status uses agent_submit, whereas
+clarification uses authoritative_presentation. The test explicitly asserts these
+stored effect kinds rather than inferring them from operation names.
+
+After journal-completion loss, each path retains the same response identity,
+retained Task identity where applicable, unchanged Task counts and no extra
+semantic or Agent execution. The existing Task's outbox dispatch remains once.
+Clarification deliberately has no Task receipt identity; it does not relabel the
+unrelated existing Task as its business result. The exact request row transitions
+pending to completed in both recovery modes. The whole affected recovery file
+passes **7 tests in 12.62s**. This covers recovery through both stored foreground
+effect paths; it does not yet add playback/history-ACK recovery evidence or
+post-external-side-effect Executor restart proof. Production is unchanged.
+
+### Direct-presentation recovery ACK and real history (2026-09-14)
+
+The clarification modes now install the actual SessionFormalHistoryWriter with
+temporary file storage before either initial or reconstructed presentation.
+The recovered response's assistant text is absent before ACK. Polling the actual
+notification API finds that exact response/unit; a wrong-generation ACK rejects
+without history writes, exact ACK writes one matching assistant record, and ACK
+replay does not add another row. Task counts remain unchanged before the original
+attempt's single outbox dispatch. This is protocol ACK/file evidence, not audio
+hardware or DOM render evidence.
+
+The first same-Registry test stopped after eight notifications, all belonging to
+its two preceding rounds; reconstruction had no such queue and passed. The test
+now permits sixteen notification reads to traverse those known prior rounds.
+No production poll duration, preparation deadline or speech latency changed.
+The complete recovery file passes **7 tests in 14.77s**. New Registry still reuses
+the live composition/Core/confirmation services: full-process recovery and
+external side-effect restart remain outside this particular evidence.
+
+Independent comparison against the old presentation-rebuild oracle identifies
+one still-unreplaced scenario: its assistant history is ACKed before rebuilding,
+then the same unit ID is replayed and acknowledged without duplicating either
+user or assistant history. The new modes currently rebuild before the first
+ACK and compare response identity, not the pre-loss unit ID. Keep both old
+presentation crash tests until an already-ACKed reconstruction case checks the
+real original unit and per-commit history deduplication. The seven passing
+current cases do not close that missing recovery stage.
+
+### Already-ACKed reconstruction evidence and remaining scope (2026-09-14)
+
+The recovery matrix now also ACKs the clarification before Registry reconstruction,
+then replays the exact original ACK including presented_at. It checks the original
+unit ID, one user record for that commit, one assistant record, byte-equivalent
+loaded history after recovery/ACK replay, no pending history write, unchanged Task
+counts, and one outbox dispatch. Eight tests pass in 14.94s. The model and Executor
+remain controlled; storage is real temporary SQLite and Host history files.
+
+An initial test incorrectly issued a new ACK timestamp under the old output's
+history identity. The actual Host writer rejected the changed record as an
+idempotency conflict and retained cleanup as pending. Exact ACK replay passes;
+this does not prove that a newly timestamped ACK after reconstruction is supported.
+No production behavior or timeout was changed, and the old tests remain pending
+final replacement review.
+
+The previous approximate 80% overall estimate was withdrawn after user feedback.
+The net production reduction of 354 lines is limited and does not establish broad
+management convergence. Further work must prioritize production overlap in Task,
+Work, Host and Voice; historical-test migration is supporting evidence, not an
+independent measure of integration progress.
+
+### One synthesis authorization implementation (2026-09-14)
+
+Code-level comparison found identical synthesis binding builders in BatchSpeech
+and Gateway dedicated-media registration. Gateway already imports the canonical
+SpeechAuthorizationBinding and SynthesisBatchRequest from BatchSpeech. Expose
+that owner's existing builder as synthesis_authorization_binding and call it
+from all five Gateway mint/check sites as well as batch authorization. Delete
+Gateway's complete duplicate builder; do not add a wrapper or move the surviving
+implementation. Digest fields, canonical serialization, scope, response/unit,
+transforms and operation bindings are unchanged. This is bounded Voice duplicate
+elimination, not Task/Work management convergence or a new authorization policy.
+
+Affected existing batch/product-streaming/media-authority tests: 45 passed,
+227 deselected, 7.01s; Ruff passed. Includes allowed synthesis, mismatched content,
+wrong activation/authority, replay/renewal and forbidden Provider effects. No
+physical Provider/audio acceptance is claimed. Production net change for this
+edit is -43 physical lines (one existing builder retained, duplicate removed and
+one import added); final accounting manifest still requires regeneration.
+
+### Single product admission lifecycle (2026-09-14)
+
+Production references show Registry/activation leases use submit_committed_turn.
+The old dispatch_committed_turn and _register_legacy_dispatch had only test callers;
+remove both and the branches supporting legacy-dispatch adoption. The old product
+submission and execution admission dictionaries were written simultaneously and
+held the same Future/coordinator. Retain only _admissions with the existing Harness
+and Bridge reservations; remove the duplicate model, capacity check and shutdown
+wait. Exact request replay still precedes closed-admission checks and shields the
+same outcome. The identity lock, turn/commit ownership fences and rollback remain.
+
+This coherent runtime/admission boundary has unchanged intended product behavior;
+no authorization, protocol, persistence, provider or latency policy changes. Tests
+now use the production submit entry, which itself commits the turn: remove manual
+precommit setup rather than permit cross-owner adoption. Retain wrong scope/type,
+capacity, request replay/conflict, cancellation, history and close assertions. The
+old precommitted-dispatch-only UNCOMMITTED_TURN oracle is retired with that entry;
+current invalid canonical commit and feature-off checks reject before effects.
+Legacy start/commit identity-conflict tests remain for their still-present APIs.
+
+Runtime suite: 93 passed plus one old private-field reference failure; after fixing
+that reference, its exact test plus eight recovery cases and five real Host joint
+cases passed (14 tests, 62.38s). Earlier two fixture failures were obsolete ledger
+error naming and precommit setup, not production capability rollback. Independent
+read-only review traced current callers, identity/capacity rollback, shielded replay
+and shutdown; no blocker found, with deleted-block review performed by Main.
+
+Production net -216 lines here, and -43 for synthesis binding reuse: -259 this
+batch. Same-basis manifest now totals 195067, 613 below initial 195680. These are
+actual deleted implementation/state holders, not relocation. Persistent Task/Work
+management convergence remains PARTIAL; recovery tests do not expand physical
+provider, complete OS-process restart or audio-device acceptance evidence.

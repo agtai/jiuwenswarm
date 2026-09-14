@@ -984,8 +984,6 @@ async def prepare(
     selected = turn or commit()
     await current.start()
     await current.open_interaction(selected.interaction_id)
-    await current.start_turn(selected.interaction_id, selected.turn_id)
-    await current.commit_turn(selected)
     return selected
 
 
@@ -996,7 +994,7 @@ async def dispatch(
     request_id: str = "request-1",
     response_id: str = "response-1",
 ):
-    return await current.dispatch_committed_turn(
+    return await current.submit_committed_turn(
         request_id=request_id,
         response_id=response_id,
         correlation_id=f"correlation-{request_id}",
@@ -2310,8 +2308,6 @@ async def test_formal_context_identity_separates_same_content_across_interaction
         text="same question",
     )
     await current.open_interaction(second.interaction_id)
-    await current.start_turn(second.interaction_id, second.turn_id)
-    await current.commit_turn(second)
     await acknowledge_formal_round(
         current,
         second,
@@ -2992,8 +2988,6 @@ async def test_composition_enforces_its_request_bound_with_larger_injected_runti
         text="second",
     )
     await current.open_interaction(second.interaction_id)
-    await current.start_turn(second.interaction_id, second.turn_id)
-    await current.commit_turn(second)
     responses_before = current.snapshot().conversation.conversation.responses
 
     with pytest.raises(AgentConversationRuntimeViolation) as full:
@@ -3003,7 +2997,7 @@ async def test_composition_enforces_its_request_bound_with_larger_injected_runti
             request_id="request-capacity-2",
             response_id="response-capacity-2",
         )
-    assert full.value.reason == "COMPOSITION_REQUEST_LEDGER_FULL"
+    assert full.value.reason == "COMMITTED_TURN_LEDGER_FULL"
     assert current.snapshot().conversation.conversation.responses == responses_before
     assert current.snapshot().retained_admissions == 1
     assert lower.calls == 1
@@ -3939,8 +3933,6 @@ async def test_interaction_close_rejects_replaced_round_without_cancel_effect() 
         await asyncio.wait_for(current.next_notification(), timeout=1)
 
     second = commit(turn_id="turn-2", commit_id="commit-2", text="second")
-    await current.start_turn(second.interaction_id, second.turn_id)
-    await current.commit_turn(second)
     await dispatch(
         current,
         second,
@@ -4019,14 +4011,14 @@ async def test_concurrent_replay_dispatches_once_and_conflict_does_not_mutate_cr
     assert lower.calls == 1
     responses_before = current.snapshot().conversation.conversation.responses
     with pytest.raises(AgentConversationRuntimeViolation) as conflict:
-        await current.dispatch_committed_turn(
+        await current.submit_committed_turn(
             request_id="request-1",
             response_id="changed-response",
             correlation_id="correlation-request-1",
             commit=selected,
             context=FormalContextSnapshot(selected.scope),
         )
-    assert conflict.value.reason == "COMPOSITION_REQUEST_ID_CONFLICT"
+    assert conflict.value.reason == "COMMITTED_TURN_REQUEST_CONFLICT"
     assert current.snapshot().conversation.conversation.responses == responses_before
     for _ in range(4):
         await asyncio.wait_for(current.next_notification(), timeout=1)
@@ -4073,7 +4065,7 @@ async def test_product_submit_commits_and_dispatches_once_with_exact_replay() ->
 
 
 @pytest.mark.asyncio
-async def test_product_bound_turn_rejects_cross_request_legacy_dispatch() -> None:
+async def test_product_bound_turn_rejects_cross_request_submission() -> None:
     lower = LowerFormalAdapter()
     history = RecordingHistoryWriter()
     current = runtime(lower, history)
@@ -4099,7 +4091,6 @@ async def test_product_bound_turn_rejects_cross_request_legacy_dispatch() -> Non
     before = current.snapshot()
     ledgers_before = (
         tuple(current._admissions),
-        tuple(current._committed_turn_submissions),
         tuple(current._submitted_turn_bindings.items()),
     )
 
@@ -4117,7 +4108,6 @@ async def test_product_bound_turn_rejects_cross_request_legacy_dispatch() -> Non
     assert after.bridge == before.bridge
     assert (
         tuple(current._admissions),
-        tuple(current._committed_turn_submissions),
         tuple(current._submitted_turn_bindings.items()),
     ) == ledgers_before
     assert tuple(current._admissions) == ("request-1",)
@@ -4143,7 +4133,7 @@ async def test_product_bound_turn_rejects_cross_request_legacy_dispatch() -> Non
 
 
 @pytest.mark.asyncio
-async def test_product_submit_attaches_to_exact_inflight_legacy_dispatch() -> None:
+async def test_product_submit_replays_exact_inflight_admission() -> None:
     lower = LowerFormalAdapter()
     history = RecordingHistoryWriter()
     current = runtime(lower, history)
@@ -4158,20 +4148,19 @@ async def test_product_submit_attaches_to_exact_inflight_legacy_dispatch() -> No
         await original_completion(*args, **kwargs)
 
     current._complete_admission = gated_completion  # type: ignore[method-assign]
-    legacy = asyncio.create_task(dispatch(current, selected))
+    initial = asyncio.create_task(dispatch(current, selected))
     await asyncio.wait_for(entered.wait(), timeout=1)
     product = asyncio.create_task(submit(current, selected))
 
     async def product_is_attached() -> None:
-        while "request-1" not in current._committed_turn_submissions:
+        while "request-1" not in current._admissions:
             await asyncio.sleep(0)
 
     await asyncio.wait_for(product_is_attached(), timeout=1)
-    assert not legacy.done()
+    assert not initial.done()
     assert not product.done()
     snapshot = current.snapshot()
     assert tuple(current._admissions) == ("request-1",)
-    assert tuple(current._committed_turn_submissions) == ("request-1",)
     assert current._submitted_turn_bindings == {
         (selected.interaction_id, selected.turn_id): "request-1"
     }
@@ -4185,10 +4174,10 @@ async def test_product_submit_attaches_to_exact_inflight_legacy_dispatch() -> No
     assert not history.users and not history.assistant_intents
 
     release.set()
-    legacy_handle = await asyncio.wait_for(legacy, timeout=1)
+    initial_handle = await asyncio.wait_for(initial, timeout=1)
     product_handle = await asyncio.wait_for(product, timeout=1)
-    assert product_handle is legacy_handle
-    await asyncio.wait_for(legacy_handle.completion, timeout=1)
+    assert product_handle is initial_handle
+    await asyncio.wait_for(initial_handle.completion, timeout=1)
     await asyncio.wait_for(history_wait(history), timeout=1)
     assert len(current.snapshot().conversation.conversation.responses) == 1
     assert lower.calls == 1
@@ -4336,7 +4325,6 @@ async def test_product_submit_rejects_reused_commit_id_before_start_turn() -> No
     before = current.snapshot()
     ledgers_before = (
         tuple(current._admissions),
-        tuple(current._committed_turn_submissions),
         tuple(current._submitted_turn_bindings.items()),
     )
 
@@ -4354,7 +4342,6 @@ async def test_product_submit_rejects_reused_commit_id_before_start_turn() -> No
     assert after.bridge == before.bridge
     assert (
         tuple(current._admissions),
-        tuple(current._committed_turn_submissions),
         tuple(current._submitted_turn_bindings.items()),
     ) == ledgers_before
     assert all(
@@ -4379,7 +4366,6 @@ async def test_product_submit_rejects_reused_commit_id_before_start_turn() -> No
     assert replay_snapshot.bridge == before.bridge
     assert (
         tuple(current._admissions),
-        tuple(current._committed_turn_submissions),
         tuple(current._submitted_turn_bindings.items()),
     ) == ledgers_before
     assert lower.calls == 1
@@ -4470,17 +4456,16 @@ async def test_concurrent_product_submits_claim_commit_id_before_capacity() -> N
     assert not winner.done()
 
     assert len(current._admissions) == 1
-    assert len(current._committed_turn_submissions) == 1
     assert len(current._submitted_turn_bindings) == 1
     assert not current._commits
     winner_request, winner_entry = next(
-        iter(current._committed_turn_submissions.items())
+        iter(current._admissions.items())
     )
     assert tuple(current._admissions) == (winner_request,)
     assert current._submitted_turn_bindings == {
         (
-            winner_entry.commit.interaction_id,
-            winner_entry.commit.turn_id,
+            winner_entry.harness_reservation.binding.commit.interaction_id,
+            winner_entry.harness_reservation.binding.commit.turn_id,
         ): winner_request
     }
     snapshot = current.snapshot()
@@ -4556,7 +4541,6 @@ async def test_legacy_start_claim_blocks_product_before_reservation() -> None:
     assert tuple(current._turn_identity_claims) == (selected.turn_id,)
     assert not current._commit_identity_claims
     assert not current._admissions
-    assert not current._committed_turn_submissions
     assert not current._submitted_turn_bindings
     blocked = current.snapshot()
     assert not blocked.conversation.conversation.turns
@@ -4578,7 +4562,6 @@ async def test_legacy_start_claim_blocks_product_before_reservation() -> None:
     assert after.harness.reservations == ()
     assert after.bridge.reserved_requests == 0
     assert not current._admissions
-    assert not current._committed_turn_submissions
 
     legal_handle = await submit(
         current,
@@ -4642,7 +4625,6 @@ async def test_legacy_commit_claim_blocks_product_before_reservation() -> None:
     assert not product.done()
     assert current._commit_identity_claims[legacy.commit_id].turn_id == legacy.turn_id
     assert not current._admissions
-    assert not current._committed_turn_submissions
     blocked = current.snapshot()
     assert tuple(
         (turn.turn_id, turn.state.value)
@@ -4664,7 +4646,6 @@ async def test_legacy_commit_claim_blocks_product_before_reservation() -> None:
     assert after.harness.reservations == ()
     assert after.bridge.reserved_requests == 0
     assert not current._admissions
-    assert not current._committed_turn_submissions
 
     legal_handle = await submit(
         current,
@@ -4736,7 +4717,6 @@ async def test_product_claim_blocks_legacy_commit_before_cr_mutation() -> None:
         for turn in after_conflict.conversation.conversation.turns
     ) == ((legacy.turn_id, "capturing", None),)
     assert len(current._admissions) == 1
-    assert len(current._committed_turn_submissions) == 1
     assert len(current._submitted_turn_bindings) == 1
     assert not current._commits
     assert lower.calls == 0
@@ -4871,7 +4851,7 @@ async def test_product_submit_reserves_harness_capacity_before_turn_mutation() -
 
 
 @pytest.mark.asyncio
-async def test_uncommitted_and_feature_off_have_zero_authority_effects() -> None:
+async def test_invalid_commit_and_feature_off_have_zero_authority_effects() -> None:
     lower = LowerFormalAdapter()
     history = RecordingHistoryWriter()
     current = runtime(lower, history)
@@ -4879,8 +4859,11 @@ async def test_uncommitted_and_feature_off_have_zero_authority_effects() -> None
     selected = commit()
     before = current.snapshot()
     with pytest.raises(AgentConversationRuntimeViolation) as uncommitted:
-        await dispatch(current, selected)
-    assert uncommitted.value.reason == "UNCOMMITTED_TURN"
+        await current.submit_committed_turn(
+            request_id="request-invalid", response_id="response-invalid",
+            correlation_id="correlation-invalid", commit=selected.to_dict(),
+            context=FormalContextSnapshot(selected.scope))
+    assert uncommitted.value.reason == "INVALID_COMMITTED_TURN"
     after = current.snapshot()
     assert after.conversation == before.conversation
     assert after.harness.retained_rounds == 0
@@ -5470,8 +5453,6 @@ async def test_bridge_queue_full_and_cr_accept_failure_leave_no_partial_response
         await asyncio.wait_for(current.next_notification(), timeout=1)
 
     second = commit(turn_id="turn-2", commit_id="commit-2", text="second")
-    await current.start_turn(second.interaction_id, second.turn_id)
-    await current.commit_turn(second)
     second_handle = await dispatch(
         current,
         second,
@@ -5479,8 +5460,6 @@ async def test_bridge_queue_full_and_cr_accept_failure_leave_no_partial_response
         response_id="response-2",
     )
     third = commit(turn_id="turn-3", commit_id="commit-3", text="third")
-    await current.start_turn(third.interaction_id, third.turn_id)
-    await current.commit_turn(third)
     # Harness execution is admitted independently of the Bridge consumer's
     # concurrency lane.  Stabilize the two accepted Agent effects so this
     # assertion measures only the rejected third dispatch.
@@ -5504,8 +5483,6 @@ async def test_bridge_queue_full_and_cr_accept_failure_leave_no_partial_response
     assert (await second_handle.completion).terminal_outcome.value == "unknown"
 
     fourth = commit(turn_id="turn-4", commit_id="commit-4", text="fourth")
-    await current.start_turn(fourth.interaction_id, fourth.turn_id)
-    await current.commit_turn(fourth)
     with pytest.raises(ConversationRuntimeViolation) as reused:
         await dispatch(
             current,
@@ -5537,11 +5514,9 @@ async def test_harness_capacity_failure_precedes_cr_mutation_and_agent_effect() 
     await asyncio.wait_for(call_wait(lower, 1), timeout=1)
 
     second = commit(turn_id="turn-2", commit_id="commit-2", text="second")
-    await current.start_turn(second.interaction_id, second.turn_id)
-    await current.commit_turn(second)
     responses_before = current.snapshot().conversation.conversation.responses
     with pytest.raises(AgentConversationRuntimeViolation) as invalid_channel:
-        await current.dispatch_committed_turn(
+        await current.submit_committed_turn(
             request_id="request-invalid-channel",
             response_id="response-invalid-channel",
             correlation_id="correlation-invalid-channel",

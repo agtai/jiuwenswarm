@@ -107,6 +107,7 @@ from jiuwenswarm.channels.live_voice.batch_speech import (
     SYNTHESIZE_OPERATION,
     SynthesisBatchRequest,
     SpeechAuthorizationBinding,
+    synthesis_authorization_binding,
     SpeechRpcContext,
     parse_synthesis_batch_request,
 )
@@ -750,50 +751,6 @@ def _native_downlink_frames(
             )
         )
     return tuple(frames)
-
-
-def _synthesis_authorization_binding(
-    request: SynthesisBatchRequest,
-) -> SpeechAuthorizationBinding:
-    content_sha256 = hashlib.sha256(
-        canonical_json_bytes(
-            {
-                "response": {
-                    "interaction_id": request.response.interaction_id,
-                    "response_id": request.response.response_id,
-                    "response_generation": request.response.response_generation,
-                },
-                "unit_id": request.unit_id,
-                "display_text": request.display_text,
-                "spoken_text": request.spoken_text,
-                "transforms": [
-                    {
-                        "transform": item.transform,
-                        "source_start": item.source_start,
-                        "source_end": item.source_end,
-                        "rendered_text": item.rendered_text,
-                    }
-                    for item in request.transforms
-                ],
-                "locale": request.locale,
-                "voice": request.voice,
-                "required_sample_rate_hz": request.required_sample_rate_hz,
-            }
-        )
-    ).hexdigest()
-    return SpeechAuthorizationBinding(
-        subject_id=request.scope.subject_id,
-        scope=request.scope,
-        operation=SYNTHESIZE_OPERATION,
-        operation_id=request.operation_id,
-        correlation_id=request.correlation_id,
-        capture_id=None,
-        capture_generation=None,
-        track_id=None,
-        response=request.response,
-        unit_id=request.unit_id,
-        content_sha256=content_sha256,
-    )
 
 
 def _streaming_error_envelope(
@@ -6231,7 +6188,7 @@ class DedicatedMediaProductRegistry:
                     request = parse_synthesis_batch_request(params, SpeechRpcContext(
                         record.subject_id, session_id, Assurance.AUTHENTICATED))
                     native_task_synthesis = self._live_native_task_synthesis(
-                        record, _synthesis_authorization_binding(request), now)
+                        record, synthesis_authorization_binding(request), now)
                 except Exception:
                     pass  # Recognition/arbitrary open-capture requests stay asserted.
             if (
@@ -6554,7 +6511,7 @@ class DedicatedMediaProductRegistry:
                     "authoritative_agent_text": True, "locale": identity.locale, "voice": None,
                     "required_sample_rate_hz": identity.sample_rate_hz}
                 request = parse_synthesis_batch_request(payload, context)
-                binding = _synthesis_authorization_binding(request)
+                binding = synthesis_authorization_binding(request)
                 with self._lock:
                     retry = transfer.unplayed_preparation
                     if (current() and retry is not None and retry[0] == identity
@@ -6663,7 +6620,7 @@ class DedicatedMediaProductRegistry:
         The single response high-water belongs to this live activation; provider
         history is neither an issuer nor an authorization fallback.
         """
-        binding = _synthesis_authorization_binding(request)
+        binding = synthesis_authorization_binding(request)
         with self._lock:
             parent_id = self._subjects.get((session_id, subject_id))
             parent = self._records.get(parent_id or "")
@@ -6807,7 +6764,7 @@ class DedicatedMediaProductRegistry:
         # contract instead of being silently approximated.
         if request.transforms or request.voice is not None:
             return None
-        binding = _synthesis_authorization_binding(request)
+        binding = synthesis_authorization_binding(request)
         if self.authorize(binding) != binding:
             return None
         with self._lock:
@@ -7085,7 +7042,7 @@ class DedicatedMediaProductRegistry:
             return result
         try:
             request = parse_synthesis_batch_request(params, context)
-            authorization_binding = _synthesis_authorization_binding(request)
+            authorization_binding = synthesis_authorization_binding(request)
         except Exception:
             return result
         try:

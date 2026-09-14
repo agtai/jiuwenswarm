@@ -34,6 +34,13 @@ flowchart TB
 
 这是职责图，框不等于进程。NativeEngine 实际在 Gateway，云端 Realtime 与它合为一组语音能力；排查延迟时再展开本地/云端边界。AgentCore 是 AgentServer 进程使用的 Python SDK，**不是新增网络服务**。AgentServer 是 JiuwenSwarm 的业务后端；Host 指承载并装配这些能力的应用宿主。业务后端不能用 AgentCore 来代称。
 
+09-14 准入收敛：Registry/激活租约 → `AgentConversationRuntime.submit_committed_turn`
+→ 单一 `_admissions` 记录 → 既有 Harness/Bridge 预留与执行。删除无生产消费者的
+`dispatch_committed_turn`、独立预留及双账本接管；同一结果 Future 和协调任务不再
+由两份账本重复持有。保留语音轮次/播放事实，未将其混同正式 Task 状态。
+Gateway 合成授权直接使用 BatchSpeech 已有摘要构建器，签发与校验共享字段绑定。
+该变化收敛 M4+M5 与 Gateway 内部实现，不代表 M6+M8 已全面统一。
+
 ## 3. 每个模块怎样介绍
 
 | 模块 | 一句话责任 | 输入 → 输出 | 关键代码与运行位置 |
