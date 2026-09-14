@@ -225,7 +225,7 @@ test('mounted production ChatPanel ownership lifecycle completes Session handoff
 
 const enabledBundleUrl = pathToFileURL(join(mountedBundleDirectory, 'LiveVoiceIntegratedRoutePanelEnabled.mjs'));
 await build({
-  entryPoints: [fileURLToPath(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url))],
+  entryPoints: [fileURLToPath(new URL('./support/hostLiveVoicePanel.tsx', import.meta.url))],
   bundle: true,
   platform: 'node',
   format: 'esm',
@@ -246,7 +246,7 @@ const { LiveVoiceIntegratedRoutePanel: EnabledLiveVoiceIntegratedRoutePanel } = 
 
 const p3EnabledBundleUrl = pathToFileURL(join(mountedBundleDirectory, 'LiveVoiceIntegratedRoutePanelP3Enabled.mjs'));
 await build({
-  entryPoints: [fileURLToPath(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url))],
+  entryPoints: [fileURLToPath(new URL('./support/hostLiveVoicePanel.tsx', import.meta.url))],
   bundle: true,
   platform: 'node',
   format: 'esm',
@@ -267,7 +267,7 @@ const { LiveVoiceIntegratedRoutePanel: P3EnabledLiveVoiceIntegratedRoutePanel } 
 
 const fullyEnabledBundleUrl = pathToFileURL(join(mountedBundleDirectory, 'LiveVoiceIntegratedRoutePanelFullyEnabled.mjs'));
 await build({
-  entryPoints: [fileURLToPath(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url))],
+  entryPoints: [fileURLToPath(new URL('./support/hostLiveVoicePanel.tsx', import.meta.url))],
   bundle: true,
   platform: 'node',
   format: 'esm',
@@ -293,7 +293,7 @@ const generationInterruptBundleUrl = pathToFileURL(
   join(mountedBundleDirectory, 'LiveVoiceIntegratedRoutePanelGenerationInterrupt.mjs'),
 );
 await build({
-  entryPoints: [fileURLToPath(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url))],
+  entryPoints: [fileURLToPath(new URL('./support/hostLiveVoicePanel.tsx', import.meta.url))],
   bundle: true,
   platform: 'node',
   format: 'esm',

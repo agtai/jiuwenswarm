@@ -108,6 +108,13 @@ replay/conflict, project rejection, Voice close followed by completion, and
 running cancellation while the original dialogue completes normally. These use
 controlled model/authority/lower-Agent dependencies. The broader Host/Voice
 registry audit and remaining old joint adjustment/barge-in oracles remain open.
+The frontend lifecycle child places the formal Task reader under Host ChatPanel,
+using the existing webClient and formalTaskStore. Voice consumes its snapshot
+with a synchronous notification fence; it no longer constructs, closes or polls
+the reader. Host-only/consumer-detach, polling, stale-session, UNKNOWN replay and
+fail-closed target tests cover this boundary. This does not close the remaining
+project-authority audit, historical backend validation debt or product candidate.
+
 The frozen-input recovery child now keeps server generation/context identity in
 the existing Host journal, independently of model records. P3 and unified input
 share a persisted sequence; conflicting unified input cannot advance it. Current

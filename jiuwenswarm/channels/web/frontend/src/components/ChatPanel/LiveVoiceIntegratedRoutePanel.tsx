@@ -20,7 +20,8 @@ import {
   BrowserAudioDeviceSelectionOwner,
   type BrowserAudioDeviceSelectionSnapshot,
 } from '../../features/live-voice/formal/browserAudioDeviceSelection';
-import { FormalP3TaskExperienceOwner, type FormalP3TaskExperienceSnapshot } from '../../features/tasks/formalP3TaskExperience';
+import type { FormalP3TaskExperienceOwner, FormalP3TaskExperienceSnapshot } from '../../features/tasks/formalP3TaskExperience';
+import { useFormalTaskSession } from '../../features/tasks/FormalTaskSessionProvider';
 import {
   FormalTaskControlLeaf,
   isFormalTaskRetryEligible,
@@ -314,15 +315,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const [p3TargetTaskId, setP3TargetTaskId] = useState('');
   const [p3MutationStatus, setP3MutationStatus] = useState<ProductP3MutationStatus>('idle');
   const [p3MutationReason, setP3MutationReason] = useState<string | null>(null);
-  const [taskExperience, setTaskExperience] = useState<FormalP3TaskExperienceSnapshot>({
-    status: FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION ? 'idle' : 'disabled',
-    session_id: null,
-    tasks: Object.freeze([]),
-    selected_task_id: null,
-    collection_operations: Object.freeze([]),
-    command: null,
-    reason: FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION ? null : 'FORMAL_P3_TASK_EXPERIENCE_DISABLED',
-  });
+  const taskSession = useFormalTaskSession();
+  const taskExperience = taskSession.snapshot;
   useEffect(() => {
     if (p2Activation.status !== 'active' || !p2Activation.agent_model_selection) return;
     recordAudioDiagnostic('native_model_confirmed', { ...p2Activation.binding,
@@ -494,6 +488,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const progressActivationOwnerRef = useRef<ProductWebP3ProgressOwner | null>(null);
   const p3MutationOwnerRef = useRef<ProductWebP3MutationOwner | null>(null);
   const taskExperienceOwnerRef = useRef<FormalP3TaskExperienceOwner | null>(null);
+  taskExperienceOwnerRef.current = taskSession.owner;
   const pendingP3MutationRef = useRef<ProductWebP3MutationInput | null>(null);
   const p3AcceptedFollowTargetRef = useRef<Readonly<{ session_id: string; task_id: string }> | null>(null);
   const voiceTaskOriginRef = useRef<ProductVoiceTaskOrigin | null>(null);
@@ -4430,96 +4425,44 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   }, [correlationId, p2JournalState, productRequest, props.activeSessionId, props.isConnected]);
 
   useEffect(() => {
-    taskExperienceOwnerRef.current?.close();
-    taskExperienceOwnerRef.current = null;
     const sessionId = props.activeSessionId;
-    if (!FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION) {
+    const owner = taskSession.owner;
+    if (owner === null || sessionId === null) {
       taskExperienceValidatedSessionRef.current = null;
       taskExperienceRevalidationPendingSessionRef.current = null;
-      setTaskExperience({
-        status: 'disabled',
-        session_id: null,
-        tasks: Object.freeze([]),
-        selected_task_id: null,
-        collection_operations: Object.freeze([]),
-        command: null,
-        reason: 'FORMAL_P3_TASK_EXPERIENCE_DISABLED',
-      });
       return;
     }
-    if (sessionId === null || !hasDurableProductVoiceSession(sessionId)) {
-      taskExperienceValidatedSessionRef.current = null;
-      taskExperienceRevalidationPendingSessionRef.current = null;
-      setTaskExperience({ status: 'idle', session_id: null, tasks: Object.freeze([]), selected_task_id: null, collection_operations: Object.freeze([]), command: null, reason: null });
-      return;
-    }
-    if (inspectProductP3TaskTarget({ session_id: sessionId }).status === 'invalid') {
-      setTaskExperience({
-        status: 'failed',
-        session_id: sessionId,
-        tasks: Object.freeze([]),
-        selected_task_id: null,
-        collection_operations: Object.freeze([]),
-        command: null,
-        reason: 'PRODUCT_P3_TASK_TARGET_RECOVERY_REQUIRED',
-      });
-      return;
-    }
-    const owner = new FormalP3TaskExperienceOwner({
-      enabled: true,
-      request: (method, params, requestId) => productRequest(method, params, { requestId }),
-      on_snapshot: snapshot => {
-        if (taskExperienceOwnerRef.current !== owner || activeSessionRef.current !== sessionId) return;
-        useFormalTaskStore.getState().publish(sessionId, owner, snapshot);
-        if (snapshot.status === 'loading' && taskExperienceValidatedSessionRef.current === sessionId) {
-          taskExperienceRevalidationPendingSessionRef.current = sessionId;
-        }
-        setTaskExperience(snapshot);
-        const selected = snapshot.status === 'ready'
-          ? snapshot.tasks.find(task => task.task_id === snapshot.selected_task_id)
-          : undefined;
-        if (snapshot.status === 'ready') {
-          taskExperienceValidatedSessionRef.current = sessionId;
-          taskExperienceRevalidationPendingSessionRef.current = null;
-          if (selected === undefined && createdProgressRouteRef.current !== null) {
-            adoptCreatedProgressRoute(null);
-          }
-          if (selected !== undefined && createdProgressRouteRef.current?.task_id !== selected.task_id) {
-            adoptCreatedProgressRoute(Object.freeze({
-              task_id: selected.task_id,
-              correlation_id: selected.correlation_id,
-              origin: null,
-            }));
-          }
-        }
-      },
-    });
-    taskExperienceOwnerRef.current = owner;
-    useFormalTaskStore.getState().bind(sessionId, owner);
-    setTaskExperience(owner.snapshot());
-    return () => {
-      useFormalTaskStore.getState().release(sessionId, owner);
-      owner.close();
-      if (taskExperienceOwnerRef.current === owner) taskExperienceOwnerRef.current = null;
-    };
-  }, [productRequest, props.activeSessionId]);
-
-  useEffect(() => {
-    const owner = taskExperienceOwnerRef.current;
-    const sessionId = props.activeSessionId;
-    if (owner === null || sessionId === null) return;
-    if (!props.isConnected) {
-      if (taskExperienceValidatedSessionRef.current === sessionId) {
+    // The notification fence must observe loading synchronously, before a
+    // suspended old progress continuation can run. This subscription is only
+    // a Voice adapter; it neither starts nor retires the Host task reader.
+    const adopt = (snapshot: FormalP3TaskExperienceSnapshot) => {
+      if (taskExperienceOwnerRef.current !== owner || activeSessionRef.current !== sessionId
+          || snapshot.session_id !== sessionId) return;
+      if (['loading', 'disconnected'].includes(snapshot.status)
+          && taskExperienceValidatedSessionRef.current === sessionId) {
         taskExperienceRevalidationPendingSessionRef.current = sessionId;
       }
-      adoptCreatedProgressRoute(null);
-      owner.disconnect();
-      return;
-    }
-    // Revalidate read authority without replacing the same-Session unresolved
-    // operation. Recovery is explicit and replays only its original RPC.
-    void owner.refresh(sessionId).catch(() => {});
-  }, [productRequest, props.activeSessionId, props.isConnected]);
+      if (!isConnectedRef.current || snapshot.status === 'disconnected') {
+        adoptCreatedProgressRoute(null);
+        return;
+      }
+      if (snapshot.status === 'ready') {
+        taskExperienceValidatedSessionRef.current = sessionId;
+        taskExperienceRevalidationPendingSessionRef.current = null;
+        const selected = snapshot.tasks.find(task => task.task_id === snapshot.selected_task_id);
+        if (selected === undefined && createdProgressRouteRef.current !== null) adoptCreatedProgressRoute(null);
+        if (selected !== undefined && createdProgressRouteRef.current?.task_id !== selected.task_id) {
+          adoptCreatedProgressRoute(Object.freeze({ task_id: selected.task_id, correlation_id: selected.correlation_id, origin: null }));
+        }
+      }
+    };
+    const unsubscribe = useFormalTaskStore.subscribe((state, previous) => {
+      const entry = state.entries[sessionId];
+      if (entry?.owner === owner && entry.snapshot !== previous.entries[sessionId]?.snapshot) adopt(entry.snapshot);
+    });
+    adopt(owner.snapshot());
+    return unsubscribe;
+  }, [taskSession.owner, props.activeSessionId, props.isConnected]);
 
   useEffect(() => {
     if (!props.isConnected) {
@@ -4536,23 +4479,6 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       leaf.reconnect(leaf.snapshot().binding);
     }
   }, [props.isConnected]);
-
-  useEffect(() => {
-    const owner = taskExperienceOwnerRef.current;
-    const sessionId = props.activeSessionId;
-    if (!props.isConnected || owner === null || sessionId === null) return;
-    let closed = false;
-    let timer: ReturnType<typeof setTimeout>;
-    const isCurrent = () => !closed && mountedRef.current && isConnectedRef.current
-      && activeSessionRef.current === sessionId && taskExperienceOwnerRef.current === owner;
-    const refresh = async () => {
-      if (!isCurrent()) return;
-      try { await owner.refreshLiveTasks(sessionId, isCurrent); } catch { /* Owner retains the authoritative read failure. */ }
-      if (isCurrent()) timer = setTimeout(() => { void refresh(); }, owner.snapshot().status === 'failed' ? 15_000 : 5_000);
-    };
-    timer = setTimeout(() => { void refresh(); }, 5_000);
-    return () => { closed = true; clearTimeout(timer); };
-  }, [productRequest, props.activeSessionId, props.isConnected]);
 
   const refreshUnifiedTaskProjection = async (value: Readonly<Record<string, unknown>>, sessionId: string, isCurrentActivation: () => boolean = () => true, selectDiscoveredTask = true): Promise<void> => {
     const result = value.result;

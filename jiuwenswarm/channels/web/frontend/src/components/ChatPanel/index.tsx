@@ -76,7 +76,8 @@ import {
 import { useDesktopLocalFilePickerReady, useWelcomeBubblePosition } from '../../hooks';
 import { ApplicationPluginTaskRuntimes } from '../../applicationPlugins/ApplicationPluginOutlet';
 import { generateUuidV4 } from '../../utils/uuid';
-import { FEATURE_LIVE_VOICE_DEMO, FEATURE_LIVE_VOICE_INTEGRATED_P1, FEATURE_LIVE_VOICE_INTEGRATED_WEB } from '../../featureFlags';
+import { FEATURE_LIVE_VOICE_DEMO, FEATURE_LIVE_VOICE_INTEGRATED_P1, FEATURE_LIVE_VOICE_INTEGRATED_WEB, FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION } from '../../featureFlags';
+import { FormalTaskSessionProvider } from '../../features/tasks/FormalTaskSessionProvider';
 import { useLiveVoiceDemo } from '../../features/live-voice/useLiveVoiceDemo';
 import type { BrowserAudioCaptureStreamFactory } from '../../features/live-voice/formal/adapters/browserAudioIOAdapter';
 import { useProductVoiceBrowserOwnership } from './useProductVoiceBrowserOwnership';
@@ -1927,23 +1928,25 @@ export const ChatPanel = React.memo(function ChatPanel({
       </div>
 
       {FEATURE_LIVE_VOICE_INTEGRATED_WEB && (
-        <LiveVoiceIntegratedRoutePanel
-          activeSessionId={activeSessionId}
-          selectedAgentModelName={selectedAgentModelName}
-          isConnected={isConnected}
-          agentRouteAvailable={mode === 'agent' && !liveVoiceInteractionBlocked}
-          productVoiceControlRef={formalProductVoiceEnabled ? productVoiceControlRef : undefined}
-          onProductVoiceStateChange={formalProductVoiceEnabled ? adoptProductVoiceState : undefined}
-          onProductVoiceMessage={
-            formalProductVoiceEnabled
-              ? event => {
-                  if (event.session_id !== activeSessionId) return;
-                  addMessageIfAbsent(event.session_id, { ...event.message });
-                }
-              : undefined
-          }
-          onNativeVoiceDisplayEnded={formalProductVoiceEnabled ? settleNativeVoiceMessages : undefined}
-        />
+        <FormalTaskSessionProvider sessionId={activeSessionId} connected={isConnected} enabled={FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION}>
+          <LiveVoiceIntegratedRoutePanel
+            activeSessionId={activeSessionId}
+            selectedAgentModelName={selectedAgentModelName}
+            isConnected={isConnected}
+            agentRouteAvailable={mode === 'agent' && !liveVoiceInteractionBlocked}
+            productVoiceControlRef={formalProductVoiceEnabled ? productVoiceControlRef : undefined}
+            onProductVoiceStateChange={formalProductVoiceEnabled ? adoptProductVoiceState : undefined}
+            onProductVoiceMessage={
+              formalProductVoiceEnabled
+                ? event => {
+                    if (event.session_id !== activeSessionId) return;
+                    addMessageIfAbsent(event.session_id, { ...event.message });
+                  }
+                : undefined
+            }
+            onNativeVoiceDisplayEnded={formalProductVoiceEnabled ? settleNativeVoiceMessages : undefined}
+          />
+        </FormalTaskSessionProvider>
       )}
 
       {formalProductVoiceEnabled && (

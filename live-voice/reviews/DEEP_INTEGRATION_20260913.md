@@ -520,3 +520,85 @@ additional production enhancement or relocation in this child. Only the net
 change to the already-existing AgentServer file is counted, not its entire size.
 See [file manifest](../evidence/DEEP_HOST_CONFIG_20260914.json) and
 [module manifest](../evidence/DEEP_HOST_CONFIG_MODULES_20260914.json).
+
+## Frontend lifecycle audit and implementation boundary (2026-09-14)
+
+Source checked at Host `65eb3fb344df`; this section is an implementation
+checkpoint, **not completed lifecycle integration**. Paths below are relative
+to `jiuwenswarm/channels/web/frontend/src/`.
+
+| Responsibility/current entry | Existing capability and overlap | Decision / authoritative state / acceptance |
+|---|---|---|
+| `LiveVoiceIntegratedRoutePanel.tsx` constructs the only `FormalP3TaskExperienceOwner` in a session/request effect, binds `formalTaskStore`, handles reconnect and polls live tasks | `ChatPanel/index.tsx` already supplies active session and WebSocket connection; `ensureSessionRuntimes` creates Host session runtimes but has no request/connection lifetime | Host ChatPanel must own this session reader lifecycle. Remove construction, disconnect/close and polling ownership from Voice; do not allocate network readers inside the synchronous runtime initializer. Same session reconnect preserves the owner and unresolved RPC; session replacement fences old callbacks. |
+| `formalTaskStore.ts` publishes owner snapshots; Voice also keeps a React snapshot; `ToolPanel/index.tsx` reads the store | Existing Zustand session lookup and `RecentTasksPanel` already consume formal records | Keep one owner snapshot projection in the Host store; remove the redundant Voice snapshot when adapting consumers. Store is a view, never a second durable Task authority. Exact-owner publish/release and session/project filtering remain. |
+| `formalP3TaskExperience.ts` manages list/status/events/result and retained mutation RPC | Plugin `applicationPlugins/taskProgressStore.ts` has controllers and display records, but lacks formal attempt/revision/event identity, UNKNOWN and confirmation/replay semantics | Keep the formal protocol adapter, reuse Host session/display entry. Do not translate it into plugin state: `applicationTasksToTeamTasks` maps failure to `cancelled` for display and cannot preserve formal result truth. No forced migration of unrelated plugin consumers. |
+| Voice snapshot callback adopts selected Task into `createdProgressRoute` and tracks read revalidation | No equivalent generic notification callback: this binds Task selection to Voice progress authority | Retain Voice subscription/adaptation only. Host task reader must function with the Voice consumer absent; removing a Voice consumer must not close that reader or issue task cancellation. |
+| `hasDurableProductVoiceSession` and `defaultProductRequest` in `liveVoiceProductOperations.ts` | The former checks only non-null/nonblank/not-`new`; the latter directly delegates to native `webClient.request` | Use the existing Host transport and public session identity. Do not invent a Voice activation requirement. Preserve current feature flags and request IDs. |
+| Persisted target validation before owner construction | `inspectProductP3TaskTarget` is an existing fail-closed compatibility guard; malformed or unavailable target storage currently prevents even list RPC | Preserve this guard in the Host lifecycle wiring. Existing mounted malformed/unavailable-target tests require zero list/progress/confirmation/mutation calls; lifting it would change current behavior. |
+
+The Voice panel is mounted by `ChatPanel/index.tsx` whenever
+`FEATURE_LIVE_VOICE_INTEGRATED_WEB` is enabled, even before speech activation.
+Therefore the current code does **not** imply that simply stopping Voice removes
+Task cards. The actual remaining dependency is component ownership and mount
+lifetime. `FormalP3TaskExperienceOwner.disconnect()` retains the original RPC
+and exposes UNKNOWN; `close()` clears it. Those operations are not interchangeable
+and neither issues backend task cancellation.
+
+Implementation scope is Tier 2: frontend session/connection lifetime and stale
+response fencing. Owned surfaces are the Host ChatPanel wiring, existing formal
+Task store/reader, Voice subscription, and their frontend integration tests.
+Preserve feature-off/no-session behavior, invalid persisted-target rejection,
+same-session retry identity, reconnect read-only revalidation, current polling
+intervals, session/project isolation, results and selected-task progress binding.
+Exercise a Host-mounted reader without Voice, Voice detach with reader retained,
+connection loss and late responses, session switch, malformed target and pending
+mutation recovery. Existing standalone Voice mounted fixtures must explicitly
+provide Host lifecycle composition; a production fallback that silently creates
+another owner would recreate the problem. Backend protocol/storage, Task/Work
+execution policy, provider/audio timing, and converting every Work to a Task
+card are excluded. Source implementation and validation remain pending; current
+production accounting is unchanged.
+
+### Frontend implementation and evidence
+
+Implemented Host `FormalTaskSessionProvider` at the existing ChatPanel session/
+connection boundary. It uses native webClient, the existing reader protocol and
+formalTaskStore; Voice no longer constructs/closes/disconnects/polls that reader
+or maintains a second React snapshot. Voice retains a synchronous, exact-owner
+store subscription for notification selection and the revalidation fence.
+Independent review caught an initial passive-effect fence window; replacing it
+with subscribe-before-current-snapshot adoption closed that source-level risk.
+The reviewer found no further concrete issue in the corrected subscription.
+
+New Host-mounted tests: **9 passed**, including no Voice consumer, consumer
+detach with real 5-second list/status/events/result polling, stale previous
+session response, same-owner UNKNOWN preservation with explicit byte-equivalent
+RPC replay, flag-off/new/null session and malformed/unavailable target storage.
+These use the real frontend owner/store and controlled RPC envelopes, not a
+real backend/Provider. Initial polling fixture failures exposed missing event
+scope/source identity; the corrected fixture is accepted by the strict parser.
+An earlier command failed to apply the mounted fixture wrapper because its
+working directory was wrong; those raw-component failures are superseded by
+explicit Host composition and the final command below.
+
+Existing Task owner suite plus the first eight Host cases: **47 passed**. Final
+affected mounted group, after the synchronous fence correction: **47 passed,
+1 skipped** (the pre-existing provider-starting/running-AUDIO case remains
+skipped; no acceptance credit). Its command is:
+
+```powershell
+node --test --test-name-pattern='mounted.*(P3|Task|task)' tests/liveVoiceIntegratedRoutePanelMounted.test.mjs
+```
+
+New tests are discoverable through the existing integrated-web package script.
+Frontend `tsc --noEmit -p tsconfig.json` and Vite production build pass; Vite
+retains its large-chunk warning. No browser/device/Provider acceptance is claimed.
+
+Same-basis counts: Voice113084, Host48440, SDK33872, total195396 (284 below the
+initial195680). This child is net+70: Voice−74, Host+144. Most lifecycle logic is
+retained under Host composition, not claimed as deleted duplicate algorithms;
+the duplicate Voice snapshot and ownership entry are removed. See the current
+[file manifest](../evidence/DEEP_FRONTEND_HOST_20260914.json) and
+[module manifest](../evidence/DEEP_FRONTEND_HOST_MODULES_20260914.json).
+Broader backend historical tests, project-authority evidence and final paired
+packaging remain open. No SDK, timeout, credentials, deployment or remote update.

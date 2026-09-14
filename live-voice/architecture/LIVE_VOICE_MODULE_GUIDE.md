@@ -119,6 +119,25 @@ Task 和 Work 的这些应用执行增强由 LiveVoice 开发后下沉，不应�
 `copyNewConversationSelections`，继续通过 `createConversationSession` 调用
 AgentServer 的 `session.create`，没有另一套语音产品会话。
 
+前端正式任务读取器现由 ChatPanel 的 `FormalTaskSessionProvider` 管理，使用宿主
+`webClient.request` 和现有 `formalTaskStore`。Voice 不再构造、关闭或轮询读取器，
+也不再另存 React Task snapshot；它同步订阅宿主投影，保留播报进度和重验证屏障。
+工具面板继续读取同一投影。断线保留原未决 RPC，重连仅重新读取；显式恢复才重发
+完全相同的请求。卸载 Voice 消费者不会关闭宿主读取器，宿主生命周期结束也不会
+取消服务端 Task。旧目标日志的失败关闭检查暂作为兼容适配保留。
+
+```mermaid
+flowchart LR
+  Host[ChatPanel 会话与连接] --> Reader[FormalTaskSessionProvider]
+  Reader --> RPC[宿主 webClient / 正式任务协议]
+  Reader --> View[formalTaskStore 唯一前端投影]
+  View --> Tasks[ToolPanel 任务展示]
+  View --> Voice[Voice 同步订阅与播报适配]
+```
+
+这不是将正式 Task 转成插件 Task：插件视图没有尝试、UNKNOWN 和精确恢复语义，
+其展示转换会丢失正式状态。正式协议适配因此保留，Work 也不被强制生成 Task 卡片。
+
 普通语音 Agent/Work 的真实执行链是 `RuntimeFormalAgentFacade` →
 `AgentRuntime.stream_owned` → `RuntimeSessionCoordinator` → 原有 Agent facade →
 SDK Agent。正式 Task 则由持久 outbox 和 SDK 项目执行器管理独立 attempt，再调用
