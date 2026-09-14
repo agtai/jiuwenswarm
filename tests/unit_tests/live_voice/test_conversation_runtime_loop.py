@@ -41,6 +41,31 @@ def scope() -> ScopeRef:
     return ScopeRef("subject-1", "project-1", "session-1", Assurance.AUTHENTICATED)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("broken_sink", [False, True])
+async def test_slow_operation_diagnostics_separate_wait_without_changing_result(monkeypatch, broken_sink):
+    from types import SimpleNamespace
+    from jiuwenswarm.channels.live_voice import conversation_runtime_loop as module
+    from jiuwenswarm.common import live_voice_audio_diagnostics as diagnostics
+
+    clock = iter([1.09, 1.12])
+    monkeypatch.setattr(module, "time", SimpleNamespace(perf_counter=lambda: next(clock)))
+    observed = []
+
+    def record(event, **fields):
+        observed.append((event, fields))
+        if broken_sink:
+            raise OSError("diagnostics unavailable")
+
+    monkeypatch.setattr(diagnostics, "record_audio_diagnostic", record)
+    result = asyncio.get_running_loop().create_future()
+    runtime = ConversationRuntimeLoop(scope())
+    runtime._apply_operation(module._QueuedOperation(1, lambda: "accepted", result, 1.0))
+    assert await result == "accepted"
+    assert observed[0][1]["queue_wait_ms"] == pytest.approx(90)
+    assert observed[0][1]["duration_ms"] == pytest.approx(30)
+
+
 def commit(
     *,
     turn_id: str = "turn-1",

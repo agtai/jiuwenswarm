@@ -1114,9 +1114,11 @@ async def test_native_business_context_before_start_poll_and_close(monkeypatch, 
     uplink = registry.consume_ticket(_media_ticket(activated), request_origin=ORIGIN)
     try:
         if context_failure:
-            with pytest.raises(MediaTransportViolation):
+            with pytest.raises(MediaTransportViolation) as rejected:
                 await registry.begin_native_interaction(uplink)
+            assert rejected.value.reason_id == "MEDIA_NATIVE_BUSINESS_CONTEXT_START_FAILED"
             assert order == ["fetch"] and not engine.started
+            assert registry._native_sessions == {}
         else:
             await registry.begin_native_interaction(uplink)
             for _ in range(50):

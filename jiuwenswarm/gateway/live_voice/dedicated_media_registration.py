@@ -1415,6 +1415,9 @@ class DedicatedMediaProductRegistry:
                 await self.close_native_interaction(record)
             if isinstance(error, (KeyboardInterrupt, SystemExit, GeneratorExit)):
                 raise
+            if (isinstance(error, MediaTransportViolation)
+                    and error.reason_id == "MEDIA_NATIVE_BUSINESS_CONTEXT_START_FAILED"):
+                raise
             raise MediaTransportViolation(
                 "MEDIA_NATIVE_PROVIDER_START_FAILED",
                 "Native Provider session did not start",
@@ -1511,7 +1514,13 @@ class DedicatedMediaProductRegistry:
                 raise MediaTransportViolation("MEDIA_NATIVE_BUSINESS_UNAVAILABLE", "Negotiated business context is unavailable")
             async def refresh_business_context():
                 return await self._refresh_native_business_context(session)
-            business_initial = await refresh_business_context()
+            try:
+                business_initial = await refresh_business_context()
+            except Exception as error:
+                raise MediaTransportViolation(
+                    "MEDIA_NATIVE_BUSINESS_CONTEXT_START_FAILED",
+                    "Native business context could not be loaded before Provider start",
+                ) from error
             self._require_native_start_owner(record, session)
             self._native_work_state_rows(business_initial["context"]["works"])
             optimized = getattr(activation, "observation_contract_version", None) is not None

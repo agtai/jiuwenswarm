@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -160,6 +161,7 @@ class _QueuedOperation:
     ingress_seq: int
     callback: Callable[[], object]
     future: asyncio.Future[object]
+    queued_at: float
 
 
 _ValueT = TypeVar("_ValueT")
@@ -1392,6 +1394,7 @@ class ConversationRuntimeLoop:
                 self._next_ingress_seq,
                 cast(Callable[[], object], callback),
                 future,
+                time.perf_counter(),
             )
         )
         self._next_ingress_seq += 1
@@ -1490,8 +1493,8 @@ class ConversationRuntimeLoop:
             return self._normal.popleft()
         return None
 
-    @staticmethod
-    def _apply_operation(operation: _QueuedOperation) -> None:
+    def _apply_operation(self, operation: _QueuedOperation) -> None:
+        started = time.perf_counter()
         try:
             result = operation.callback()
         except Exception as error:
@@ -1500,6 +1503,22 @@ class ConversationRuntimeLoop:
         else:
             if not operation.future.done():
                 operation.future.set_result(result)
+        finally:
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            queue_wait_ms = (started - operation.queued_at) * 1000
+            if max(elapsed_ms, queue_wait_ms) >= 20:
+                # Separate event-loop/lane starvation from synchronous ledger
+                # processing. Diagnostics must never change admission outcome.
+                try:
+                    from jiuwenswarm.common.live_voice_audio_diagnostics import record_audio_diagnostic
+
+                    record_audio_diagnostic(
+                        "conversation_runtime_operation", _inherit_context=False,
+                        session_id=self._scope.session_id, seq=operation.ingress_seq,
+                        queue_wait_ms=queue_wait_ms, duration_ms=elapsed_ms,
+                    )
+                except Exception:
+                    pass
 
     def _shutdown_state(self) -> tuple[ConversationEffect, ...]:
         for record in self._runtime.snapshot().responses:

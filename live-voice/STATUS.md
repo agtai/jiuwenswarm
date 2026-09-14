@@ -84,6 +84,18 @@ support has been discussed, not implemented.
 
 ## Current execution packet
 
+### Active session repair (2026-09-14)
+
+The user authorized the [three-stage repair](reviews/SESSION_REPAIR_20260914.md)
+after testing session `web_1a0a051ff63_fca69639db63`: Task correctness, Voice
+stability, then deployment verification and remaining faults. This supersedes
+older pause/deployment exclusions for these specific repairs. Stage 1 scoped
+checks pass; deployed acceptance and read-scope audit remain open. Multiple
+local commits are authorized; final root-cause review must remove ineffective
+or unnecessary fixes. Stage 2 investigation is active. No new full-product acceptance is claimed.
+The deferred prepared-response timeout and buffering/latency policy remain
+unchanged. No remote update or history rewrite is authorized.
+
 ### Continuation boundary
 
 

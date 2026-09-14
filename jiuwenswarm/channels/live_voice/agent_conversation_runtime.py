@@ -757,7 +757,9 @@ class AgentConversationRuntime:
         self._generation_interruptions: dict[str, AgentGenerationInterruption] = {}
         self._generation_interruption_order: deque[str] = deque()
         self._generation_interruption_lock = asyncio.Lock()
-        self._native_admission_lock = asyncio.Lock()
+        from jiuwenswarm.common.live_voice_lock_diagnostics import ObservedAsyncLock
+
+        self._native_admission_lock = ObservedAsyncLock("native_admission")
         self._native_owner: NativeInteractionRuntimeOwner | None = None
         self._consumer: asyncio.Task[None] | None = None
         self._shutdown: asyncio.Task[AgentConversationShutdownResult] | None = None
