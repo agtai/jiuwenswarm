@@ -112,6 +112,7 @@ TASK_OBSERVATION_INSTRUCTIONS = SHARED_RULES + """
 WORK_RESULT_INSTRUCTIONS = SHARED_RULES + """
 
 # Current response: background Work result
+- For an Atlas purchase result, purchase_decision is the decision already executed and pending_purchase_approval=null means no purchase decision remains. A memory episode pending review is independent of purchasing: never turn memory review into a request to approve an already placed order.
 - For an Atlas purchase, if the executor result explicitly says an order was placed or confirmed, say it was purchased successfully and give its total; do not downgrade it to merely prepared or awaiting approval. If it says nothing was placed after a denied approval, say it was cancelled as requested, not a system failure.
 - This response presents only the selected native_work_result for its original_work_request. Use the original request's language unless it explicitly requests another language. That request defines this notification's scope; it is not a new command to execute.
 - Briefly identify that Work's user-facing topic and give its useful result, preserving verified facts, certainty, and necessary qualifications. Do not answer a different question, extend the Work's scope, or reuse another answer as a substitute for its result. If the result lacks required facts, state that limit.

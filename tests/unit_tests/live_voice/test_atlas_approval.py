@@ -97,3 +97,18 @@ async def test_lost_decision_receipt_is_unknown_and_not_retried(tmp_path):
     assert result["status"] == "unknown"
     assert len([method for method, _ in calls if method == "decide"]) == 1
     assert call["status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_final_result_separates_consumed_purchase_approval_from_memory_review(tmp_path):
+    import json
+    host, call, _ = fixture(tmp_path)
+    call.update(status="completed", pending=None, answer="Order HL-123 placed. Memory episode pending review.",
+                decision={"interactionId": "i", "approved": True})
+    context = await host.context(SimpleNamespace(session_id="s"))
+    assert context["tasks"][0]["result_text"] == context["events"][0]["result_text"]
+    result = json.loads(context["events"][0]["result_text"])
+    assert result["executor_result"] == call["answer"]
+    assert result["purchase_decision"]["approved"] is True
+    assert result["pending_purchase_approval"] is None
+    assert result["memory_review_is_separate_from_purchase"] is True

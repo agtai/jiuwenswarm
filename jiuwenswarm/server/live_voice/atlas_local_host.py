@@ -110,6 +110,10 @@ class AtlasLocalHost:
             target = "atlas:" + call_id
             final = call.get("answer") or call["text"]
             pending = self._pending(call) if phase == "waiting_for_user" else None
+            if terminal and call.get("decision") is not None:
+                final = json.dumps({"executor_result": final,
+                    "purchase_decision": call["decision"], "pending_purchase_approval": pending,
+                    "memory_review_is_separate_from_purchase": True}, ensure_ascii=False)
             common = {"execution_owner": "atlas", "atlas_turn_id": call["turnId"], "atlas_mandate_id": call["mandateId"],
                       "request_text": call["requestText"],
                       "phase": phase, "result_text": final if terminal else None, "files": call["files"],
@@ -162,7 +166,8 @@ class AtlasLocalHost:
             current = await self._call(binding, "observe", {"callId": call_id})
             if action.operation == "task.details":
                 return {"status": "observed", "task_id": action.target_id, "phase": current["status"],
-                        "pending": self._pending(current), "operations": current.get("operations", []),
+                        "pending": self._pending(current), "decision": current.get("decision"),
+                        "operations": current.get("operations", []),
                         "operations_truncated": current.get("operationsTruncated", False),
                         "answer": current.get("answer"), "files": current["files"]}
             observed = next((task for task in (snapshot or {}).get("tasks", [])
