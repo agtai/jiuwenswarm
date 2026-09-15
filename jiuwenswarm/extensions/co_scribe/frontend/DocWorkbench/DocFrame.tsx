@@ -90,7 +90,7 @@ export function DocFrame({ tab, nonce, anchor = '', alwaysNewTab, onAlwaysNewTab
         <span className="doc-workbench__dot" style={{ background: 'var(--color-feedback-success)' }} />
         <a onClick={() => setHelp(true)} data-testid="doc-workbench-cant-see">{t('docs.workbench.cantSee')}</a>
         <span>·</span>
-        <span>{t('docs.workbench.reloadsOnReceipt')}</span>
+        <span>{t('docs.workbench.liveFromPlatform')}</span>
       </div>
     </div>
   );

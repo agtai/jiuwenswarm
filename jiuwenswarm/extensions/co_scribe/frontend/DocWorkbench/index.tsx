@@ -134,7 +134,9 @@ export function DocWorkbench({ composer, onUserAnswer }: {
   }, [tab, refresh]);
 
   const [frameNonce, setFrameNonce] = useState(0);
-  const nonce = (tab ? wb.reloadNonce[tab.docId] ?? 0 : 0) + frameNonce + (wb.locate && wb.locate.docId === tab?.docId ? wb.locate.nonce : 0);
+  // The frame reloads only on request: the reload button, or a locate that must
+  // land on a new anchor. A receipt never reloads it; the platform renders live.
+  const nonce = frameNonce + (wb.locate && wb.locate.docId === tab?.docId ? wb.locate.nonce : 0);
 
   if (!wb.open || !tab) return null;
   const unreadTotal = wb.tabs.reduce((a, t) => a + t.unread, 0);

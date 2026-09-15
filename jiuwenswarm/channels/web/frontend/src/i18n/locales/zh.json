@@ -275,7 +275,7 @@
       "loginRetry": "已登录，重试",
       "alwaysExternal": "总是在新标签打开",
       "cantSee": "看不到文档？",
-      "reloadsOnReceipt": "新回执到达时自动重载",
+      "liveFromPlatform": "编辑由平台实时呈现",
       "chat": "聊天",
       "noReplyYet": "还没有回复",
       "receipt": "回执",

@@ -50,8 +50,6 @@ interface DocWorkbenchState {
   chatVisible: boolean;
   /** 按平台记住的「总是在新标签打开」。 */
   alwaysNewTab: Record<string, boolean>;
-  /** 主界面 iframe 的重载计数（按文档），新回执到达时 +1。 */
-  reloadNonce: Record<string, number>;
   /** 定位请求：切到该文档并把回执的区域交给主界面。 */
   locate: { docId: string; receiptId: string; anchor: string; nonce: number } | null;
 
@@ -144,7 +142,6 @@ export const useDocWorkbenchStore = create<DocWorkbenchState>((set, get) => ({
   sessionId: null,
   bySession: {},
   railTab: 'receipts',
-  reloadNonce: {},
   locate: null,
   ...loadPrefs(),
 
@@ -213,11 +210,13 @@ export const useDocWorkbenchStore = create<DocWorkbenchState>((set, get) => ({
     const isFirst = tab.seenReceiptIds.length === 0;
     const added = isFirst ? 0 : fresh.length;
     if (fresh.length === 0) return 0;
+    // A new receipt marks the tab, nothing more: the framed editor is the
+    // platform's own live page and shows the write by itself. Reloading it here
+    // only threw away the reader's scroll position and selection.
     set({
       tabs: s.tabs.map((t) => (t.docId === docId
         ? { ...t, seenReceiptIds: [...t.seenReceiptIds, ...fresh], unread: t.docId === s.activeDocId ? 0 : t.unread + added }
         : t)),
-      reloadNonce: added > 0 ? { ...s.reloadNonce, [docId]: (s.reloadNonce[docId] ?? 0) + 1 } : s.reloadNonce,
     });
     return added;
   },
