@@ -654,7 +654,7 @@ not simply deleting pending state by analogy.
 | Protect accepted product behavior | Scoped Git/SQLite/native and integrated Web tests; deployed session report independently retained | Automated fixtures are not new human running-cancel or physical audio acceptance |
 | Statistics and architecture | Exclusive ownership/module manifests; M4+M5 and M7+M9; AgentServer described as runtime container | Hermes/multimodal fixed-version claims unchanged; no new benchmark inference |
 | Review prior overcorrection/temporary bridges | Removed duplicate hash/spec/status/origin work and dead browser owner/wrapper; cold diff reviews | Frontend productCompositionContract retains explicit test contract-parity consumers in retirement manifest; telemetry ledger has tests/support consumers, so neither is blindly deleted |
-| Local delivery only | Source commits and clean status; current paired wheel validation in progress | No push, service restart, private config or user project writes; active deployed pair remains old |
+| Local delivery only | Source commits and clean status; current paired wheel validation completed | No push, service restart, private config or user project writes; active deployed pair remains old |
 
 An independent read-only subagent review was explicitly authorized by the user
 on 2026-09-15 and dispatched across the complete frozen-to-current production
@@ -697,3 +697,35 @@ No production change was required by review. It does not close the retained
 management gaps or establish overall product/physical Provider acceptance.
 The reviewer made no filesystem/Git changes. Current installed verification and
 frontend verification remain Main's evidence, not independent re-executions.
+
+## Decision boundary: retire legacy non-atomic subscription source
+
+Further current caller inspection finds exactly two production TaskEventSubscription
+constructors: Host P3 authenticated composition and Host TaskEventAuthorityProgressSource.
+Both explicitly pass authority_atomic_replay=True. The SDK still offers a default
+False mode taking only TaskEventSource.get_task/get_attempt/events. It reads Task,
+then Attempt, then Task again to reject a changed baseline; it starts after the
+current head (live-only), unlike authority mode's retained-prefix replay.
+
+Concrete next candidate: remove _start_authorized_baseline (110 lines) and its
+constructor dispatch, require an explicit supported authority mode, and require
+TaskEventAuthoritySource.event_authority_snapshot. Preserve the existing atomic
+prefix and consumer-page modes, shared tail polling, validation and ACK/cursor
+behavior. SqliteTaskStore already implements the required atomic API. Current
+Host callers need no semantic change. No schema or data migration is required.
+
+This is a deliberate SDK compatibility break: callers omitting the current flag,
+passing False, or providing only get_task/get_attempt/events would no longer be
+supported. It must not silently reinterpret a formerly tail-only feed as replay.
+A guarded interface failure is preferable to switching their event semantics.
+Old mode tests must be retired only after applicable scope/expiry/cancel/race
+oracles are mapped to current atomic source tests; relevant shared validators
+and polling cannot be deleted merely because the old startup is removed.
+
+The user's original request requires a decision before changing existing consumer
+behavior. Therefore this candidate is proposed but not implemented pending the
+explicit compatibility choice; preserving this legacy API is also a legitimate
+retention decision, not proof that native task callbacks can replace durable
+subscription management. All already-authorized implementation and required
+module review/installed verification above are complete; no failing test or
+unresolved review finding is being concealed by this decision boundary.
