@@ -76,7 +76,7 @@ async def test_ui_decision_or_changed_hash_rejects_delayed_voice_without_effects
     assert (await host.execute(binding, delegate, snapshot=snapshot))["reason"] == "ATLAS_APPROVAL_STALE"
     call.update(pending=None, status="running")
     assert (await host.context(binding))["events"] == []
-    assert (await host.execute(binding, delegate, snapshot=snapshot))["reason"] == "ATLAS_APPROVAL_STALE"
+    assert (await host.execute(binding, delegate, snapshot=snapshot))["reason"] == "ATLAS_NO_PENDING_APPROVAL"
     assert not any(method == "decide" for method, _ in calls)
 
 
@@ -229,3 +229,68 @@ async def test_one_spoken_answer_cannot_approve_directory_then_submit_form(tmp_p
     second = await host.execute(binding, delegate, snapshot=observed)
     assert second["decision_scope"] == "expense_form_submission"
     assert len([1 for method, _ in effects if method == "decide"]) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["expense", "repurchase"])
+@pytest.mark.parametrize("approved", [True, False])
+async def test_consumed_decision_returns_truth_not_expiry_or_new_effect(tmp_path, kind, approved):
+    host, call, effects = fixture(tmp_path)
+    call["demoKind"] = kind
+    if kind == "expense":
+        call["expense"] = {"state": {"status": "draft", "totals": {"EUR": 1382.9}}}
+    binding = SimpleNamespace(session_id="s", interaction_id="v")
+    snapshot = await host.context(binding)
+    operation = "task.approve" if approved else "task.reject"
+    delegate = SimpleNamespace(business=SimpleNamespace(operation=operation,
+        target_id="atlas:task:c", expected_revision=5), turn_id="u")
+    first = await host.execute(binding, delegate, snapshot=snapshot)
+    assert first["status"] == ("approved" if approved else "rejected_by_user")
+    call.update(status="completed", revision=9, answer="Order placed" if approved else "Cancelled")
+    if kind == "expense":
+        call["expense"]["state"]["status"] = "submitted" if approved else "rejected"
+    # Both replayed and fresh-context repeated/opposite decisions are observations.
+    for context in [snapshot, await host.context(binding)]:
+        for requested in ["task.approve", "task.reject"]:
+            delegate.business.operation = requested
+            result = await host.execute(binding, delegate, snapshot=context)
+            assert result["status"] == "observed"
+            assert result["reason"] == "ATLAS_APPROVAL_ALREADY_RESOLVED"
+            assert result["executed"] is False
+            assert result["decision"]["approved"] is approved
+            assert result["phase"] == "completed"
+            assert result["executor_result"] == call["answer"]
+            if kind == "expense":
+                assert result["expense_form"]["status"] == call["expense"]["state"]["status"]
+    assert len([1 for method, _ in effects if method == "decide"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_lost_receipt_recovery_observes_completed_decision_without_reexecution(tmp_path):
+    host, call, effects = fixture(tmp_path)
+    binding = SimpleNamespace(session_id="s")
+    snapshot = await host.context(binding)
+    original = host._call
+    async def lost(binding, method, params):
+        result = await original(binding, method, params)
+        if method == "decide":
+            raise TimeoutError()
+        return result
+    host._call = lost
+    delegate = SimpleNamespace(business=SimpleNamespace(operation="task.approve", target_id="atlas:task:c", expected_revision=5))
+    assert (await host.execute(binding, delegate, snapshot=snapshot))["status"] == "unknown"
+    recovered = await host.execute(binding, delegate, snapshot=snapshot)
+    assert recovered["status"] == "observed" and recovered["decision"]["approved"] is True
+    assert recovered["phase"] == "running"  # Approval is not a purchase receipt.
+    assert recovered["executor_result"] is None
+    assert len([1 for method, _ in effects if method == "decide"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_malformed_pending_is_not_reported_as_no_approval(tmp_path):
+    host, call, effects = fixture(tmp_path)
+    call["pending"].pop("preparedActionHash")
+    delegate = SimpleNamespace(business=SimpleNamespace(operation="task.approve", target_id="atlas:task:c", expected_revision=5))
+    result = await host.execute(SimpleNamespace(session_id="s"), delegate, snapshot={})
+    assert result["status"] == "rejected" and result["reason"] == "ATLAS_APPROVAL_STALE"
+    assert not any(method == "decide" for method, _ in effects)

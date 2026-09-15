@@ -139,8 +139,7 @@ class AtlasLocalHost:
                 for key in ("status", "claim_id", "totals", "findings")} if isinstance(expense_snapshot, dict) else None)
             if expense:
                 final = json.dumps({"executor_result": final, "expense_form": expense_summary,
-                    "form_state_unavailable": bool(call.get("expenseStateUnavailable")),
-                    "demo_only": True, "real_reimbursement_submitted": False}, ensure_ascii=False)
+                    "form_state_unavailable": bool(call.get("expenseStateUnavailable"))}, ensure_ascii=False)
             common = {"execution_owner": "atlas", "atlas_turn_id": call["turnId"], "atlas_mandate_id": call["mandateId"],
                       "request_text": call["requestText"],
                       **({"demo_kind": kind} if kind else {}),
@@ -212,10 +211,25 @@ class AtlasLocalHost:
             observed = next((task for task in (snapshot or {}).get("tasks", [])
                              if task.get("task_id") == action.target_id), {})
             pending = self._pending(current)
+            facts = {"task_id": action.target_id, "phase": current["status"],
+                     "revision_number": current["revision"], "decision": current.get("decision"),
+                     "pending_decision_scope": _decision_scope(kind, pending),
+                     "pending": pending, "executor_result": current.get("answer"),
+                     "expense_form": current.get("expense", {}).get("state") if kind == "expense" else None}
+            if pending is None and current.get("pending") is not None:
+                return {**facts, "status": "rejected", "reason": "ATLAS_APPROVAL_STALE", "executed": False,
+                        "hint": "The pending decision cannot be validated. No action was executed; do not retry or claim completion."}
+            if pending is None:
+                # Observing a consumed gate never executes or reverses a decision.
+                # This also recovers a lost callback receipt without a blind retry.
+                return {**facts, "status": "observed", "executed": False,
+                        "reason": "ATLAS_APPROVAL_ALREADY_RESOLVED" if current.get("decision") else "ATLAS_NO_PENDING_APPROVAL",
+                        "hint": "No approval was executed by this call. Report the current decision and result, not an expired approval or task failure. Do not retry or create another task."}
             if (current["revision"] != action.expected_revision or pending is None
                     or current["status"] != "waiting_for_user" or observed.get("pending") != pending
                     or observed.get("revision_number") != action.expected_revision):
-                return {"status": "rejected", "reason": "ATLAS_APPROVAL_STALE"}
+                return {**facts, "status": "rejected", "reason": "ATLAS_APPROVAL_STALE", "executed": False,
+                        "hint": "The pending decision changed; this call did not execute. Preserve earlier successful receipts. Ask about the current pending action and wait for a new explicit answer; never blindly retry."}
             # One spoken answer cannot authorize a new gate exposed by the
             # first decision (directory access is not form submission).
             turn_id = getattr(delegate, "turn_id", None)
