@@ -423,7 +423,7 @@ class TaskSemanticDecision:
 
     @property
     def requests_local_artifacts(self) -> bool:
-        """Semantic request data; Registry must still prove exact authority."""
+        """Semantic request data; Host admission must still prove exact authority."""
         return json.loads(self._output_json).get("requested_work") == "local_artifacts"
 
     @property

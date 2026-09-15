@@ -24,7 +24,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
@@ -113,10 +113,13 @@ from openjiuwen.core.application.tasks.project_executor import (AttemptProjectEx
 from jiuwenswarm.server.runtime.formal_tasks.production_task_intent import (
     AuthenticatedTaskFact,
     BoundedClarificationOwner,
+    ClarificationAnswer,
     ProductionIntentOrigin,
     ProductionOriginBinding,
     ProductionTaskPolicyOutcome,
     ProductionTaskIntentRequest,
+    ProductionTaskIntentProposal,
+    build_production_origin_binding,
     ProductionTaskResolution,
     TaskAuthorityRead,
 )
@@ -521,6 +524,23 @@ class PreparedProductionIntentAuthority:
     scope: ScopeRef
     reader: StoreProductionTaskAuthorityReader
     observed_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProductionTaskAdmission:
+    """A Host routing decision, never a grant to bypass final execution checks."""
+
+    resolution: ProductionTaskResolution
+    origin_authority: CallLocalProductionOriginAuthority
+    action: Literal["reject_native", "confirmation_changed", "delegate", "confirm",
+                    "request_confirmation", "query", "clarification", "dialogue", "reject"]
+    semantic_delegation: bool = False
+
+
+class _InitialProductionConfirmationConsumer:
+    @staticmethod
+    def verify_and_consume(_confirmation_id, _binding):
+        raise ValueError("PRODUCTION_CONFIRMATION_NOT_AVAILABLE")
 
 
 class AuthorityResolver(Protocol):
@@ -1553,6 +1573,162 @@ class P3AuthenticatedComposition:
             TaskSemanticContext(facts, session_id, history, pending),
             analysis=analysis,
         )
+
+    @staticmethod
+    def _resolve_clarification_selection(
+        *,
+        proposal: ProductionTaskIntentProposal,
+        resolution: ProductionTaskResolution,
+        authority: PreparedProductionIntentAuthority,
+    ) -> ClarificationAnswer:
+        if (
+            resolution.clarification_handle_id is None
+            or resolution.clarification_generation is None
+            or resolution.task_set_fingerprint is None
+            or not resolution.candidate_task_ids
+        ):
+            raise FormalTaskViolation(
+                "CLARIFICATION_BINDING_CONFLICT",
+                "clarification answer changed the retained operation or arguments",
+                ErrorCode.CONFLICT,
+            )
+        visible = authority.reader.list_visible_tasks(authority.scope)
+        candidates = tuple(
+            fact
+            for fact in visible.tasks
+            if fact.task_id in resolution.candidate_task_ids
+        )
+        selected = tuple(
+            fact
+            for fact in candidates
+            if (
+                proposal.target_kind == "task_id"
+                and fact.task_id == proposal.target
+                or proposal.target_kind == "stable_reference"
+                and fact.stable_reference.casefold() == str(proposal.target).casefold()
+                or proposal.target_kind == "name"
+                and fact.name.casefold() == str(proposal.target).casefold()
+            )
+        )
+        if len(selected) != 1:
+            raise FormalTaskViolation(
+                "CLARIFICATION_SELECTION_UNRESOLVED",
+                "clarification answer must select one exact retained candidate",
+                ErrorCode.CONFLICT,
+            )
+        return ClarificationAnswer(
+            handle_id=resolution.clarification_handle_id,
+            generation=resolution.clarification_generation,
+            selected_task_id=selected[0].task_id,
+            task_set_fingerprint=resolution.task_set_fingerprint,
+        )
+
+    def prepare_production_admission(
+        self, *, proposal: ProductionTaskIntentProposal, operation_hint: object,
+        retained_resolution: ProductionTaskResolution | None, retained_kind: str | None, task_hint: object,
+        mutation_enabled: bool, query_enabled: bool, native_request: ProductionTaskIntentRequest | None,
+        bearer_token: object, session_id: str, native_authority: NativeP3ActivationAuthority | None,
+    ) -> tuple[PreparedProductionIntentAuthority, ClarificationAnswer | None]:
+        """Reject changed intent before any one-shot continuation is consumed."""
+        if operation_hint is not None and proposal.operation != operation_hint:
+            raise FormalTaskViolation("TASK_INTENT_HINT_MISMATCH",
+                "operation hint does not match the classified committed intent", ErrorCode.PERMISSION_DENIED)
+        if retained_resolution is not None and (
+            proposal.operation != retained_resolution.operation
+            or dict(proposal.arguments) != dict(retained_resolution.arguments)
+        ):
+            raise FormalTaskViolation("TASK_INTENT_CONTINUATION_BINDING_MISMATCH",
+                "continuation changed the retained operation or arguments", ErrorCode.PERMISSION_DENIED)
+        operation = proposal.operation if proposal.operation in P3_PRODUCTION_OPERATIONS else "task.list"
+        if operation in P3_PRODUCTION_MUTATIONS and not mutation_enabled:
+            raise FormalTaskViolation("P3_CONFIRMATION_ISSUER_UNAVAILABLE",
+                "production mutation requires the confirmation owner", ErrorCode.UNAVAILABLE)
+        if operation not in P3_PRODUCTION_MUTATIONS and native_request is None and not query_enabled:
+            raise FormalTaskViolation("PRODUCT_P3_TEXT_DISABLED",
+                "production Task query route is disabled", ErrorCode.UNAVAILABLE)
+        authority = self.prepare_production_intent_authority(
+            bearer_token=bearer_token, operation=operation, session_id=session_id, native_authority=native_authority)
+        if native_request is not None and native_request.scope != authority.scope:
+            raise FormalTaskViolation("NATIVE_TASK_REQUEST_BINDING_MISMATCH",
+                "Native Task scope changed during admission", ErrorCode.PERMISSION_DENIED)
+        clarification_answer = None
+        if retained_kind == "clarification" and retained_resolution is not None:
+            clarification_answer = self._resolve_clarification_selection(
+                proposal=proposal, resolution=retained_resolution, authority=authority)
+            if task_hint is not None and clarification_answer.selected_task_id != task_hint:
+                raise FormalTaskViolation("TASK_INTENT_HINT_MISMATCH",
+                    "task hint does not match the authenticated clarification target", ErrorCode.PERMISSION_DENIED)
+        return authority, clarification_answer
+
+    def resolve_production_admission(
+        self, *, request: ProductionTaskIntentRequest, authority: PreparedProductionIntentAuthority,
+        bridge: VoiceTaskBridge, clarification_owner: BoundedClarificationOwner,
+        commit_ledger: TurnCommitLedger, operation_hint: object, task_hint: object,
+        retained_resolution: ProductionTaskResolution | None, retained_kind: str | None,
+        native_request: bool, semantic_decision: TaskSemanticDecision | None,
+        current_commit: TurnCommit | None, source: str,
+    ) -> ProductionTaskAdmission:
+        """Own the application decision after trusted target resolution.
+
+        The caller can carry a continuation or project an answer, but cannot
+        promote this decision to an execution grant. Confirmation consumption and
+        final principal/Task/Executor rereads remain in the execution service.
+        """
+        origin_authority = CallLocalProductionOriginAuthority(
+            expected_binding=build_production_origin_binding(request),
+            commit_ledger=None if request.origin is ProductionIntentOrigin.STRUCTURED else commit_ledger)
+        resolution = bridge.resolve_production(request, authority.reader, origin_authority,
+            _InitialProductionConfirmationConsumer(), clarification_owner)
+        def decision(action, semantic=False):
+            return ProductionTaskAdmission(resolution, origin_authority, action, semantic)
+        if native_request and resolution.outcome is not ProductionTaskPolicyOutcome.PROPOSED:
+            return decision("reject_native")
+        if operation_hint is not None and resolution.operation != operation_hint:
+            raise FormalTaskViolation("TASK_INTENT_HINT_MISMATCH",
+                "operation hint does not match the classified committed intent", ErrorCode.PERMISSION_DENIED)
+        if task_hint is not None and resolution.target_task_id != task_hint:
+            raise FormalTaskViolation("TASK_INTENT_HINT_MISMATCH",
+                "task hint does not match the resolved authenticated target", ErrorCode.PERMISSION_DENIED)
+        if retained_kind == "confirmation" and retained_resolution is not None and (
+            resolution.operation != retained_resolution.operation
+            or resolution.target_task_id != retained_resolution.target_task_id
+            or dict(resolution.arguments) != dict(retained_resolution.arguments)
+            or retained_resolution.confirmation_binding is None
+            or (resolution.confirmation_binding is not None and resolution.confirmation_binding.fingerprint
+                != retained_resolution.confirmation_binding.fingerprint)
+        ):
+            return decision("confirmation_changed")
+        semantic_delegation = (
+            retained_kind in {None, "clarification"} and semantic_decision is not None
+            and (semantic_decision.requests_local_artifacts
+                 or semantic_decision.proposal.operation in {"task.adjust", "task.cancel"})
+            and current_commit is not None and source in {"voice", "text"}
+            and resolution.outcome is ProductionTaskPolicyOutcome.PROPOSED)
+        if (native_request and resolution.operation in P3_PRODUCTION_MUTATIONS) or semantic_delegation:
+            if semantic_delegation and (
+                semantic_decision.commit_sha256 != hashlib.sha256(current_commit.canonical_bytes()).hexdigest()
+                or resolution.origin_binding is None
+                or resolution.origin_binding.semantic_context_binding != semantic_decision.origin_context_binding
+                or resolution.operation not in {"task.create", "task.create_successor", "task.adjust", "task.cancel"}
+                or resolution.operation != semantic_decision.proposal.operation
+                or dict(resolution.arguments) != dict(semantic_decision.proposal.arguments)
+            ):
+                raise FormalTaskViolation("SEMANTIC_DELEGATION_BINDING_MISMATCH",
+                    "local delegation lost its exact committed specification", ErrorCode.PERMISSION_DENIED)
+            if resolution.operation in {"task.create", "task.create_successor"}:
+                self.require_local_artifact_delegation_capability(resolution)
+            else:
+                self.require_local_task_control_capability(resolution)
+            return decision("delegate", semantic_delegation)
+        if retained_kind == "confirmation":
+            return decision("confirm")
+        if resolution.outcome is ProductionTaskPolicyOutcome.PROPOSED:
+            return decision("request_confirmation" if resolution.confirmation == "required" else "query")
+        if resolution.outcome is ProductionTaskPolicyOutcome.CLARIFICATION:
+            return decision("clarification")
+        if resolution.outcome is ProductionTaskPolicyOutcome.DIALOGUE:
+            return decision("dialogue")
+        return decision("reject")
 
     def prepare_production_intent_authority(
         self,

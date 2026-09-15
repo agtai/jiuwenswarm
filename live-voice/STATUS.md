@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-15 — management replacement is active; running services have not been redeployed.
+> Updated: 2026-09-15 — bounded formal Task management delivered; broader integration remains PARTIAL; services have not been redeployed.
 > Default bootstrap reads only Project judgement and Current execution packet.
 > Stop at Completion boundaries unless the task needs wider planning or acceptance.
 
@@ -108,7 +108,7 @@ support has been discussed, not implemented.
 
 ## Current execution packet
 
-### Active management replacement (2026-09-15, user-adjusted objective)
+### Formal Task management delivered (2026-09-15, user-adjusted objective)
 
 Current phase follows the user's accepted adjustment: complete the formal Task
 application-management boundary. Voice, text and the Task panel must use the same
@@ -166,9 +166,20 @@ used by Native context/receipts and Registry result-to-Agent input. The existing
 SDK artifact reader and context codec retain their separate proof/encoding jobs;
 Native list/query purposes and earlier unavailable-result timing are preserved.
 This removes two caller-owned read orchestration chains, with a net production
-increase for the common service and checks. Remaining Host admission and broader
-application receipt ownership still require work before the Task phase ends;
-this is not full goal closure.
+increase for the common service and checks. The current working implementation
+also puts proposal/hint/continuation checks, clarification selection and admission
+decisions in Host. Registry retains carrier identity, journal consumption and
+receipt projection, without recomputing the Host business decision. Final affected
+regression checks pass; the authorized independent review found no remaining
+duplicate Task management state or independent admission/execution chain within
+this bounded scope. The [formal Task completion audit](reviews/MANAGEMENT_REPLACEMENT_20260915.md#formal-task-phase-completion-audit)
+records consumer ownership, real SQLite/project-file verification, preservation
+and recovery evidence, independent review and reproducible paired accounting.
+The bounded Task application-management phase is delivered by the accompanying
+local commit. Work unification is the next scope decision with the user; it is not
+automatically activated. No broader Host/Voice, audio or full-product completion
+is claimed. Further implementation requires a concrete unmet requirement/finding
+or a newly agreed scope, not an indefinite search for small cleanups.
 The replaced primitive product create/adjust/cancel entry is retired: all current
 consumers use production intent, while primitive retry keeps its exact Attempt
 and confirmation/replay contract. Its separate Voice origin reservation/consumed

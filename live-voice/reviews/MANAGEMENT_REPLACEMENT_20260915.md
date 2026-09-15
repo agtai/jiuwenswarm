@@ -1,4 +1,4 @@
-# Management replacement audit (active)
+# Management replacement audit (formal Task phase delivered; broader roadmap open)
 
 ## Frozen scope and baseline
 
@@ -1410,3 +1410,84 @@ Goal **+1133/-3592 = -2459**; official-baseline additions: Voice **109518**, Hos
 totals are in the evidence. This retires a replaced product admission branch;
 full Host admission/application receipt ownership remains open. No remote update,
 deployment/restart, private configuration or user-project write is included.
+
+### Host production admission decision (delivered)
+
+Tier 2. Existing Host composition will own initial proposal/hint/retained-business
+binding checks and the complete post-resolution decision (query, clarification,
+confirmation, exact direct delegation or rejection). Registry retains request and
+continuation identity, semantic-journal claims, origin release and transport
+projection; it must not recompute Host's business decision. Pass immutable prior
+resolution/kind and existing semantic/native evidence, not a Registry pending
+object or callback that leaves the decision in Voice. Preserve rejection before
+one-shot clarification/confirmation consumption and all existing final execution
+authority rereads. No new delegation classifier, product policy, retry protocol,
+Task persistence, Work or audio behavior. Independent design review identifies
+this as the next complete admission-decision ownership boundary. Validate current
+entrypoints plus forged hints/continuations/delegation and changed final authority
+with zero forbidden effects before delivery.
+
+Resume verification confirmed the current Host implementation owns preparation,
+clarification selection and post-resolution admission decisions; Registry calls
+`prepare_production_admission` and `resolve_production_admission` and projects their
+decision. Final targeted run of `test_semantic_registry.py`,
+`test_native_business_registry.py` and `test_native_business_authority.py` with
+`-o addopts= -o log_cli=false -q --tb=short`: **143 passed in 130.71s**.
+This supersedes the earlier 142-test run; the focused five-test run overlaps it.
+The authorized independent reviewer found no remaining duplicate production Task
+management state or independent admission/execution chain in the bounded reviewed
+scope. The reviewer did not run Main's tests. Full-product, Work and audio
+acceptance are not implied. Evidence/hash accounting verification, local delivery
+and the cumulative Task requirement audit remain the closure steps.
+
+
+## Formal Task phase completion audit
+
+The user-adjusted Goal is the complete formal Task application-management
+boundary, followed by a separate Work decision. The original broad roadmap and
+chronological in-progress sections above are historical scope/evidence, not a new
+work queue. This audit closes the adjusted Task phase only. The accompanying
+commit delivers the final Host admission group and these records on SDK
+`e57563a308c8b55f27673e7e04e33de3f9254471`.
+
+| Requirement | Current implementation and inspected evidence | Result |
+|---|---|---|
+| Compare the Task body with existing native capabilities; justify retained production code | Resumed independent comparison above identifies Controller/Team cancellation/dependency semantics, required command/attempt/outbox/effect transactions and physical settlement. Native Runner/TaskManager/Harness remain reused; Core orchestration and Store atomic truth are distinct. Shared Store queue control and SDK artifact reader replace duplicate algorithms | Proved for this Task boundary; wholesale Core/Store replacement is not claimed |
+| Voice, text and panel share acceptance and confirmation | NativeBusinessRouter._task calls Registry._run_p3_production_intent, as do semantic/structured consumers. FormalP3TaskExperienceOwner submits non-retry operations to p3.intent. Host prepare_production_admission/resolve_production_admission own proposal, hints, clarification selection and decision; confirm_and_handle_production_request owns exact consume, final reread and dispatch | Proved by source, real SQLite semantic/Native tests and independent consumer review |
+| Common control, query and result services | All mutations ultimately use the same Host/Core. Panel retry retains its existing exact Attempt confirmation adapter; the retired primitive create/adjust/cancel entry rejects before allocation/effects. Host read_task_result_observations supplies shared authenticated control/result/artifact facts. AgentServer's general Task RPC has an actual consumer and remains on that Host/Core | Proved; transport adapters and historical presentation permissions are necessary retained contracts |
+| Delete actual duplicate production state/recovery and chains | Commits 66687015 and 79428f88 remove manual mutation owner/pending/prepared/polling, duplicate initial reads, per-Voice/historical Task leaves and retry inspector. Shared FormalP3TaskExperienceOwner owns per-Task observation/version/serialization. 0301a736 shares result observations; 5e652048 deletes three origin maps and obsolete admission branches; current group deletes Registry business decision ownership | Proved by scoped diffs and actual consumers; this is more than relocation or a forwarding facade |
+| Positive and rejected/ambiguous/wrong-scope/stale/concurrent paths preserve truth with zero forbidden effects | Final semantic/Native group 143 passed: direct Host forged hint/continuation/delegation rejection, real create/control/read, two-final and cross-entry continuation claims, lost authority, exact replay and UNKNOWN. Earlier retired-operation/retry group and shared-owner tests remain applicable on unchanged source | Proved for affected services; no full-suite claim |
+| Cancellation, restart/recovery, file/index and saved artifact protection | Current additional task_adjustment_queue + p3_production_intent_composition group: 42 passed in 42.37s. Includes real SQLite rollback/reopen, stale authority, no duplicate effects, real temporary Git/project files, forbidden file-plan writes and persisted artifact hash equality. Prior queue-control and executor evidence above covers unchanged atomic/cancel/file protections | Proved at affected Host/SDK and temporary project boundaries; controlled Agent is not physical Provider evidence |
+| Preserve session/Voice lifetime, playback ACK/history and background survival | Unchanged shared frontend group: 158 unit tests, 52 mounted tests and one pre-existing skipped Provider-start case, full tsc and package compilation. Tests cover A/B isolation, stale result/list rejection, complete event/Attempt provenance, no partial fact/ACK adoption, Voice detach and Host/Session retirement. Work ownership and audio policy are unchanged by this final Task group | Proved for affected application behavior; no new microphone, human running-cancel or latency acceptance |
+| Independent review and remove unnecessary compensation | Authorized read-only reviewer inspected complete changed groups and final actual consumers; findings were fixed with affected reruns. Final scope review found no retained duplicate Task state or independent admission/execution chain. Exact final authority rereads, continuation/replay journal, presentation/ACK and retry adapters retain distinct consumers/contracts | Proved within reviewed scope, not a claim that every repository implementation is minimal |
+| Accurate accounting and local delivery | Recomputed paired Goal totals and verified every official production file hash against current source. Import verification resolves Host and SDK from their actual sibling checkouts. Three architecture headers and current STATUS synchronized. Scoped diff/link checks and local commit are the delivery gate | Included in accompanying coherent local commit; no remote update |
+
+Current additional command, using the Host venv and explicit sibling Host/SDK
+PYTHONPATH, is:
+
+```text
+python -m pytest tests/unit_tests/live_voice/test_task_adjustment_queue.py tests/unit_tests/live_voice/test_p3_production_intent_composition.py -o addopts= -o log_cli=false -q --tb=short
+```
+
+No concurrent pytest process was used. The 143-case final admission run and this
+42-case group cover different files; earlier overlapping runs are not added as
+unique evidence. Legacy Registry tests reaching retired P2 or obsolete fixtures
+are not claimed passing; their recorded limitations remain above. No new failure
+was waived. Frontend source has not changed since its recorded verified group.
+
+[Reproducible production accounting](../evidence/MANAGEMENT_TASK_ADMISSION_20260915.json):
+this group Voice **+27/-219 = -192**, Host **+178/-2 = +176**, SDK unchanged;
+combined **+205/-221 = -16**. Cumulative Goal Voice **-2814**, Host **+459**, SDK
+**-120**; total **+1322/-3797 = -2475**. Official-baseline net additions are
+Voice **109326**, Host **48517**, SDK **34212**, total **192055**. All necessary
+Host enhancements count in full. The cumulative reduction includes the earlier
+1003 dormant frontend lines and hidden manual chain; not all 2475 lines represent
+active duplicate management. Per-file hashes and merged M4+M5/M7+M9 totals are
+in the manifest; tests/docs are excluded.
+
+Remaining broader scope: decide Work unification after reporting this Task
+boundary; general Host/Voice business and audio lifecycle are not claimed done.
+Keep empty-diff success semantics, 15-second prepared timeout, VAD/speed/buffering
+and deferred diagnostic issues unchanged. No service restart/deployment, private
+configuration, user project write, push or history rewrite is included. Existing
+human acceptance describes its deployed version, not this local source pair.

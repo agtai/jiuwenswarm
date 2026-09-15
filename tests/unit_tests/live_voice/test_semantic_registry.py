@@ -679,6 +679,62 @@ def p2_params(**changes):
 
 
 @pytest.mark.asyncio
+async def test_host_admission_owns_hint_continuation_and_delegation_rejection(semantic_runtime, monkeypatch):
+    from openjiuwen.core.application.tasks.formal_task_models import FormalTaskViolation
+    s = semantic_runtime
+    composition = s.harness.composition
+    captured = []
+    resolve = composition.resolve_production_admission
+
+    def observe(**kwargs):
+        captured.append(kwargs)
+        return resolve(**kwargs)
+
+    monkeypatch.setattr(composition, "resolve_production_admission", observe)
+    s.program = lambda data: model_output(data, operation="task.create",
+        arguments={"name": "Inventory", "instruction": "Save the inventory."})
+    proposed = await s.text("host-admission", "Prepare the stated inventory task.")
+    assert proposed.ok, proposed.payload
+    assert proposed.payload["result"]["reason"] == "TASK_CONFIRMATION_REQUIRED"
+    arguments, = captured
+    admitted = resolve(**arguments)
+    assert admitted.action == "request_confirmation"
+    store = composition._core.store
+    counts = store.counts()
+    pending = dict(s.registry._pending_production_task_intents)
+    semantic_pending = await s.registry._semantic_continuity.pending(_scope())
+    prepare = dict(proposal=arguments["request"].proposal, operation_hint=None, retained_resolution=None,
+                   retained_kind=None, task_hint=None,
+                   mutation_enabled=True, query_enabled=True, native_request=None,
+                   bearer_token=TOKEN, session_id="session-1", native_authority=None)
+    for changes, reason in (
+        ({"operation_hint": "task.cancel"}, "TASK_INTENT_HINT_MISMATCH"),
+        ({"retained_resolution": replace(admitted.resolution, arguments={"name": "Changed"},
+                                         confirmation_binding=None)}, "TASK_INTENT_CONTINUATION_BINDING_MISMATCH"),
+    ):
+        with pytest.raises(FormalTaskViolation) as rejected:
+            composition.prepare_production_admission(**{**prepare, **changes})
+        assert rejected.value.reason == reason
+    for changes, reason in (
+        ({"operation_hint": "task.cancel"}, "TASK_INTENT_HINT_MISMATCH"),
+        ({"task_hint": "unrelated-task"}, "TASK_INTENT_HINT_MISMATCH"),
+        ({"semantic_decision": replace(arguments["semantic_decision"], commit_sha256="0" * 64,
+            _output_json=json.dumps({"requested_work": "local_artifacts"}))}, "SEMANTIC_DELEGATION_BINDING_MISMATCH"),
+    ):
+        with pytest.raises(FormalTaskViolation) as rejected:
+            resolve(**{**arguments, **changes})
+        assert rejected.value.reason == reason
+    changed = resolve(**{**arguments, "retained_kind": "confirmation",
+                         "retained_resolution": replace(admitted.resolution, confirmation_binding=None)})
+    assert changed.action == "confirmation_changed"
+    assert store.counts() == counts
+    assert s.registry._pending_production_task_intents == pending
+    assert await s.registry._semantic_continuity.pending(_scope()) == semantic_pending
+    assert not s.harness.executor.dispatches and not s.harness.executor.adjustments and not s.harness.executor.cancels
+    assert not s.manager.agent.executions
+
+
+@pytest.mark.asyncio
 async def test_current_task_failure_trace_links_saved_command_through_ack(semantic_runtime, monkeypatch):
     from tests.unit_tests.live_voice import test_product_composition_registry as fixtures
     from openjiuwen.core.application.tasks.formal_task_models import TerminalOutcome
