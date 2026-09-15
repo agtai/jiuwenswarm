@@ -142,3 +142,24 @@ async def test_expense_context_and_notification_keep_decisions_in_ui(tmp_path):
     result = await host.context(binding)
     assert result["events"][0]["result_text"] == call["answer"]
     assert result["tasks"][0]["result_text"] == call["answer"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["expense", "repurchase", None])
+async def test_combined_capabilities_apply_decision_policy_per_task(tmp_path, kind):
+    host, call, effects = fixture(tmp_path)
+    original = host._call
+    if kind is not None:
+        call["demoKind"] = kind
+    async def mixed(binding, method, params):
+        result = await original(binding, method, params)
+        if method == "context":
+            result["capabilities"] = ["repurchase", "expense"]
+        return result
+    host._call = mixed
+    binding = SimpleNamespace(session_id="s")
+    snapshot = await host.context(binding)
+    assert ("task.approve" in snapshot["tasks"][0]["supported_operations"]) == (kind == "repurchase")
+    delegate = SimpleNamespace(business=SimpleNamespace(operation="task.approve", target_id="atlas:task:c", expected_revision=5), request_text="yes")
+    await host.execute(binding, delegate, snapshot=snapshot)
+    assert any(method == "decide" for method, _ in effects) == (kind == "repurchase")

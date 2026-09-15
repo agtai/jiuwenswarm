@@ -99,7 +99,7 @@ def project_native_receipt(output: str) -> str:
         context = value.get("context")
         if (type(context) is not dict
                 or set(context) - {"capabilities"} != {"context_id", "history", "tasks", "works", "model"}
-                or context.get("capabilities", []) not in ([], ["repurchase"], ["expense"])
+                or context.get("capabilities", []) not in ([], ["repurchase"], ["expense"], ["repurchase", "expense"], ["expense", "repurchase"])
                 or type(context["context_id"]) is not str or len(context["context_id"]) != 64
                 or any(c not in "0123456789abcdef" for c in context["context_id"])
                 or "provider_receipt_version" in value or "context_reference" in value):

@@ -17,7 +17,7 @@ def context(capabilities):
             "capabilities": capabilities}
 
 
-@pytest.mark.parametrize("capabilities", [[], ["repurchase"], ["expense"]])
+@pytest.mark.parametrize("capabilities", [[], ["repurchase"], ["expense"], ["repurchase", "expense"], ["expense", "repurchase"]])
 def test_supported_demo_context_survives_gateway_engine_and_receipt(capabilities):
     source = context(capabilities)
     result = {"kind": "business_context", "contract_version": "live-voice.native-business.v1",
@@ -31,7 +31,7 @@ def test_supported_demo_context_survives_gateway_engine_and_receipt(capabilities
     assert "context" not in projected
 
 
-@pytest.mark.parametrize("capabilities", [["unknown"], ["expense", "repurchase"]])
+@pytest.mark.parametrize("capabilities", [["unknown"], ["expense", "expense"], ["repurchase", "unknown"]])
 def test_unknown_or_mixed_capabilities_remain_rejected(capabilities):
     source = context(capabilities)
     with pytest.raises(NativeRuntimeClientError):
