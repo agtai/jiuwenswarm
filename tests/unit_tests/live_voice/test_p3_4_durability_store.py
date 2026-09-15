@@ -1183,7 +1183,7 @@ async def test_linked_recovery_requires_exact_facts_and_wins_cancel_race_once(
     subscription = TaskEventSubscription(
         source=reopened, scope=task.scope, task_id=task.task_id,
         authorization=_grant("task.events", command_id=None, target=task.task_id),
-        enabled=True, authority_atomic_replay=True, clock=lambda: NOW,
+        enabled=True, clock=lambda: NOW,
     )
     try:
         assert await subscription.start()

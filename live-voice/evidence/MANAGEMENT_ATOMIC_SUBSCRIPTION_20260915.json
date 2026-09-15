@@ -1,0 +1,224 @@
+{
+  "previous_manifest": "MANAGEMENT_FRONTEND_RETIREMENT_20260915.json",
+  "host_batch_baseline": "196d142db2d100fdc988f630d9948810ec9f5785",
+  "sdk_batch_baseline": "3ae2047817621e7d80bd2c064afa16b1b1868330",
+  "line_metric": "physical; comments/blanks included; tests/docs/config excluded",
+  "files": [
+    {
+      "path": "jiuwenswarm/server/runtime/formal_tasks/p3_authenticated_composition.py",
+      "owner": "jiuwenswarm",
+      "new_file": false,
+      "current_lines": 5301,
+      "baseline_lines": 5302,
+      "added_lines": 0,
+      "removed_lines": 1,
+      "net_lines": -1,
+      "sha256": "299f19f78815657ff9a1dd36b742f3b94dc04b89afdb9d2271f07254949bb556"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/presentation/task_progress_return.py",
+      "owner": "jiuwenswarm",
+      "new_file": false,
+      "current_lines": 1934,
+      "baseline_lines": 1935,
+      "added_lines": 0,
+      "removed_lines": 1,
+      "net_lines": -1,
+      "sha256": "fddc1cfe1f1fc9ab487f5177b39b6748458e61a6e3c252bd2c8d73fc2f11b794"
+    },
+    {
+      "path": "openjiuwen/core/application/tasks/task_event_subscription.py",
+      "owner": "agentcore",
+      "new_file": false,
+      "current_lines": 1569,
+      "baseline_lines": 1701,
+      "added_lines": 8,
+      "removed_lines": 140,
+      "net_lines": -132,
+      "sha256": "217d677183eae08461afef231b2b5b74aa67fb731e6b4099bc8cf0a6a21cda5a"
+    }
+  ],
+  "batch_totals": {
+    "voice": {
+      "added_lines": 0,
+      "removed_lines": 0,
+      "net_lines": 0
+    },
+    "jiuwenswarm": {
+      "added_lines": 0,
+      "removed_lines": 2,
+      "net_lines": -2
+    },
+    "agentcore": {
+      "added_lines": 8,
+      "removed_lines": 140,
+      "net_lines": -132
+    }
+  },
+  "cumulative_totals": {
+    "voice": {
+      "added_lines": 54,
+      "removed_lines": 1173,
+      "net_lines": -1119
+    },
+    "jiuwenswarm": {
+      "added_lines": 142,
+      "removed_lines": 178,
+      "net_lines": -36
+    },
+    "agentcore": {
+      "added_lines": 181,
+      "removed_lines": 325,
+      "net_lines": -144
+    }
+  },
+  "current_official_totals": {
+    "voice": {
+      "current_lines": 111021,
+      "baseline_lines": 0,
+      "added_lines": 111021,
+      "removed_lines": 0,
+      "net_lines": 111021,
+      "new_file_lines": 111021,
+      "current_files": 102
+    },
+    "jiuwenswarm": {
+      "current_lines": 150537,
+      "baseline_lines": 102515,
+      "added_lines": 48943,
+      "removed_lines": 921,
+      "net_lines": 48022,
+      "new_file_lines": 39847,
+      "current_files": 119
+    },
+    "agentcore": {
+      "current_lines": 36494,
+      "baseline_lines": 2306,
+      "added_lines": 34204,
+      "removed_lines": 16,
+      "net_lines": 34188,
+      "new_file_lines": 34041,
+      "current_files": 30
+    }
+  },
+  "current_module_totals": {
+    "M7+M9": {
+      "current_lines": 51050,
+      "new_file_lines": 12968,
+      "net_lines": 17030
+    },
+    "M4+M5": {
+      "current_lines": 37991,
+      "new_file_lines": 37991,
+      "net_lines": 37991
+    },
+    "M3": {
+      "current_lines": 14427,
+      "new_file_lines": 14427,
+      "net_lines": 14427
+    },
+    "shared": {
+      "current_lines": 47114,
+      "new_file_lines": 19469,
+      "net_lines": 21345
+    },
+    "M1+M2": {
+      "current_lines": 69836,
+      "new_file_lines": 44134,
+      "net_lines": 44992
+    },
+    "G": {
+      "current_lines": 38391,
+      "new_file_lines": 18173,
+      "net_lines": 19556
+    },
+    "M6+M8": {
+      "current_lines": 39243,
+      "new_file_lines": 37747,
+      "net_lines": 37890
+    }
+  },
+  "independent_review": {
+    "reviewer": "/root/independent_management_review",
+    "findings": [],
+    "sdk_tests": "12 passed, 52 deselected",
+    "host_tests": "10 passed, 59 deselected",
+    "scope": "read-only current module differential; no installed or physical provider review"
+  },
+  "verification": {
+    "sdk_subscription": "64 passed",
+    "expiry_mutation_probe": "disabling post-read authorization caused expected DID NOT RAISE failure; unmodified source passes",
+    "host": "103 passed, 5 deselected",
+    "installed_pair": {
+      "directory": "C:\\Users\\admin\\AppData\\Local\\Temp\\management-atomic-pair-1fte8c_3",
+      "base_heads": {
+        "host": "196d142db2d100fdc988f630d9948810ec9f5785",
+        "sdk": "3ae2047817621e7d80bd2c064afa16b1b1868330"
+      },
+      "production_overlays": {
+        "host": {
+          "jiuwenswarm/server/runtime/formal_tasks/p3_authenticated_composition.py": "299f19f78815657ff9a1dd36b742f3b94dc04b89afdb9d2271f07254949bb556",
+          "jiuwenswarm/server/runtime/presentation/task_progress_return.py": "fddc1cfe1f1fc9ab487f5177b39b6748458e61a6e3c252bd2c8d73fc2f11b794"
+        },
+        "sdk": {
+          "openjiuwen/core/application/tasks/task_event_subscription.py": "217d677183eae08461afef231b2b5b74aa67fb731e6b4099bc8cf0a6a21cda5a"
+        }
+      },
+      "wheels": [
+        {
+          "name": "openjiuwen-0.1.17+livevoice.9-py3-none-any.whl",
+          "sha256": "efb1c51e7acaf7e13c385d0583cbe03e4b9a10661bf0ca7b491f358cce23a864"
+        },
+        {
+          "name": "workswarm-0.2.5b1-py3-none-any.whl",
+          "sha256": "b62bbf823078bd6a76e3fb098cc9747ba27e6d8fa662c9a1a71cd0f92bf2f537"
+        }
+      ],
+      "matched_installed_python_files": {
+        "jiuwenswarm": 1016,
+        "openjiuwen": 2409
+      },
+      "installation": "Temporary target only, no dependencies/network; bundled ensurepip pip wheel used because uv was absent from this process PATH.",
+      "source_comparison": "Every installed Python file equals build snapshot bytes; current checkout matches after CRLF/LF normalization. Changed production overlays are byte-hashed. Repository-only tests excluded by wheel packaging are not installed-file claims."
+    },
+    "host_excluded_stress_tests": [
+      "pages_one_frozen_unread_suffix (text/voice)",
+      "rolls_more_than_256_presentable_store_events",
+      "rolls_validation_across_large_unread_gap (text/voice)"
+    ],
+    "installed_sdk": {
+      "exit_code": 0,
+      "installed_modules_checked": 643,
+      "args": [
+        "-o",
+        "addopts=",
+        "-o",
+        "log_cli=false",
+        "--import-mode=importlib",
+        "--tb=short",
+        "-q",
+        "C:\\Users\\admin\\AppData\\Local\\Temp\\management-atomic-pair-1fte8c_3\\sdk\\tests\\integration_tests\\application_tasks\\test_task_event_subscription.py"
+      ],
+      "result": "64 passed"
+    },
+    "installed_host": {
+      "exit_code": 0,
+      "installed_modules_checked": 660,
+      "args": [
+        "-o",
+        "addopts=",
+        "-o",
+        "log_cli=false",
+        "--import-mode=importlib",
+        "--tb=short",
+        "-q",
+        "C:\\Users\\admin\\AppData\\Local\\Temp\\management-atomic-pair-1fte8c_3\\host\\tests\\unit_tests\\live_voice\\test_task_progress_return.py",
+        "C:\\Users\\admin\\AppData\\Local\\Temp\\management-atomic-pair-1fte8c_3\\host\\tests\\unit_tests\\live_voice\\test_p3_4_durability_store.py",
+        "-k",
+        "consumer_reader_native or consumer_native or concrete_authority_source or nonzero_watermark or delayed_ack or recovery_attempt_boundary or retry_segment or old_epoch"
+      ],
+      "result": "19 passed, 89 deselected"
+    }
+  },
+  "sdk_commit": "3300504a7e88b4f5436040c1deace4be322c4623"
+}

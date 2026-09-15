@@ -700,15 +700,15 @@ frontend verification remain Main's evidence, not independent re-executions.
 
 ## Decision boundary: retire legacy non-atomic subscription source
 
-Further current caller inspection finds exactly two production TaskEventSubscription
+Pre-change caller inspection found exactly two production TaskEventSubscription
 constructors: Host P3 authenticated composition and Host TaskEventAuthorityProgressSource.
-Both explicitly pass authority_atomic_replay=True. The SDK still offers a default
+Both explicitly passed authority_atomic_replay=True. The SDK offered a default
 False mode taking only TaskEventSource.get_task/get_attempt/events. It reads Task,
 then Attempt, then Task again to reject a changed baseline; it starts after the
 current head (live-only), unlike authority mode's retained-prefix replay.
 
-Concrete next candidate: remove _start_authorized_baseline (110 lines) and its
-constructor dispatch, require an explicit supported authority mode, and require
+Accepted replacement: remove _start_authorized_baseline (110 lines), its
+constructor dispatch and the obsolete mode selector, and require
 TaskEventAuthoritySource.event_authority_snapshot. Preserve the existing atomic
 prefix and consumer-page modes, shared tail polling, validation and ACK/cursor
 behavior. SqliteTaskStore already implements the required atomic API. Current
@@ -716,16 +716,83 @@ Host callers need no semantic change. No schema or data migration is required.
 
 This is a deliberate SDK compatibility break: callers omitting the current flag,
 passing False, or providing only get_task/get_attempt/events would no longer be
-supported. It must not silently reinterpret a formerly tail-only feed as replay.
-A guarded interface failure is preferable to switching their event semantics.
+supported. The user confirmed below that no external callers exist; both actual
+Host callers already replay. Missing atomic sources fail explicitly.
 Old mode tests must be retired only after applicable scope/expiry/cancel/race
 oracles are mapped to current atomic source tests; relevant shared validators
 and polling cannot be deleted merely because the old startup is removed.
 
-The user's original request requires a decision before changing existing consumer
-behavior. Therefore this candidate is proposed but not implemented pending the
-explicit compatibility choice; preserving this legacy API is also a legitimate
-retention decision, not proof that native task callbacks can replace durable
-subscription management. All already-authorized implementation and required
-module review/installed verification above are complete; no failing test or
-unresolved review finding is being concealed by this decision boundary.
+The user resolved this decision with “不会有其他人用”: supported consumers are
+limited to these two repositories. Retire the old mode and its constructor flag;
+both production callers retain their existing atomic semantics. No external SDK
+compatibility bridge is required.
+
+This boundary is Tier 3 (shared subscription interface). Owned surfaces: SDK
+subscription/protocol, its integration tests/docs, two Host constructors and their
+progress/durability tests. Acceptance: P/X real SQLite prefix/tail and Host cursor
+consumption; N/I exact authorization and object bindings with zero mutations;
+B bounded prefix/queue/validation; S/T terminal/duplicate/order and expiry;
+C cancelled close during snapshot/tail reads; R retry/terminal replay; F disabled
+and reader failure; K both existing production consumers and persisted formats.
+Migrate applicable legacy safety oracles to atomic snapshots before retiring old
+startup assumptions. Independent review and paired installed verification are
+required. Schemas, ACK rules, recovery semantics, runtime deployment, voice/audio
+policy and external consumers are excluded. Prior evidence above remains bound
+to its recorded source until this new boundary is verified.
+
+
+### Atomic-only implementation and safety-oracle migration
+
+Deleted `_start_authorized_baseline`, obsolete `TaskEventSource` and the mode
+selector; both Host constructors now call the sole atomic API. Shared tail,
+consumer-page, reducer and authorization functions remain. Production delta:
+SDK +8/-140, Host +0/-2, total **-134** physical lines, no moves. Cumulative
+frozen-to-current delta: **+377/-1676 = -1299**. Current same-basis totals and
+file hashes: [atomic subscription evidence](../evidence/MANAGEMENT_ATOMIC_SUBSCRIPTION_20260915.json).
+
+SDK subscription suite: **64 passed**. Tail-focused tests explicitly consume
+and assert the canonical initial prefix. Legacy triple-read race becomes exact
+atomic cursor mismatch; its three blocking read positions become one atomic
+read with both timeout/cancel close. Terminal sentinel/no-history assumptions
+are replaced by real SQLite terminal-prefix/no-worker checks; the redundant
+synthetic live-only terminal case is retired. Replayed sequence zero now checks
+conflict against retained genesis identity. Scope, malformed source, auth,
+expiry, queue/validation bounds, ordering, duplicate, worker ownership and zero
+mutation assertions remain. Missing atomic interface fails before allocation
+or legacy reads. A process-local mutation disabling post-read reauthorization
+makes the migrated expiry test fail (`DID NOT RAISE`); normal source passes.
+No mutation was written to either repository.
+
+The authorized independent reviewer found no actionable production differential
+regression or safety-oracle loss. Independent SDK 12 and Host 10 focused tests
+passed; these overlap Main's tests and are not additive coverage. Review binds
+the production hashes in the evidence manifest. Installed and broader Host
+verification will be recorded below when completed.
+
+
+Host affected regression suite: **103 passed, 5 deselected** across progress
+return and durability Store tests. The initial broad run was interrupted after
+no progress output; an unbuffered diagnostic located the cost inside fixture
+creation (`_append_authority_adjustments(count=257)` -> Store lineage validation),
+before subscription startup. Five parameterized large-volume stress cases were
+excluded from the completed run: frozen unread suffix (text/voice), >256 voice
+presentations, and large unread gap (text/voice). Their Store/page algorithms are
+unchanged; smaller real paging, capacity, watermark, rollover, ACK and recovery
+cases passed. No test failure was hidden or counted as a pass. This is module
+verification, not a new full product candidate or performance claim.
+
+
+Current atomic-only installed pair passed: **64 SDK subscription tests**, **19
+Host cursor/recovery/lifecycle tests (89 deselected)**. Both wheels were built
+from the recorded baseline archives plus exact working overlays, then installed
+together into a fresh temporary target without dependencies/network resolution.
+All 1016 Host and 2409 SDK installed Python files equal build snapshot bytes;
+checkout comparisons normalize Windows CRLF versus archive LF. Changed production
+hashes exactly match the independently reviewed hashes. Every loaded production
+module in both probes was asserted under the isolated installed target. The build
+driver initially could not find uv; installation used the runtime's bundled pip
+wheel without installing pip or altering the working environment. No deployment,
+service restart, private configuration, schema migration or user project changes.
+These installed executions overlap source tests; they are not additive coverage.
+
+SDK local commit: `3300504a7e88b4f5436040c1deace4be322c4623` — `refactor(tasks): retire legacy non-atomic event subscription`. The paired Host commit contains the two constructor updates and this evidence.

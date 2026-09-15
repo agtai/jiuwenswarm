@@ -2029,7 +2029,6 @@ class P3AuthenticatedComposition:
             enabled=True,
             queue_capacity=256,
             validation_capacity=4096,
-            authority_atomic_replay=True,
         )
 
     def create_product_progress_source(

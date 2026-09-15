@@ -2894,7 +2894,7 @@ async def test_consumer_reader_native_management_preserves_demand_cancel_and_det
         presentation_class=presentation_class,
     )
     reader = (
-        TaskEventSubscription(source=store, enabled=True, authority_atomic_replay=True, **common)
+        TaskEventSubscription(source=store, enabled=True, **common)
         if use_sdk else TaskEventAuthorityProgressSource(store=store, **common)
     )
     subscription = reader if use_sdk else reader.subscription
@@ -2938,7 +2938,7 @@ async def test_consumer_native_close_after_validation_prevents_queue_allocation(
     store, task_id, _ = _authority_task(tmp_path)
     reader = TaskEventSubscription(
         source=store, authorization=_grant(task_id=task_id), scope=_scope(),
-        task_id=task_id, enabled=True, authority_atomic_replay=True,
+        task_id=task_id, enabled=True,
         consumer_scope=True, presentation_class="text", clock=lambda: NOW,
     )
     if not initial:
@@ -2994,7 +2994,7 @@ async def test_consumer_native_authority_rejection_has_zero_database_effects(
     now = AFTER_EXPIRY if rejection == "before_start" else NOW
     reader = TaskEventSubscription(
         source=store, authorization=_grant(task_id=task_id, scope=scope), scope=scope,
-        task_id=task_id, enabled=True, authority_atomic_replay=True,
+        task_id=task_id, enabled=True,
         consumer_scope=True, presentation_class="text", clock=lambda: now,
     )
     before = _consumer_database_dump(store)

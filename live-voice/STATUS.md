@@ -19,6 +19,13 @@ and evidence. Current submitted production changes have now received an explicit
 authorized independent module review (22 targeted checks, no confirmed differential
 regression) and current paired installed-source verification. These close the
 specific review/install evidence gaps, not overall management replacement. Prior packet-delivered wording does not close this scope.
+The user subsequently limited SDK compatibility to these two repositories. The
+legacy non-atomic TaskEventSubscription startup and selector are removed; both
+Host callers retain atomic replay. This batch passed 64 SDK and 103 Host source
+tests, independent module review, and paired installed checks (64 SDK/19 Host).
+Five unchanged large-volume Host stress cases were excluded; the
+[batch record](reviews/MANAGEMENT_REPLACEMENT_20260915.md#atomic-only-implementation-and-safety-oracle-migration)
+owns the exact evidence and exclusions.
 The user accepted the deployed 09-15 session's tested behaviors; it proves
 pre-dispatch cancellation, not human acceptance of running cancellation. Empty
 diff success semantics remain undecided and do not block this audit.

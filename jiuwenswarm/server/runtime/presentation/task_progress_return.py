@@ -389,7 +389,6 @@ class TaskEventAuthorityProgressSource:
             queue_capacity=queue_capacity,
             validation_capacity=validation_capacity,
             poll_interval=float(poll_interval),
-            authority_atomic_replay=True,
             consumer_scope=consumer_scope,
             presentation_class=presentation_class,
             clock=clock,
