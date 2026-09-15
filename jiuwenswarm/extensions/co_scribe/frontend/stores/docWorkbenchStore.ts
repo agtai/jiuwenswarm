@@ -57,6 +57,12 @@ interface DocWorkbenchState {
 
   /** Make ``id`` the session whose tabs are shown; parks the current one first. */
   setSession: (id: string | null) => void;
+  /**
+   * The "new conversation" placeholder just became the real session ``id``: the
+   * tabs opened on it are that session's, so they stay up instead of being
+   * dropped. Must run before ``setSession(id)`` is reached, which is then a no-op.
+   */
+  adoptSession: (id: string) => void;
   openDoc: (meta: Omit<WorkbenchTab, 'unread' | 'seenReceiptIds'>) => void;
   activate: (docId: string) => void;
   closeTab: (docId: string) => void;
@@ -146,13 +152,21 @@ export const useDocWorkbenchStore = create<DocWorkbenchState>((set, get) => ({
     if (id === s.sessionId) return {};
     const bySession = { ...s.bySession };
     // Park the outgoing session's shard under its own id. A null session (the
-    // "new conversation" placeholder) owns nothing and parks nothing.
+    // "new conversation" placeholder) parks nothing: switching away from it
+    // abandons it, and the first message hands its tabs over via adoptSession.
     if (s.sessionId !== null) {
       bySession[s.sessionId] = { open: s.open, tabs: s.tabs, activeDocId: s.activeDocId };
     }
     const next = (id !== null && bySession[id]) || { open: false, tabs: [], activeDocId: null };
     if (id !== null) delete bySession[id];
     return { sessionId: id, bySession, open: next.open && next.tabs.length > 0, tabs: next.tabs, activeDocId: next.activeDocId };
+  }),
+  adoptSession: (id) => set((s) => {
+    // Only the placeholder can be adopted; a real session keeps its own shard.
+    if (s.sessionId !== null || id === s.sessionId) return {};
+    const bySession = { ...s.bySession };
+    delete bySession[id];
+    return { sessionId: id, bySession };
   }),
   openDoc: (meta) => set((s) => {
     const now = Date.now();

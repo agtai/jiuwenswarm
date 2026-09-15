@@ -971,7 +971,9 @@ function AppContent({
   // The workbench keeps one set of tabs per session. Each session's documents are
   // parked when it goes off screen and restored when it comes back, and a new task
   // begins on an empty workbench; the "new conversation" placeholder is not a session
-  // and owns no tabs.
+  // and owns no tabs. The one exception is promotion: the first message adopts the
+  // placeholder's tabs into the created session (see adoptSession at both
+  // creation sites) before this effect sees the new id, so it finds nothing to swap.
   useEffect(() => {
     useDocWorkbenchStore.getState().setSession(
       sessionId && sessionId !== NEW_CONVERSATION_ID ? sessionId : null,
@@ -2597,6 +2599,7 @@ function AppContent({
       useChatStore.getState().setProcessing(NEW_CONVERSATION_ID, false);
       useChatStore.getState().setProcessing(newSid, false);
       sessionIdRef.current = newSid;
+      useDocWorkbenchStore.getState().adoptSession(newSid);
       setSessionId(newSid);
       navigate({ kind: 'chat-session', sessionId: newSid }, { replace: true });
       newConversationProjectRef.current = null;
@@ -2728,6 +2731,10 @@ function AppContent({
         sessionIdsCreatedInThisPageRef.current.add(newSid);
         useChatStore.getState().setProcessing(NEW_CONVERSATION_ID, false);
         sessionIdRef.current = newSid;
+        // Documents opened on the welcome page belong to the session it just
+        // became; without this the session effect below swaps in an empty shard
+        // and the first message throws the person out of the workbench.
+        useDocWorkbenchStore.getState().adoptSession(newSid);
         setSessionId(newSid);
         navigate({ kind: 'chat-session', sessionId: newSid }, { replace: true });
         const goalArmedOnNew = useGoalStore.getState().runtimes[NEW_CONVERSATION_ID]?.armed ?? false;
