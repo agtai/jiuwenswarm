@@ -15,7 +15,10 @@ PersistentTaskCore, WorkStore/WorkRuntime and Voice business coordination retain
 substantial management code. Their replacement is **incomplete**. The current
 [replacement audit](reviews/MANAGEMENT_REPLACEMENT_20260915.md) freezes the actual
 paired source baseline and records concrete deletions, retained responsibilities
-and evidence. Prior packet-delivered wording does not close this scope.
+and evidence. Current submitted production changes have now received an explicitly
+authorized independent module review (22 targeted checks, no confirmed differential
+regression) and current paired installed-source verification. These close the
+specific review/install evidence gaps, not overall management replacement. Prior packet-delivered wording does not close this scope.
 The user accepted the deployed 09-15 session's tested behaviors; it proves
 pre-dispatch cancellation, not human acceptance of running cancellation. Empty
 diff success semantics remain undecided and do not block this audit.

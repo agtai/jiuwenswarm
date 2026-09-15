@@ -640,3 +640,60 @@ still use them. Backend confirmation continuations also remain: unlike the dead
 browser owner, they carry real one-shot durable authorization and semantic
 continuation consumers. Their replacement requires preserving those consumers,
 not simply deleting pending state by analogy.
+
+## End-of-batch requirement audit and retained review boundaries
+
+| User requirement | Current inspected evidence | Remaining boundary |
+|---|---|---|
+| Freeze actual paired source, preserve subsequent changes | MANAGEMENT_BASELINE; per-batch Git refs/manifests and clean statuses | No reset or history rewrite used |
+| Task comparison and actual replacement | Core creation/status, project artifact reader and native root entry; initial decision table and retention costs above | Controller/Team lack scoped command/outbox/effect atomicity; existing consumers cannot silently adopt application transitions |
+| Adjustment/cancel/recovery/results/events | Existing TaskStore atomic adjustment/outbox, exact project attempt/physical cleanup; event subscription requires durable cursor/ACK and retry segment | Native coroutine callbacks cannot stand in for persisted event/ACK authority; no such substitution claimed |
+| Work creation/query/cancel/settlement/recovery/storage | Host service admission, native finalizer/root entry, real Work/SQLite ownership regressions | Work revision/CAS/UNKNOWN and physical cleanup remain required; no automatic formal Task card |
+| Host/Voice ordinary business and frontend | Host shared presentation/status/admission; native source removal; dead 995-line browser intent manager removed | Backend semantic confirmation/pending consumers remain real; no directory move credited as replacement |
+| Session/model/project/history authority | Existing Host session provisioner, AgentManager and RuntimeSessionCoordinator consumers retained; service revalidates scope/model/project | Voice still owns playback/generation and committed voice context, not authority restoration from history |
+| Protect accepted product behavior | Scoped Git/SQLite/native and integrated Web tests; deployed session report independently retained | Automated fixtures are not new human running-cancel or physical audio acceptance |
+| Statistics and architecture | Exclusive ownership/module manifests; M4+M5 and M7+M9; AgentServer described as runtime container | Hermes/multimodal fixed-version claims unchanged; no new benchmark inference |
+| Review prior overcorrection/temporary bridges | Removed duplicate hash/spec/status/origin work and dead browser owner/wrapper; cold diff reviews | Frontend productCompositionContract retains explicit test contract-parity consumers in retirement manifest; telemetry ledger has tests/support consumers, so neither is blindly deleted |
+| Local delivery only | Source commits and clean status; current paired wheel validation in progress | No push, service restart, private config or user project writes; active deployed pair remains old |
+
+An independent read-only subagent review was explicitly authorized by the user
+on 2026-09-15 and dispatched across the complete frozen-to-current production
+delta. Its findings and completion are not presumed here; prior PARTIAL review
+labels describe evidence available at each earlier commit.
+
+### Current paired installed-source verification
+
+[Current installed pair](../evidence/MANAGEMENT_CURRENT_INSTALLED_20260915.json)
+binds Host 120c9562 and SDK 3ae204781. Clean committed snapshots built both wheels;
+all 1016 Host and 2409 SDK installed Python files match source. SDK Git/SQLite/
+native ownership probes: **24 passed**. Host serialized origin recovery, real
+create receipts, Work cancel/update/disconnect and journal probes: **12 passed,
+32 deselected**. Each process asserted every loaded Host/SDK module came from the
+isolated target, not editable production checkout imports. Third-party dependencies
+were reused without network resolution. The initial archive encountered a missing
+LFS documentation video; retry used command-local skip-smudge and retained pointer
+content, without modifying Git configuration. This video is not a Python/runtime
+dependency. No running environment was installed, restarted or redeployed. These 36 installed
+test executions overlap earlier source checks and are not new additive coverage.
+
+### Independent review completed
+
+The explicitly authorized read-only subagent reviewed all production diffs and
+relevant callers across Host a1e3f7ee..120c9562 and SDK b5534de5..3ae204781.
+[Independent review record](../evidence/MANAGEMENT_INDEPENDENT_REVIEW_20260915.json):
+**no evidence-supported actionable P0–P3 differential regression**. Independent
+checks passed: accepted-Task/failed-receipt recovery 2; origin integrity and Host
+producer Voice-release/revoked authority 8; native root context/children/cancel
+isolation 2; coherent status/retry authorization 10. Total 22 source checks;
+these overlap earlier scenarios and are not additive coverage.
+
+The reviewer confirmed that origin reads intersect authorized facts and preserve
+activation fencing without replay/ACK inference; native finalizers complete
+waiters after producer/physical settlement; status reads retain bounded authority
+and exact projection; the removed frontend owner had no production consumers.
+This supersedes earlier unavailable-review PARTIAL labels **for the reviewed
+production differential only**, while preserving their historical accuracy.
+No production change was required by review. It does not close the retained
+management gaps or establish overall product/physical Provider acceptance.
+The reviewer made no filesystem/Git changes. Current installed verification and
+frontend verification remain Main's evidence, not independent re-executions.

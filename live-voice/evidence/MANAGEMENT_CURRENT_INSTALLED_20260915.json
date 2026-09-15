@@ -1,0 +1,62 @@
+{
+  "isolated_target": "C:\\Users\\admin\\AppData\\Local\\Temp\\management-final-pair-1qjx3hqz",
+  "source_heads": {
+    "host": "120c956216cc73f74572c3603efc0f5dfe4d4c29",
+    "sdk": "3ae2047817621e7d80bd2c064afa16b1b1868330"
+  },
+  "wheels": [
+    {
+      "name": "openjiuwen-0.1.17+livevoice.9-py3-none-any.whl",
+      "sha256": "aec74dfa2c70c876b993e07309cb99a8932ba0e718e7809677d8c27f3a578ffc"
+    },
+    {
+      "name": "workswarm-0.2.5b1-py3-none-any.whl",
+      "sha256": "458cc86038e57bb761d527509c13874bd6e6dc339a58f44f93ae69279c503f6f"
+    }
+  ],
+  "matched_installed_python_files": {
+    "jiuwenswarm": 1016,
+    "openjiuwen": 2409
+  },
+  "probes": {
+    "sdk": {
+      "exit_code": 0,
+      "installed_modules_checked": 642,
+      "args": [
+        "-o",
+        "addopts=",
+        "-o",
+        "log_cli=false",
+        "--import-mode=importlib",
+        "--tb=short",
+        "-q",
+        "-W",
+        "ignore::SyntaxWarning",
+        "C:\\Users\\admin\\AppData\\Local\\Temp\\management-final-pair-1qjx3hqz\\sdk\\tests\\integration_tests\\application_tasks\\test_work_native_task_ownership.py",
+        "C:\\Users\\admin\\AppData\\Local\\Temp\\management-final-pair-1qjx3hqz\\sdk\\tests\\integration_tests\\application_tasks\\test_project_executor_application.py"
+      ],
+      "result": "24 passed, 2 existing Pydantic deprecation warnings"
+    },
+    "host": {
+      "exit_code": 0,
+      "installed_modules_checked": 2145,
+      "args": [
+        "-o",
+        "addopts=",
+        "-o",
+        "log_cli=false",
+        "--import-mode=importlib",
+        "--tb=short",
+        "-q",
+        "-W",
+        "ignore::SyntaxWarning",
+        "C:\\Users\\admin\\AppData\\Local\\Temp\\management-final-pair-1qjx3hqz\\host\\tests\\unit_tests\\live_voice\\test_native_business_registry.py",
+        "C:\\Users\\admin\\AppData\\Local\\Temp\\management-final-pair-1qjx3hqz\\host\\tests\\unit_tests\\live_voice\\test_native_work_journal.py",
+        "-k",
+        "origin or structured_task_create or work_update_then_cancel or readonly_refund_work"
+      ],
+      "result": "12 passed, 32 deselected"
+    }
+  },
+  "limits": "Tracked committed source snapshots; no dependency resolution; third-party dependencies from existing venv. All loaded Host/SDK modules asserted inside isolated installed target. Initial archive failed on unavailable LFS documentation video; retry kept LFS pointers via command-local GIT_LFS_SKIP_SMUDGE=1. No runtime service install/restart/deployment; frontend bundle checked separately."
+}
