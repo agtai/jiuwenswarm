@@ -169,6 +169,14 @@ This removes two caller-owned read orchestration chains, with a net production
 increase for the common service and checks. Remaining Host admission and broader
 application receipt ownership still require work before the Task phase ends;
 this is not full goal closure.
+The replaced primitive product create/adjust/cancel entry is retired: all current
+consumers use production intent, while primitive retry keeps its exact Attempt
+and confirmation/replay contract. Its separate Voice origin reservation/consumed
+maps and eviction branches are deleted. Host's general Task API remains because
+AgentServer still owns a direct formal RPC consumer. Command/outbox diagnostics
+now consume the same accepted receipt on primitive retry and production intent.
+Current SQLite failure-to-progress/ACK and concurrent-confirmation evidence
+replaces the still-applicable oracles from the retired product-create tests.
 The audit records focused checks, failed-test repairs, independent review and
 same-basis accounting, including the hidden-chain contribution to the reduction.
 

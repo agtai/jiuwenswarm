@@ -116,7 +116,6 @@ from jiuwenswarm.channels.live_voice.latency_measurement import (
 from jiuwenswarm.server.runtime.presentation.p2_response_generation_store import SqliteP2ResponseGenerationOwner
 from jiuwenswarm.server.runtime.formal_tasks.p3_authenticated_composition import (
     NativeP3ActivationAuthority,
-    P3_MUTATIONS,
     P3_PRODUCTION_MUTATIONS,
     P3_PRODUCTION_OPERATIONS,
     P3AuthenticatedComposition,
@@ -1102,9 +1101,6 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
         self._unknown_turn_commits_by_commit: dict[str, TurnCommit] = {}
         self._unknown_turn_commits_by_turn: dict[str, TurnCommit] = {}
         self._unknown_voice_commit_routes: dict[str, tuple[str, str]] = {}
-        self._reserved_voice_origin_requests: dict[str, str] = {}
-        self._consumed_turn_commits_by_commit: dict[str, TurnCommit] = {}
-        self._consumed_turn_commits_by_turn: dict[str, TurnCommit] = {}
         self._p2_notification_operations: dict[str, _RetainedProductOperation] = {}
         self._p2_ack_operations: dict[str, _RetainedProductOperation] = {}
         self._p2_presentation_failure_operations: dict[
@@ -3675,25 +3671,7 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
                 self._advance_notification_replay_floor(entry)
             elif namespace is not None:
                 self._mark_evicted_product_request(namespace, retained_request_id)
-                if namespace == "p3.mutate" and entry.voice_commit_id is not None:
-                    commit = self._consumed_turn_commits_by_commit.get(
-                        entry.voice_commit_id
-                    )
-                    if commit is None:
-                        accepted = self._accepted_turn_commits_by_commit.get(
-                            entry.voice_commit_id
-                        )
-                        if (
-                            accepted is not None
-                            and self._reserved_voice_origin_requests.get(
-                                entry.voice_commit_id
-                            )
-                            == retained_request_id
-                        ):
-                            commit = accepted
-                    if commit is not None:
-                        self._retire_voice_origin_locked(commit)
-                elif namespace == "p2.submit" and entry.voice_commit_id is not None:
+                if namespace == "p2.submit" and entry.voice_commit_id is not None:
                     unknown = self._unknown_turn_commits_by_commit.get(
                         entry.voice_commit_id
                     )
@@ -6433,9 +6411,6 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
         self._unknown_turn_commits_by_commit.pop(commit.commit_id, None)
         self._unknown_turn_commits_by_turn.pop(commit.turn_id, None)
         self._unknown_voice_commit_routes.pop(commit.commit_id, None)
-        self._reserved_voice_origin_requests.pop(commit.commit_id, None)
-        self._consumed_turn_commits_by_commit.pop(commit.commit_id, None)
-        self._consumed_turn_commits_by_turn.pop(commit.turn_id, None)
         self._critical_input_commit_generations.pop(commit.commit_id, None)
         self._critical_input_guarded_commits.discard(commit.commit_id)
         self._critical_token_gate.release_commit(commit.commit_id)
@@ -6448,14 +6423,6 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
         self._mark_evicted_product_request("voice.commit", commit.commit_id)
         self._mark_evicted_product_request("voice.turn", commit.turn_id)
         self._release_voice_origin_locked(commit)
-
-    def _consume_voice_origin_locked(self, commit: TurnCommit) -> None:
-        self._accepted_turn_commits_by_commit.pop(commit.commit_id, None)
-        self._accepted_turn_commits_by_turn.pop(commit.turn_id, None)
-        self._accepted_voice_commit_routes.pop(commit.commit_id, None)
-        self._accepted_voice_commit_responses.pop(commit.commit_id, None)
-        self._consumed_turn_commits_by_commit[commit.commit_id] = commit
-        self._consumed_turn_commits_by_turn[commit.turn_id] = commit
 
     @staticmethod
     def _gateway_voice_provenance(
@@ -9950,10 +9917,10 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
         session_id: str | None,
     ) -> tuple[str, dict[str, object]]:
         operation = _required_text(params.get("operation"), "operation")
-        if operation not in P3_MUTATIONS:
+        if operation != "task.retry":
             raise FormalTaskViolation(
                 "INVALID_P3_CONFIRMATION_OPERATION",
-                "product mutation is not a supported P3 operation",
+                "primitive product mutation supports only task.retry; use production intent for other operations",
                 ErrorCode.UNSUPPORTED,
             )
         required = {
@@ -9967,51 +9934,7 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
         optional: set[str] = set()
         if not issue:
             required.add("confirmation_id")
-        if operation == "task.create":
-            required.update({"name", "instruction"})
-            optional.update(
-                {
-                    "model_intent",
-                    "source",
-                    "interaction_id",
-                    "turn_id",
-                    "commit_id",
-                    "origin_commit_sha256",
-                    "source_start",
-                    "source_end",
-                }
-            )
-        elif operation == "task.retry":
-            # A bounded retry submits its target task only; predecessor,
-            # attempt ordinal, outcome, context and readiness are server-owned
-            # and a voice-committed origin cannot be claimed for it.
-            required.add("task_id")
-        elif operation == "task.adjust":
-            required.update({"task_id", "instruction"})
-            optional.update(
-                {
-                    "source",
-                    "interaction_id",
-                    "turn_id",
-                    "commit_id",
-                    "origin_commit_sha256",
-                    "source_start",
-                    "source_end",
-                }
-            )
-        else:
-            required.add("task_id")
-            optional.update(
-                {
-                    "source",
-                    "interaction_id",
-                    "turn_id",
-                    "commit_id",
-                    "origin_commit_sha256",
-                    "source_start",
-                    "source_end",
-                }
-            )
+        required.add("task_id")
         _require_exact_params(params, frozenset(required | optional))
         # ``_require_exact_params`` only rejects non-string or unknown keys.
         # Proving the remaining required fields are present keeps every P3
@@ -10056,10 +9979,6 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
             )
         async with self._p3_operation_lock:
             try:
-                await self._require_voice_origin(
-                    forwarded=forwarded,
-                    session_id=session_id,
-                )
                 confirmation_id = hashlib.sha256(
                     f"{generation}:{request_id}".encode("utf-8")
                 ).hexdigest()
@@ -10314,60 +10233,10 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
                         message=message,
                         manifest=manifest,
                     )
-                if (
-                    operation in {"task.create", "task.adjust", "task.cancel"}
-                    and forwarded.get("source") == "voice"
-                ):
-                    commit_id = str(forwarded.get("commit_id") or "")
-                    turn_id = str(forwarded.get("turn_id") or "")
-                    async with self._lock:
-                        commit = self._accepted_turn_commits_by_commit.get(commit_id)
-                        if commit is not None and commit.turn_id == turn_id:
-                            self._consume_voice_origin_locked(commit)
                 formal_result = result.payload.get("result")
-                if result.ok and operation in {"task.create", "task.create_successor"}:
-                    self._require_create_receipt(formal_result, operation)
-                if isinstance(formal_result, Mapping):
-                    task_id = formal_result.get("task_id")
-                    attempt_id = formal_result.get("attempt_id")
-                    outbox_id = formal_result.get("outbox_id")
-                    state = formal_result.get("state")
-                    if (
-                        type(task_id) is str
-                        and task_id
-                        and type(attempt_id) is str
-                        and attempt_id
-                        and type(outbox_id) is str
-                        and outbox_id
-                        and state == FormalTaskState.ACCEPTED.value
-                    ):
-                        self._emit_authoritative_route_diagnostic(
-                            session_id=session_id,
-                            correlation_id=prepared.correlation_id,
-                            segment_name="task.command",
-                            seam_name="command",
-                            seam_id=prepared.binding.command_id,
-                            task_id=task_id,
-                            attempt_id=attempt_id,
-                            source_record_id=outbox_id,
-                            command_id=prepared.binding.command_id,
-                            outbox_id=outbox_id,
-                            completed=True,
-                            observed_at=prepared.observed_at,
-                        )
-                        self._emit_authoritative_route_diagnostic(
-                            session_id=session_id,
-                            correlation_id=prepared.correlation_id,
-                            segment_name="task.queue",
-                            seam_name="outbox",
-                            seam_id=outbox_id,
-                            task_id=task_id,
-                            attempt_id=attempt_id,
-                            source_record_id=outbox_id,
-                            command_id=prepared.binding.command_id,
-                            outbox_id=outbox_id,
-                            observed_at=prepared.observed_at,
-                        )
+                self._record_task_command_receipt(
+                    payload=formal_result, session_id=session_id, correlation_id=prepared.correlation_id,
+                    command_id=prepared.binding.command_id, observed_at=prepared.observed_at)
                 return _success_result(
                     request_id,
                     {
@@ -10388,6 +10257,50 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
                     manifest=manifest,
                 )
 
+    def _record_task_command_receipt(self, *, payload, session_id, correlation_id, command_id, observed_at):
+        """Export accepted command/outbox identities from their canonical receipt."""
+        if isinstance(payload, Mapping):
+            task_id = payload.get("task_id")
+            attempt_id = payload.get("attempt_id")
+            outbox_id = payload.get("outbox_id")
+            state = payload.get("state")
+            if (
+                type(task_id) is str
+                and task_id
+                and type(attempt_id) is str
+                and attempt_id
+                and type(outbox_id) is str
+                and outbox_id
+                and state == FormalTaskState.ACCEPTED.value
+            ):
+                self._emit_authoritative_route_diagnostic(
+                    session_id=session_id,
+                    correlation_id=correlation_id,
+                    segment_name="task.command",
+                    seam_name="command",
+                    seam_id=command_id,
+                    task_id=task_id,
+                    attempt_id=attempt_id,
+                    source_record_id=outbox_id,
+                    command_id=command_id,
+                    outbox_id=outbox_id,
+                    completed=True,
+                    observed_at=observed_at,
+                )
+                self._emit_authoritative_route_diagnostic(
+                    session_id=session_id,
+                    correlation_id=correlation_id,
+                    segment_name="task.queue",
+                    seam_name="outbox",
+                    seam_id=outbox_id,
+                    task_id=task_id,
+                    attempt_id=attempt_id,
+                    source_record_id=outbox_id,
+                    command_id=command_id,
+                    outbox_id=outbox_id,
+                    observed_at=observed_at,
+                )
+
     async def _preflight_p3_mutation(
         self,
         *,
@@ -10406,10 +10319,6 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
                 ErrorCode.UNAVAILABLE,
             )
         async with self._p3_operation_lock:
-            await self._require_voice_origin(
-                forwarded=forwarded,
-                session_id=session_id,
-            )
             prepared = await self._p3_composition.prepare_mutation_confirmation(
                 operation=operation,
                 params=forwarded,
@@ -10430,69 +10339,6 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
                 now=prepared.observed_at,
             )
             return prepared.binding
-
-    async def _require_voice_origin(
-        self, *, forwarded: Mapping[str, object], session_id: str
-    ) -> None:
-        if forwarded.get("source") != "voice":
-            return
-        interaction_id = _required_text(
-            forwarded.get("interaction_id"), "interaction_id"
-        )
-        commit_id = _required_text(forwarded.get("commit_id"), "commit_id")
-        turn_id = _required_text(forwarded.get("turn_id"), "turn_id")
-        route_key = (session_id, interaction_id)
-        async with self._lock:
-            commit = self._accepted_turn_commits_by_commit.get(commit_id)
-            if (
-                self._accepted_voice_commit_routes.get(commit_id) != route_key
-                or commit is None
-                or commit.turn_id != turn_id
-                or commit.interaction_id != interaction_id
-            ):
-                raise FormalTaskViolation(
-                    "VOICE_TASK_ROUTE_MISMATCH",
-                    "voice task origin must belong to the exact retained P2 interaction",
-                    ErrorCode.PERMISSION_DENIED,
-                )
-
-    def _reserve_voice_origin_mutation_locked(
-        self,
-        *,
-        operation: str,
-        forwarded: Mapping[str, object],
-        session_id: str,
-        request_id: str,
-    ) -> str | None:
-        """Atomically bind one retained voice origin to one mutation request."""
-
-        if (
-            operation not in {"task.create", "task.adjust", "task.cancel"}
-            or forwarded.get("source") != "voice"
-        ):
-            return None
-        interaction_id = _required_text(
-            forwarded.get("interaction_id"), "interaction_id"
-        )
-        commit_id = _required_text(forwarded.get("commit_id"), "commit_id")
-        turn_id = _required_text(forwarded.get("turn_id"), "turn_id")
-        route_key = (session_id, interaction_id)
-        commit = self._accepted_turn_commits_by_commit.get(commit_id)
-        reserved_request = self._reserved_voice_origin_requests.get(commit_id)
-        if (
-            self._accepted_voice_commit_routes.get(commit_id) != route_key
-            or commit is None
-            or commit.turn_id != turn_id
-            or commit.interaction_id != interaction_id
-            or (reserved_request is not None and reserved_request != request_id)
-        ):
-            raise FormalTaskViolation(
-                "VOICE_TASK_ROUTE_MISMATCH",
-                "voice task origin is not available for this exact mutation request",
-                ErrorCode.PERMISSION_DENIED,
-            )
-        self._reserved_voice_origin_requests[commit_id] = request_id
-        return commit_id
 
     @profiled('rpc.task_mutation', 'params')
     async def handle_p3_mutation(
@@ -10577,12 +10423,6 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
                                 "bounded mutation replay ledger is full",
                                 ErrorCode.UNAVAILABLE,
                             )
-                        voice_commit_id = self._reserve_voice_origin_mutation_locked(
-                            operation=operation,
-                            forwarded=forwarded,
-                            session_id=routed_session,
-                            request_id=request_id,
-                        )
                         task = asyncio.create_task(
                             self._run_p3_mutation(
                                 operation=operation,
@@ -10596,7 +10436,6 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
                             fingerprint,
                             task,
                             p3_binding=p3_binding,
-                            voice_commit_id=voice_commit_id,
                         )
                         self._p3_mutation_operations[request_id] = existing
             assert existing is not None
@@ -12136,6 +11975,11 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
             )
             if result.ok and confirmed.operation in {"task.create", "task.create_successor"}:
                 self._require_create_receipt(result.payload.get("result"), confirmed.operation)
+            if result.ok:
+                self._record_task_command_receipt(
+                    payload=result.payload.get("result"), session_id=str(clean["session_id"]),
+                    correlation_id=str(clean["correlation_id"]), command_id=confirmed.command_id,
+                    observed_at=authority.observed_at)
             return confirmed, result
 
     async def _run_p3_production_intent(
@@ -14857,7 +14701,6 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
             retained_voice_origins = (
                 tuple(self._accepted_turn_commits_by_commit.values())
                 + tuple(self._unknown_turn_commits_by_commit.values())
-                + tuple(self._consumed_turn_commits_by_commit.values())
             )
             for commit in retained_voice_origins:
                 self._release_voice_origin_locked(commit)

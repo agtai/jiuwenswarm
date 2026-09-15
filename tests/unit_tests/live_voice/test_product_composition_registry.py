@@ -1664,105 +1664,6 @@ class _MutationP3Composition(_P3Composition):
         )
 
 
-class _StoreMutationP3Composition(_MutationP3Composition):
-    def __init__(
-        self,
-        project_dir: Path,
-        verifier: ProductP3ConfirmationForwarder,
-        store: SqliteTaskStore,
-    ) -> None:
-        _P3Composition.__init__(
-            self,
-            project_dir,
-            presentation_store=store,
-        )
-        self.verifier = verifier
-        self.prepare_calls = []
-        self.mutation_calls = []
-        self.replay_authority_revoked = False
-        self.store = store
-
-    def query(
-        self,
-        query: ProductP3AuthorizedQuery,
-        *,
-        now: str | None = None,
-    ) -> ResultEnvelope:
-        assert self._presentation_delegate is not None
-        return P3AuthenticatedComposition.query(
-            self._presentation_delegate,
-            query,
-            now=now,
-        )
-
-    def prepare_production_intent_authority(self, **kwargs: object):
-        assert self._presentation_delegate is not None
-        return P3AuthenticatedComposition.prepare_production_intent_authority(
-            self._presentation_delegate,
-            **kwargs,
-        )
-
-    async def handle(
-        self,
-        *,
-        operation: str,
-        params: Mapping[str, object],
-        request_id: str,
-        session_id: str | None,
-    ) -> P3RouteResult:
-        if operation != "task.create" or session_id != SCOPE.session_id:
-            raise AssertionError("Store mutation fixture accepts only exact create")
-        prepared = await self.prepare_mutation_confirmation(
-            operation=operation,
-            params=params,
-            session_id=session_id,
-        )
-        self.verifier.verify_and_consume(
-            str(params["confirmation_id"]),
-            prepared.binding,
-            now=NOW,
-        )
-        spec = _itinerary_spec(self.project_dir)
-        if (
-            params.get("name") != spec.name
-            or params.get("instruction") != spec.instruction
-        ):
-            raise AssertionError("Store mutation fixture changed the exact spec")
-        command = CommandEnvelope.from_dict(
-            {
-                "contract_version": CONTRACT_VERSION,
-                "request_id": request_id,
-                "command_id": params["command_id"],
-                "command_type": "task.create",
-                "issued_at": params["issued_at"],
-                "scope": SCOPE.to_dict(),
-                "correlation_id": params["correlation_id"],
-                "causation_id": None,
-                "origin": {"kind": "structured", "turn_id": None, "commit_id": None},
-                "target_ref": {
-                    "kind": "task",
-                    "id": f"create:{params['command_id']}",
-                },
-                "context_refs": [],
-                "required_capabilities": ["task.create"],
-                "payload": {
-                    "name": spec.name,
-                    "instruction": spec.instruction,
-                    "executor_id": spec.executor_id,
-                    "side_effect_class": spec.side_effect_class,
-                    "attributes": dict(spec.attributes),
-                },
-                "extensions": {},
-            }
-        )
-        stored = self.store.create(
-            command,
-            spec,
-            observed_at=NOW,
-            current_background_session_id=session_id,
-        )
-        self.mutation_calls.append((operation, dict(params)))
-        return P3RouteResult(stored.ok, stored.to_dict())
 
 
 def _shared_test_runtime(manager):
@@ -9584,343 +9485,6 @@ def _failed_presentation_store(
     return project, store, task_id, store.events(task_id, SCOPE)
 
 
-@pytest.mark.asyncio
-async def test_real_store_failed_journey_links_mutation_executor_generation_and_ack(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "jiuwenswarm.channels.live_voice.product_composition_registry.utc_now",
-        lambda: ACK_NOW,
-    )
-    project = tmp_path / "actual-failed-journey-project"
-    project.mkdir()
-    store = SqliteTaskStore(tmp_path / "actual-failed-journey.sqlite3")
-    owner = BoundedP3ConfirmationOwner(
-        tmp_path / "actual-failed-journey-confirmations.sqlite3",
-        enabled=True,
-    )
-    forwarder = ProductP3ConfirmationForwarder(owner)
-    composition = _StoreMutationP3Composition(project, forwarder, store)
-    backend = BoundedInMemoryOtelBackend(capacity=64)
-    monkeypatch.setenv(PRODUCT_OBSERVABILITY_ENABLE_ENV, "1")
-    monkeypatch.setenv(
-        PRODUCT_OBSERVABILITY_BACKEND_ENV,
-        PRODUCT_OBSERVABILITY_BACKEND_ID,
-    )
-    monkeypatch.setenv(PRODUCT_OBSERVABILITY_TOKEN_KEY_ENV, "6f" * 32)
-    runtime = create_product_observability_runtime_from_environment(
-        backend=backend,
-        validated_configuration=_observability_runtime_configuration(backend),
-    )
-    assert type(runtime) is ProductObservabilityRuntime
-    assert (await runtime.start()).ready
-    pushed: list[dict[str, object]] = []
-
-    async def push(message: dict[str, object]) -> bool:
-        pushed.append(message)
-        return True
-
-    registry = AgentServerProductCompositionRegistry(
-        settings=ProductCompositionSettings(
-            p2_enabled=True,
-            p3_text_enabled=True,
-            p3_mutation_enabled=True,
-        ),
-        p3_composition=composition,
-        agent_manager=_AgentManager(),
-        push_text_event=push,
-        p3_confirmation_owner=owner,
-        p3_confirmation_forwarder=forwarder,
-        observability_runtime=runtime,
-    )
-    assert (
-        await registry.handle_p2_activate(
-            params=_p2_params(),
-            request_id="request-actual-chain-p2",
-            session_id=SCOPE.session_id,
-            channel_id="web",
-        )
-    ).ok
-    spec = _itinerary_spec(project)
-    issue_params = _mutation_params(
-        operation="task.create",
-        command_id="command-actual-failed-create",
-        correlation_id="correlation-p2",
-        task_id=None,
-        name=spec.name,
-        instruction=spec.instruction,
-    )
-    issue_params.pop("task_id")
-    issued = await registry.handle_p3_confirmation_issue(
-        params=issue_params,
-        request_id="request-actual-failed-confirmation",
-        session_id=SCOPE.session_id,
-    )
-    receipt = cast(Mapping[str, object], issued.payload["result"])
-    mutated = await registry.handle_p3_mutation(
-        params={**issue_params, "confirmation_id": receipt["confirmation_id"]},
-        request_id="request-actual-failed-mutation",
-        session_id=SCOPE.session_id,
-    )
-    assert issued.ok and mutated.ok
-    mutation_result = cast(Mapping[str, object], mutated.payload["result"])
-    formal_result = cast(Mapping[str, object], mutation_result["formal_task_result"])
-    task_id = cast(str, formal_result["task_id"])
-    task = store.get_task(task_id, SCOPE)
-    assert task.attempt_id == formal_result["attempt_id"]
-    item = store.claim_outbox("actual-failed-journey-worker")
-    assert item is not None and item.task_id == task_id
-    executor_ref = f"actual-failed-journey:{task.attempt_id}"
-    store.complete_outbox(
-        item,
-        executor_ref=executor_ref,
-        observations=(
-            ExecutorObservation(
-                resolution=ExecutorResolution.KNOWN,
-                executor_id=task.spec.executor_id,
-                executor_ref=executor_ref,
-                task_id=task_id,
-                attempt_id=task.attempt_id,
-                source_event_id=f"{executor_ref}:0",
-                source_seq=0,
-                attempt_state=FormalAttemptState.RUNNING,
-                attempt_outcome=None,
-                occurred_at=NOW,
-                raw_status="running",
-            ),
-            ExecutorObservation(
-                resolution=ExecutorResolution.KNOWN,
-                executor_id=task.spec.executor_id,
-                executor_ref=executor_ref,
-                task_id=task_id,
-                attempt_id=task.attempt_id,
-                source_event_id=f"{executor_ref}:1",
-                source_seq=1,
-                attempt_state=FormalAttemptState.TERMINAL,
-                attempt_outcome=TerminalOutcome.FAILED,
-                occurred_at=NOW,
-                raw_status="failed",
-                error="private executor failure detail",
-            ),
-        ),
-    )
-    source_events = store.events(task_id, SCOPE)
-    running_event = next(
-        event for event in source_events if event.event_type == "task.running"
-    )
-    terminal_event = source_events[-1]
-    assert terminal_event.event_type == "task.terminal"
-    assert terminal_event.outcome == TerminalOutcome.FAILED.value
-    preconsumed = store.ack_events(
-        CommandEnvelope.from_dict(
-            {
-                "contract_version": CONTRACT_VERSION,
-                "request_id": "request-failed-prefix-consumed",
-                "command_id": "command-failed-prefix-consumed",
-                "command_type": "task.ack_events",
-                "issued_at": ACK_NOW,
-                "scope": SCOPE.to_dict(),
-                "correlation_id": "correlation-p2",
-                "causation_id": running_event.event_id,
-                "origin": {"kind": "structured", "turn_id": None, "commit_id": None},
-                "target_ref": {"kind": "task", "id": task_id},
-                "context_refs": [],
-                "required_capabilities": ["task.ack_events"],
-                "payload": {
-                    "presentation_class": "text",
-                    "acked_through_seq": running_event.seq,
-                    "acked_event_id": running_event.event_id,
-                    "expected_event_head": terminal_event.seq,
-                },
-                "extensions": {},
-            }
-        ),
-        observed_at=ACK_NOW,
-    )
-    assert preconsumed.ok
-    composition.subscription_events = (terminal_event,)
-    assert (
-        await registry.handle_p3_progress_activate(
-            params=_progress_params(task_id=task_id, correlation_id="correlation-p2"),
-            request_id="request-actual-chain-progress",
-            session_id=SCOPE.session_id,
-            channel_id="web",
-        )
-    ).ok
-    for _ in range(200):
-        if pushed and any(
-            record.seam.value == "generation" for record in backend.records()
-        ):
-            break
-        await asyncio.sleep(0.01)
-    assert pushed
-
-    status = await registry.handle_p3_query(
-        operation="task.status",
-        params={
-            "auth_token": "trusted-token",
-            "session_id": SCOPE.session_id,
-            "task_id": task_id,
-        },
-        request_id="request-actual-chain-status",
-        session_id=SCOPE.session_id,
-    )
-    events = await registry.handle_p3_query(
-        operation="task.events",
-        params={
-            "auth_token": "trusted-token",
-            "session_id": SCOPE.session_id,
-            "task_id": task_id,
-            "after_seq": -1,
-            "limit": 20,
-        },
-        request_id="request-actual-chain-events",
-        session_id=SCOPE.session_id,
-    )
-    unavailable_result = await registry.handle_p3_query(
-        operation="task.result",
-        params={
-            "auth_token": "trusted-token",
-            "session_id": SCOPE.session_id,
-            "task_id": task_id,
-        },
-        request_id="request-actual-chain-result-unavailable",
-        session_id=SCOPE.session_id,
-    )
-    assert status.ok and events.ok and unavailable_result.ok
-    assert (
-        cast(Mapping[str, object], unavailable_result.payload["result"])["availability"]
-        == TaskResultAvailability.UNAVAILABLE.value
-    )
-
-    terminal_payload: Mapping[str, object] | None = None
-    for _ in range(200):
-        progress_payloads = [
-            cast(Mapping[str, object], message["payload"])
-            for message in pushed
-            if isinstance(message.get("payload"), Mapping)
-            and cast(Mapping[str, object], message["payload"]).get("event_type")
-            == "live_voice.task.progress"
-        ]
-        terminal_payload = next(
-            (
-                payload
-                for payload in progress_payloads
-                if cast(Mapping[str, object], payload["source_event"])["event_type"]
-                == "task.terminal"
-            ),
-            None,
-        )
-        if terminal_payload is not None:
-            break
-        await asyncio.sleep(0.01)
-    assert terminal_payload is not None
-    assert cast(Mapping[str, object], terminal_payload["source_event"])["payload"] == {
-        "state": "terminal",
-        "outcome": "failed",
-    }
-    acknowledged = await registry.handle_p3_progress_ack(
-        params=_presentation_progress_ack_params(terminal_payload),
-        request_id="request-actual-chain-terminal-ack",
-        session_id=SCOPE.session_id,
-        channel_id="web",
-    )
-    assert acknowledged.ok
-
-    for _ in range(200):
-        seams = {record.seam.value for record in backend.records()}
-        if {
-            "command",
-            "outbox",
-            "executor",
-            "event",
-            "generation",
-            "ack",
-        } <= seams:
-            break
-        await asyncio.sleep(0.01)
-    records = backend.records()
-    seams = {record.seam.value for record in records}
-    assert {
-        "queue",
-        "command",
-        "outbox",
-        "executor",
-        "event",
-        "generation",
-        "ack",
-    } <= seams
-    command = next(record for record in records if record.seam.value == "command")
-    outbox = next(record for record in records if record.seam.value == "outbox")
-    executor = next(record for record in records if record.seam.value == "executor")
-    assert {"task_id", "attempt_id", "command_id", "executor_id"} <= dict(
-        executor.trace_identities
-    ).keys()
-    failure_generation = next(
-        record
-        for record in records
-        if record.seam.value == "generation"
-        and b'"live_voice.outcome":"failed"' in record.record.canonical_bytes
-    )
-    assert {"task_id", "attempt_id", "event_id", "presentation_id"} <= dict(
-        failure_generation.trace_identities
-    ).keys()
-    failure_event = next(
-        record
-        for record in records
-        if record.seam.value == "event"
-        and b'"live_voice.outcome":"failed"' in record.record.canonical_bytes
-    )
-    assert {"task_id", "attempt_id", "event_id"} <= dict(
-        failure_event.trace_identities
-    ).keys()
-    terminal_event_id = cast(Mapping[str, object], terminal_payload["source_event"])[
-        "event_id"
-    ]
-    ack = next(
-        record
-        for record in records
-        if record.seam.value == "ack"
-        and dict(record.trace_identities).get("event_id")
-        == dict(failure_generation.trace_identities).get("event_id")
-    )
-    assert {
-        "task_id",
-        "attempt_id",
-        "command_id",
-        "event_id",
-        "presentation_id",
-    } <= dict(ack.trace_identities).keys()
-    command_identities = dict(command.trace_identities)
-    outbox_identities = dict(outbox.trace_identities)
-    executor_identities = dict(executor.trace_identities)
-    for key in ("task_id", "attempt_id", "command_id"):
-        assert command_identities[key] == outbox_identities[key]
-        assert command_identities[key] == executor_identities[key]
-    assert (
-        dict(failure_event.trace_identities)["task_id"] == command_identities["task_id"]
-    )
-    assert (
-        dict(failure_generation.trace_identities)["task_id"]
-        == (command_identities["task_id"])
-    )
-    assert dict(ack.trace_identities)["task_id"] == command_identities["task_id"]
-    serialized = b"\n".join(record.record.canonical_bytes for record in records)
-    for forbidden in (
-        task_id,
-        task.attempt_id,
-        task.spec.instruction,
-        task.spec.name,
-        task.spec.context.uri,
-        "command-actual-failed-create",
-        str(terminal_event_id),
-        "private executor failure detail",
-    ):
-        assert forbidden.encode() not in serialized
-
-    await registry.stop()
-    await runtime.close()
 
 
 @pytest.mark.asyncio
@@ -15080,315 +14644,10 @@ async def test_p2_task_origin_canonical_accept_wins_concurrent_route_close(
     )
 
 
-@pytest.mark.asyncio
-async def test_closed_p2_voice_origin_is_consumed_once_by_exact_p3_create(
-    tmp_path: Path,
-) -> None:
-    ledger = TurnCommitLedger()
-    registry, composition, _owner = _voice_mutation_registry(
-        tmp_path,
-        commit_ledger=ledger,
-    )
-    activated = await registry.handle_p2_activate(
-        params=_p2_params(),
-        request_id="request-activate-closed-origin",
-        session_id="session-product",
-        channel_id="web",
-    )
-    assert activated.ok is True
-    text = "create exactly one task after the P2 route closes"
-    origin_params = _p2_task_origin_params(stem="closed-origin", text=text)
-    accepted = await registry.handle_p2_submit(
-        params=origin_params,
-        request_id="request-submit-closed-origin",
-        session_id="session-product",
-        channel_id="web",
-    )
-    closed = await registry.handle_p2_close(
-        params=_p2_params(),
-        request_id="request-close-closed-origin",
-        session_id="session-product",
-    )
-    replayed_origin = await registry.handle_p2_submit(
-        params=origin_params,
-        request_id="request-submit-closed-origin",
-        session_id="session-product",
-        channel_id="web",
-    )
-    create = {
-        "auth_token": "trusted-token",
-        "session_id": "session-product",
-        "operation": "task.create",
-        "command_id": "command-create-closed-origin",
-        "issued_at": NOW,
-        "correlation_id": "correlation-create-closed-origin",
-        "name": "Closed origin task",
-        "instruction": text,
-        "source": "voice",
-        "interaction_id": "interaction-1",
-        "turn_id": "turn-closed-origin",
-        "commit_id": "commit-closed-origin",
-    }
-    issued = await registry.handle_p3_confirmation_issue(
-        params=create,
-        request_id="request-issue-closed-origin",
-        session_id="session-product",
-    )
-    assert accepted.ok is True
-    assert closed.ok is True
-    assert replayed_origin.payload == accepted.payload
-    assert issued.ok is True
-    receipt = cast(dict[str, object], issued.payload["result"])
-    mutation = {**create, "confirmation_id": receipt["confirmation_id"]}
-    created = await registry.handle_p3_mutation(
-        params=mutation,
-        request_id="request-mutate-closed-origin",
-        session_id="session-product",
-    )
-    replayed_create = await registry.handle_p3_mutation(
-        params=mutation,
-        request_id="request-mutate-closed-origin",
-        session_id="session-product",
-    )
-    duplicate = await registry.handle_p3_confirmation_issue(
-        params={**create, "command_id": "command-create-closed-origin-duplicate"},
-        request_id="request-issue-closed-origin-duplicate",
-        session_id="session-product",
-    )
-    foreign = await registry.handle_p3_confirmation_issue(
-        params={
-            **create,
-            "command_id": "command-create-closed-origin-foreign",
-            "interaction_id": "interaction-foreign",
-        },
-        request_id="request-issue-closed-origin-foreign",
-        session_id="session-product",
-    )
-
-    assert created.ok is True
-    assert replayed_create.payload == created.payload
-    assert duplicate.ok is False
-    assert foreign.ok is False
-    assert len(composition.mutation_calls) == 1
-    await registry.stop()
-    with pytest.raises(ContractViolation, match="accepted commit"):
-        ledger.require_origin(
-            OriginRef(
-                "committed_turn",
-                "turn-closed-origin",
-                "commit-closed-origin",
-            ),
-            SCOPE,
-        )
 
 
-@pytest.mark.asyncio
-async def test_concurrent_p3_creates_reserve_one_exact_voice_origin(
-    tmp_path: Path,
-) -> None:
-    ledger = TurnCommitLedger()
-    registry, composition, _owner = _voice_mutation_registry(
-        tmp_path,
-        commit_ledger=ledger,
-    )
-    activated = await registry.handle_p2_activate(
-        params=_p2_params(),
-        request_id="request-activate-concurrent-create",
-        session_id="session-product",
-        channel_id="web",
-    )
-    assert activated.ok is True
-    text = "create one task despite concurrent requests"
-    accepted = await registry.handle_p2_submit(
-        params=_p2_task_origin_params(stem="concurrent-create", text=text),
-        request_id="request-submit-concurrent-create",
-        session_id="session-product",
-        channel_id="web",
-    )
-    assert accepted.ok is True
-    create = {
-        "auth_token": "trusted-token",
-        "session_id": "session-product",
-        "operation": "task.create",
-        "issued_at": NOW,
-        "correlation_id": "correlation-concurrent-create",
-        "name": "Concurrent origin task",
-        "instruction": text,
-        "source": "voice",
-        "interaction_id": "interaction-1",
-        "turn_id": "turn-concurrent-create",
-        "commit_id": "commit-concurrent-create",
-    }
-    first_issue = await registry.handle_p3_confirmation_issue(
-        params={**create, "command_id": "command-concurrent-create-a"},
-        request_id="request-issue-concurrent-create-a",
-        session_id="session-product",
-    )
-    second_issue = await registry.handle_p3_confirmation_issue(
-        params={**create, "command_id": "command-concurrent-create-b"},
-        request_id="request-issue-concurrent-create-b",
-        session_id="session-product",
-    )
-    assert first_issue.ok is True
-    assert second_issue.ok is True
-    first_receipt = cast(dict[str, object], first_issue.payload["result"])
-    second_receipt = cast(dict[str, object], second_issue.payload["result"])
-
-    first, second = await asyncio.gather(
-        registry.handle_p3_mutation(
-            params={
-                **create,
-                "command_id": "command-concurrent-create-a",
-                "confirmation_id": first_receipt["confirmation_id"],
-            },
-            request_id="request-mutate-concurrent-create-a",
-            session_id="session-product",
-        ),
-        registry.handle_p3_mutation(
-            params={
-                **create,
-                "command_id": "command-concurrent-create-b",
-                "confirmation_id": second_receipt["confirmation_id"],
-            },
-            request_id="request-mutate-concurrent-create-b",
-            session_id="session-product",
-        ),
-    )
-
-    assert sum(result.ok for result in (first, second)) == 1
-    assert len(composition.mutation_calls) == 1
-    rejected = second if first.ok else first
-    assert cast(dict, rejected.payload["error"])["code"] == (
-        ErrorCode.PERMISSION_DENIED.value
-    )
-    await registry.stop()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("terminal_mode", ["failed", "cancelled"])
-async def test_failed_voice_create_eviction_retires_exact_reserved_origin(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    terminal_mode: str,
-) -> None:
-    ledger = TurnCommitLedger(capacity=1)
-    registry, composition, _owner = _voice_mutation_registry(
-        tmp_path,
-        commit_ledger=ledger,
-    )
-    monkeypatch.setattr(registry, "_TURN_COMMIT_CAPACITY", 1)
-    activated = await registry.handle_p2_activate(
-        params=_p2_params(),
-        request_id=f"request-activate-create-{terminal_mode}",
-        session_id="session-product",
-        channel_id="web",
-    )
-    assert activated.ok is True
-    text = f"retire {terminal_mode} voice create without leaking capacity"
-    origin = await registry.handle_p2_submit(
-        params=_p2_task_origin_params(stem=f"create-{terminal_mode}", text=text),
-        request_id=f"request-submit-create-{terminal_mode}",
-        session_id="session-product",
-        channel_id="web",
-    )
-    assert origin.ok is True
-    create = {
-        "auth_token": "trusted-token",
-        "session_id": "session-product",
-        "operation": "task.create",
-        "command_id": f"command-create-{terminal_mode}",
-        "issued_at": NOW,
-        "correlation_id": f"correlation-create-{terminal_mode}",
-        "name": f"{terminal_mode} task",
-        "instruction": text,
-        "source": "voice",
-        "interaction_id": "interaction-1",
-        "turn_id": f"turn-create-{terminal_mode}",
-        "commit_id": f"commit-create-{terminal_mode}",
-    }
-    issued = await registry.handle_p3_confirmation_issue(
-        params=create,
-        request_id=f"request-issue-create-{terminal_mode}",
-        session_id="session-product",
-    )
-    assert issued.ok is True
-    receipt = cast(dict[str, object], issued.payload["result"])
-    mutation_request_id = f"request-mutate-create-{terminal_mode}"
-
-    async def terminal_handle(**_kwargs: object) -> P3RouteResult:
-        if terminal_mode == "cancelled":
-            raise asyncio.CancelledError
-        return P3RouteResult(
-            False,
-            {
-                "request_id": mutation_request_id,
-                "ok": False,
-                "result": None,
-                "error": {
-                    "code": ErrorCode.UNAVAILABLE.value,
-                    "reason": "INJECTED_CREATE_FAILURE",
-                    "message": "injected create failure",
-                },
-            },
-        )
-
-    monkeypatch.setattr(composition, "handle", terminal_handle)
-    mutation = registry.handle_p3_mutation(
-        params={**create, "confirmation_id": receipt["confirmation_id"]},
-        request_id=mutation_request_id,
-        session_id="session-product",
-    )
-    if terminal_mode == "cancelled":
-        with pytest.raises(asyncio.CancelledError):
-            await mutation
-    else:
-        failed = await mutation
-        assert failed.ok is False
-
-    assert (
-        registry._reserved_voice_origin_requests[f"commit-create-{terminal_mode}"]
-        == mutation_request_id
-    )
-    async with registry._lock:
-        assert (
-            registry._evict_completed_product_operation(
-                registry._p3_mutation_operations,
-                namespace="p3.mutate",
-            )
-            is True
-        )
-
-    assert registry._reserved_voice_origin_requests == {}
-    assert registry._accepted_turn_commits_by_commit == {}
-    with pytest.raises(ContractViolation, match="accepted commit"):
-        ledger.require_origin(
-            OriginRef(
-                "committed_turn",
-                f"turn-create-{terminal_mode}",
-                f"commit-create-{terminal_mode}",
-            ),
-            SCOPE,
-        )
-    retired = await registry.handle_p2_submit(
-        params=_p2_task_origin_params(stem=f"create-{terminal_mode}", text=text),
-        request_id=f"request-submit-create-{terminal_mode}-duplicate",
-        session_id="session-product",
-        channel_id="web",
-    )
-    assert retired.ok is False
-    assert cast(dict, retired.payload["error"])["reason"] == "TURN_COMMIT_RETIRED"
-
-    fresh = await registry.handle_p2_submit(
-        params=_p2_task_origin_params(
-            stem=f"create-{terminal_mode}-fresh",
-            text="fresh voice origin proves bounded capacity was released",
-        ),
-        request_id=f"request-submit-create-{terminal_mode}-fresh",
-        session_id="session-product",
-        channel_id="web",
-    )
-    assert fresh.ok is True
-    await registry.stop()
 
 
 @pytest.mark.asyncio
@@ -16943,7 +16202,7 @@ async def test_p3_confirmation_issue_and_mutation_use_current_owner_permit(
         p3_confirmation_owner=owner,
         p3_confirmation_forwarder=forwarder,
     )
-    issue_params = _mutation_params()
+    issue_params = _retry_mutation_params()
 
     issued = await registry.handle_p3_confirmation_issue(
         params=issue_params,
@@ -16957,10 +16216,10 @@ async def test_p3_confirmation_issue_and_mutation_use_current_owner_permit(
     )
     receipt = cast(dict[str, object], issued.payload["result"])
     confirmation_id = cast(str, receipt["confirmation_id"])
-    mutation_params = _mutation_params(confirmation_id=confirmation_id)
+    mutation_params = _retry_mutation_params(confirmation_id=confirmation_id)
 
     prepared = await composition.prepare_mutation_confirmation(
-        operation="task.cancel",
+        operation="task.retry",
         params={
             key: value for key, value in mutation_params.items() if key != "operation"
         },
@@ -16983,148 +16242,26 @@ async def test_p3_confirmation_issue_and_mutation_use_current_owner_permit(
     assert issued.ok is True
     assert replayed_issue.payload == issued.payload
     assert receipt["status"] == "confirmation_issued"
-    assert receipt["command_id"] == "command-cancel-1"
+    assert receipt["command_id"] == "command-retry-1"
     assert receipt["target_task_id"] == "task-1"
     assert receipt["task_control_binding"] == {
         "subject_id": SCOPE.subject_id,
         "session_id": SCOPE.session_id,
         "project_id": SCOPE.project_id,
-        "correlation_id": "correlation-cancel-1",
+        "correlation_id": "correlation-retry-1",
         "generation": registry._p3_confirmation_generation,
     }
     assert direct.value.reason == "P3_CONFIRMATION_FORWARDING_REQUIRED"
     assert mutated.ok is True
     assert replayed_mutation.payload == mutated.payload
     mutation_result = cast(dict[str, object], mutated.payload["result"])
-    assert mutation_result["command_id"] == "command-cancel-1"
+    assert mutation_result["command_id"] == "command-retry-1"
     assert mutation_result["target_task_id"] == "task-1"
     assert len(composition.mutation_calls) == 1
     assert _route(mutated.payload, "authority")["truth"] == "formal"
     assert _route(mutated.payload, "p3.control")["truth"] == "formal"
 
 
-@pytest.mark.asyncio
-async def test_real_store_mutation_exports_exact_command_and_initial_outbox(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    project = tmp_path / "actual-mutation-project"
-    project.mkdir()
-    store = SqliteTaskStore(tmp_path / "actual-mutation.sqlite3")
-    owner = BoundedP3ConfirmationOwner(
-        tmp_path / "actual-mutation-confirmations.sqlite3",
-        enabled=True,
-    )
-    forwarder = ProductP3ConfirmationForwarder(owner)
-    composition = _StoreMutationP3Composition(project, forwarder, store)
-    backend = BoundedInMemoryOtelBackend(capacity=16)
-    monkeypatch.setenv(PRODUCT_OBSERVABILITY_ENABLE_ENV, "1")
-    monkeypatch.setenv(
-        PRODUCT_OBSERVABILITY_BACKEND_ENV,
-        PRODUCT_OBSERVABILITY_BACKEND_ID,
-    )
-    monkeypatch.setenv(PRODUCT_OBSERVABILITY_TOKEN_KEY_ENV, "5e" * 32)
-    runtime = create_product_observability_runtime_from_environment(
-        backend=backend,
-        validated_configuration=_observability_runtime_configuration(backend),
-    )
-    assert type(runtime) is ProductObservabilityRuntime
-    assert (await runtime.start()).ready
-
-    async def push(_message: dict[str, object]) -> bool:
-        return True
-
-    registry = AgentServerProductCompositionRegistry(
-        settings=ProductCompositionSettings(
-            p2_enabled=True,
-            p3_text_enabled=False,
-            p3_mutation_enabled=True,
-        ),
-        p3_composition=composition,
-        agent_manager=_AgentManager(),
-        push_text_event=push,
-        p3_confirmation_owner=owner,
-        p3_confirmation_forwarder=forwarder,
-        observability_runtime=runtime,
-    )
-    assert (
-        await registry.handle_p2_activate(
-            params=_p2_params(),
-            request_id="request-actual-mutation-p2",
-            session_id=SCOPE.session_id,
-            channel_id="web",
-        )
-    ).ok
-    spec = _itinerary_spec(project)
-    issue_params = _mutation_params(
-        operation="task.create",
-        command_id="command-actual-store-create",
-        correlation_id="correlation-p2",
-        task_id=None,
-        name=spec.name,
-        instruction=spec.instruction,
-    )
-    issue_params.pop("task_id")
-    issued = await registry.handle_p3_confirmation_issue(
-        params=issue_params,
-        request_id="request-actual-mutation-confirmation",
-        session_id=SCOPE.session_id,
-    )
-    receipt = cast(Mapping[str, object], issued.payload["result"])
-    mutated = await registry.handle_p3_mutation(
-        params={**issue_params, "confirmation_id": receipt["confirmation_id"]},
-        request_id="request-actual-mutation",
-        session_id=SCOPE.session_id,
-    )
-    assert issued.ok and mutated.ok
-    result = cast(Mapping[str, object], mutated.payload["result"])
-    formal_result = cast(Mapping[str, object], result["formal_task_result"])
-    task_id = cast(str, formal_result["task_id"])
-    attempt_id = cast(str, formal_result["attempt_id"])
-    outbox_id = cast(str, formal_result["outbox_id"])
-    assert store.get_task(task_id, SCOPE).attempt_id == attempt_id
-
-    for _ in range(200):
-        if {record.seam.value for record in backend.records()} >= {
-            "command",
-            "outbox",
-        }:
-            break
-        await asyncio.sleep(0.01)
-    command = next(
-        record for record in backend.records() if record.seam.value == "command"
-    )
-    outbox = next(
-        record for record in backend.records() if record.seam.value == "outbox"
-    )
-    for envelope in (command, outbox):
-        identities = dict(envelope.trace_identities)
-        assert {
-            "task_id",
-            "attempt_id",
-            "command_id",
-            "outbox_id",
-        } <= identities.keys()
-        assert all(
-            str(identities[key]).startswith("lvpub:")
-            for key in ("task_id", "attempt_id", "command_id", "outbox_id")
-        )
-    serialized = b"\n".join(
-        record.record.canonical_bytes for record in backend.records()
-    )
-    for forbidden in (
-        task_id,
-        attempt_id,
-        outbox_id,
-        "command-actual-store-create",
-        spec.name,
-        spec.instruction,
-        str(project),
-    ):
-        assert forbidden.encode() not in serialized
-
-    await registry.stop()
-    await runtime.close()
 
 
 @pytest.mark.asyncio
@@ -17146,7 +16283,7 @@ async def test_p3_confirmation_owner_mismatch_and_request_conflict_fail_closed(
         p3_confirmation_owner=owner,
         p3_confirmation_forwarder=forwarder,
     )
-    issue_params = _mutation_params()
+    issue_params = _retry_mutation_params()
     issued = await registry.handle_p3_confirmation_issue(
         params=issue_params,
         request_id="request-confirmation-1",
@@ -17155,12 +16292,12 @@ async def test_p3_confirmation_owner_mismatch_and_request_conflict_fail_closed(
     receipt = cast(dict[str, object], issued.payload["result"])
 
     conflict = await registry.handle_p3_confirmation_issue(
-        params=_mutation_params(command_id="command-other"),
+        params=_retry_mutation_params(command_id="command-other"),
         request_id="request-confirmation-1",
         session_id="session-product",
     )
     mismatch = await registry.handle_p3_mutation(
-        params=_mutation_params(
+        params=_retry_mutation_params(
             confirmation_id=receipt["confirmation_id"],
             correlation_id="correlation-other",
         ),
@@ -17201,19 +16338,19 @@ async def test_denied_p3_requests_do_not_reserve_replay_capacity(
     monkeypatch.setattr(registry, "_PRODUCT_OPERATION_CAPACITY", 1)
 
     denied_issue = await registry.handle_p3_confirmation_issue(
-        params=_mutation_params(auth_token="invalid-token"),
+        params=_retry_mutation_params(auth_token="invalid-token"),
         request_id="request-confirmation-denied-capacity",
         session_id="session-product",
     )
     issued = await registry.handle_p3_confirmation_issue(
-        params=_mutation_params(),
+        params=_retry_mutation_params(),
         request_id="request-confirmation-valid-capacity",
         session_id="session-product",
     )
     receipt = cast(dict[str, object], issued.payload["result"])
 
     denied_mutation = await registry.handle_p3_mutation(
-        params=_mutation_params(
+        params=_retry_mutation_params(
             auth_token="invalid-token",
             confirmation_id=receipt["confirmation_id"],
         ),
@@ -17221,7 +16358,7 @@ async def test_denied_p3_requests_do_not_reserve_replay_capacity(
         session_id="session-product",
     )
     mutated = await registry.handle_p3_mutation(
-        params=_mutation_params(confirmation_id=receipt["confirmation_id"]),
+        params=_retry_mutation_params(confirmation_id=receipt["confirmation_id"]),
         request_id="request-mutation-valid-capacity",
         session_id="session-product",
     )
@@ -17260,14 +16397,14 @@ async def test_retained_p3_results_require_current_authority(
         p3_confirmation_owner=owner,
         p3_confirmation_forwarder=forwarder,
     )
-    issue_params = _mutation_params()
+    issue_params = _retry_mutation_params()
     issued = await registry.handle_p3_confirmation_issue(
         params=issue_params,
         request_id="request-confirmation-revoked",
         session_id="session-product",
     )
     receipt = cast(dict[str, object], issued.payload["result"])
-    mutation_params = _mutation_params(confirmation_id=receipt["confirmation_id"])
+    mutation_params = _retry_mutation_params(confirmation_id=receipt["confirmation_id"])
     mutated = await registry.handle_p3_mutation(
         params=mutation_params,
         request_id="request-mutation-revoked",
@@ -17626,7 +16763,7 @@ async def test_p3_issue_preflight_cannot_admit_after_stop(
     monkeypatch.setattr(composition, "prepare_mutation_confirmation", blocked_prepare)
     issue_task = asyncio.create_task(
         registry.handle_p3_confirmation_issue(
-            params=_mutation_params(),
+            params=_retry_mutation_params(),
             request_id="request-issue-preflight-stop",
             session_id="session-product",
         )
@@ -17665,14 +16802,14 @@ async def test_p3_mutation_preflight_cannot_admit_or_consume_after_stop(
         p3_confirmation_forwarder=forwarder,
     )
     issued = await registry.handle_p3_confirmation_issue(
-        params=_mutation_params(),
+        params=_retry_mutation_params(),
         request_id="request-mutation-preflight-issue",
         session_id="session-product",
     )
     receipt = cast(dict[str, object], issued.payload["result"])
-    mutation_params = _mutation_params(confirmation_id=receipt["confirmation_id"])
+    mutation_params = _retry_mutation_params(confirmation_id=receipt["confirmation_id"])
     prepared = await composition.prepare_mutation_confirmation(
-        operation="task.cancel",
+        operation="task.retry",
         params=mutation_params,
         session_id="session-product",
     )
@@ -17815,10 +16952,10 @@ async def test_p3_capacity_recovery_rejects_evicted_exact_side_effects(
         p3_confirmation_forwarder=forwarder,
     )
     monkeypatch.setattr(registry, "_PRODUCT_OPERATION_CAPACITY", 1)
-    issue_one_params = _mutation_params()
-    issue_two_params = _mutation_params(
-        command_id="command-cancel-2",
-        correlation_id="correlation-cancel-2",
+    issue_one_params = _retry_mutation_params()
+    issue_two_params = _retry_mutation_params(
+        command_id="command-retry-2",
+        correlation_id="correlation-retry-2",
         task_id="task-2",
     )
     issue_one = await registry.handle_p3_confirmation_issue(
@@ -17838,12 +16975,12 @@ async def test_p3_capacity_recovery_rejects_evicted_exact_side_effects(
     )
     receipt_one = cast(dict[str, object], issue_one.payload["result"])
     receipt_two = cast(dict[str, object], issue_two.payload["result"])
-    mutation_one_params = _mutation_params(
+    mutation_one_params = _retry_mutation_params(
         confirmation_id=receipt_one["confirmation_id"]
     )
-    mutation_two_params = _mutation_params(
-        command_id="command-cancel-2",
-        correlation_id="correlation-cancel-2",
+    mutation_two_params = _retry_mutation_params(
+        command_id="command-retry-2",
+        correlation_id="correlation-retry-2",
         task_id="task-2",
         confirmation_id=receipt_two["confirmation_id"],
     )
@@ -17898,26 +17035,26 @@ async def test_p3_conflict_is_not_revealed_before_reauthentication(
         p3_confirmation_forwarder=forwarder,
     )
     issued = await registry.handle_p3_confirmation_issue(
-        params=_mutation_params(),
+        params=_retry_mutation_params(),
         request_id="request-private-conflict",
         session_id="session-product",
     )
     receipt = cast(dict[str, object], issued.payload["result"])
     mutated = await registry.handle_p3_mutation(
-        params=_mutation_params(confirmation_id=receipt["confirmation_id"]),
+        params=_retry_mutation_params(confirmation_id=receipt["confirmation_id"]),
         request_id="request-private-mutation-conflict",
         session_id="session-product",
     )
 
     denied_issue = await registry.handle_p3_confirmation_issue(
-        params=_mutation_params(
+        params=_retry_mutation_params(
             auth_token="invalid-token", command_id="changed-command"
         ),
         request_id="request-private-conflict",
         session_id="session-product",
     )
     denied_mutation = await registry.handle_p3_mutation(
-        params=_mutation_params(
+        params=_retry_mutation_params(
             auth_token="invalid-token",
             confirmation_id=receipt["confirmation_id"],
             task_id="changed-task",
@@ -17958,7 +17095,7 @@ async def test_p3_product_mutation_preserves_formal_failure_details(
         p3_confirmation_forwarder=forwarder,
     )
     issued = await registry.handle_p3_confirmation_issue(
-        params=_mutation_params(),
+        params=_retry_mutation_params(),
         request_id="request-confirmation-denied",
         session_id="session-product",
     )
@@ -17980,7 +17117,7 @@ async def test_p3_product_mutation_preserves_formal_failure_details(
 
     monkeypatch.setattr(composition, "handle", deny_mutation)
     result = await registry.handle_p3_mutation(
-        params=_mutation_params(confirmation_id=receipt["confirmation_id"]),
+        params=_retry_mutation_params(confirmation_id=receipt["confirmation_id"]),
         request_id="request-mutation-denied",
         session_id="session-product",
     )
@@ -18005,7 +17142,7 @@ async def test_p3_mutation_flag_off_has_zero_composition_effect(tmp_path: Path) 
     )
 
     result = await registry.handle_p3_confirmation_issue(
-        params=_mutation_params(),
+        params=_retry_mutation_params(),
         request_id="request-confirmation-off",
         session_id="session-product",
     )
@@ -18061,6 +17198,27 @@ def _mutation_registry(
         p3_confirmation_forwarder=forwarder,
     )
     return registry, composition, owner
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["task.create", "task.adjust", "task.cancel"])
+@pytest.mark.parametrize("issue", [True, False])
+async def test_replaced_primitive_product_mutations_have_zero_admission_effect(tmp_path, operation, issue):
+    registry, composition, owner = _mutation_registry(tmp_path)
+    handler = registry.handle_p3_confirmation_issue if issue else registry.handle_p3_mutation
+    params = _create_mutation_params() if operation == "task.create" else _mutation_params()
+    params["operation"] = operation
+    if operation == "task.adjust":
+        params["instruction"] = "Adjust the same task"
+    if not issue:
+        params["confirmation_id"] = "previous-product-confirmation"
+    rejected = await handler(params=params, request_id="retired-product-mutation", session_id="session-product")
+    assert not rejected.ok
+    assert rejected.payload["error"]["reason"] == "INVALID_P3_CONFIRMATION_OPERATION"
+    assert composition.prepare_calls == composition.mutation_calls == composition.authority_calls == []
+    assert registry._p3_issue_operations == registry._p3_mutation_operations == {}
+    with sqlite3.connect(tmp_path / "confirmations.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM p3_confirmations").fetchone()[0] == 0
 
 
 @pytest.mark.asyncio
@@ -18208,8 +17366,9 @@ async def test_every_p3_mutation_rejects_missing_required_fields_fail_closed(
         )
         assert issued.ok is False, label
         error = cast(dict, issued.payload["error"])
-        assert error["reason"] == "INVALID_PRODUCT_COMPOSITION_ARGUMENT", label
-        assert error["code"] == "INVALID_ARGUMENT", label
+        assert error["reason"] == ("INVALID_PRODUCT_COMPOSITION_ARGUMENT" if params["operation"] == "task.retry"
+                                   else "INVALID_P3_CONFIRMATION_OPERATION"), label
+        assert error["code"] == ("INVALID_ARGUMENT" if params["operation"] == "task.retry" else "UNSUPPORTED"), label
 
     # ``mutate`` additionally requires the confirmation it must forward.
     mutate_without_confirmation = _retry_mutation_params()
@@ -18250,11 +17409,7 @@ async def test_missing_bearer_stays_an_authentication_failure_for_every_mutation
 
     registry, composition, owner = _mutation_registry(tmp_path)
 
-    for label, builder in (
-        ("task.create", _create_mutation_params),
-        ("task.cancel", _mutation_params),
-        ("task.retry", _retry_mutation_params),
-    ):
+    for label, builder in (("task.retry", _retry_mutation_params),):
         without_bearer = builder()
         without_bearer.pop("auth_token")
 

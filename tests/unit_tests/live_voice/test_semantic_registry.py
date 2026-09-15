@@ -679,6 +679,156 @@ def p2_params(**changes):
 
 
 @pytest.mark.asyncio
+async def test_current_task_failure_trace_links_saved_command_through_ack(semantic_runtime, monkeypatch):
+    from tests.unit_tests.live_voice import test_product_composition_registry as fixtures
+    from openjiuwen.core.application.tasks.formal_task_models import TerminalOutcome
+    s = semantic_runtime
+    registry, core = s.registry, s.harness.composition._core
+    backend = fixtures.BoundedInMemoryOtelBackend(capacity=128)
+    monkeypatch.setenv(fixtures.PRODUCT_OBSERVABILITY_ENABLE_ENV, "1")
+    monkeypatch.setenv(fixtures.PRODUCT_OBSERVABILITY_BACKEND_ENV, fixtures.PRODUCT_OBSERVABILITY_BACKEND_ID)
+    monkeypatch.setenv(fixtures.PRODUCT_OBSERVABILITY_TOKEN_KEY_ENV, "6f" * 32)
+    runtime = fixtures.create_product_observability_runtime_from_environment(
+        backend=backend, validated_configuration=fixtures._observability_runtime_configuration(backend))
+    assert (await runtime.start()).ready
+    registry._observability_runtime = runtime
+    registry._observability_exporter = runtime.export
+    pushed = []
+
+    async def push(message):
+        pushed.append(message)
+        return True
+
+    registry._push_text_event = push
+    try:
+        active = await registry.handle_p2_activate(params=p2_params(), request_id="trace-active",
+                                                  session_id="session-1", channel_id="web")
+        assert active.ok, active.payload
+        params = {"auth_token": TOKEN, "session_id": "session-1", "correlation_id": "semantic-voice",
+                  "source": "structured", "source_id": "trace-create",
+                  "structured_intent": {"operation": "task.create", "target": None,
+                      "arguments": {"name": "Private inventory", "instruction": "Save private inventory findings."}}}
+        proposed = await registry.handle_p3_intent(params=params, request_id="trace-propose", session_id="session-1")
+        assert proposed.ok, proposed.payload
+        confirmed = await registry.handle_p3_intent(
+            params={**params, "continuation_id": proposed.payload["result"]["confirmation_token"]},
+            request_id="trace-confirm", session_id="session-1")
+        assert confirmed.ok, confirmed.payload
+        receipt = confirmed.payload["result"]["formal_task_result"]
+        task_id, attempt_id, outbox_id = (receipt[key] for key in ("task_id", "attempt_id", "outbox_id"))
+        task = core.store.get_task(task_id, _scope())
+        assert task.attempt_id == attempt_id
+        s.harness.executor.dispatch_outcome = TerminalOutcome.FAILED
+        dispatch = s.harness.executor.dispatch
+
+        async def failed_dispatch(item):
+            result = await dispatch(item)
+            return replace(result, observations=tuple(
+                replace(observation, error="private executor failure detail")
+                if observation.attempt_outcome is TerminalOutcome.FAILED else observation
+                for observation in result.observations))
+
+        monkeypatch.setattr(s.harness.executor, "dispatch", failed_dispatch)
+        await core.drain_outbox()
+        assert core.store.get_task(task_id, _scope()).outcome is TerminalOutcome.FAILED
+        for operation in ("task.status", "task.events", "task.result"):
+            query = {"auth_token": TOKEN, "session_id": "session-1", "task_id": task_id}
+            if operation == "task.events":
+                query.update(after_seq=-1, limit=20)
+            result = await registry.handle_p3_query(operation=operation, params=query,
+                request_id="trace-" + operation, session_id="session-1")
+            assert result.ok, result.payload
+            if operation == "task.result":
+                assert result.payload["result"]["availability"] == "unavailable"
+        activated = await registry.handle_p3_progress_activate(
+            params=fixtures._progress_params(auth_token=TOKEN, session_id="session-1", task_id=task_id,
+                                             correlation_id="semantic-voice"),
+            request_id="trace-progress", session_id="session-1", channel_id="web")
+        assert activated.ok, activated.payload
+        acknowledged = set()
+        terminal_payload = None
+        for _ in range(200):
+            for message in tuple(pushed):
+                payload = message.get("payload", {})
+                if payload.get("event_type") != "live_voice.task.progress" or payload["delivery_id"] in acknowledged:
+                    continue
+                ack_params = fixtures._presentation_progress_ack_params(payload)
+                ack_params["auth_token"] = TOKEN
+                ack = await registry.handle_p3_progress_ack(params=ack_params,
+                    request_id="trace-ack-" + str(len(acknowledged)), session_id="session-1", channel_id="web")
+                assert ack.ok, ack.payload
+                acknowledged.add(payload["delivery_id"])
+                if payload["source_event"]["event_type"] == "task.terminal":
+                    terminal_payload = payload
+            if terminal_payload is not None and any(record.seam.value == "ack" for record in backend.records()):
+                break
+            await asyncio.sleep(0.01)
+        assert terminal_payload is not None
+        records = backend.records()
+        seams = {record.seam.value for record in records}
+        assert {"queue", "command", "outbox", "executor", "event", "generation", "ack"} <= seams
+        command = next(record for record in records if record.seam.value == "command")
+        outbox = next(record for record in records if record.seam.value == "outbox")
+        executor = next(record for record in records if record.seam.value == "executor")
+        assert {"task_id", "attempt_id", "command_id", "executor_id"} <= dict(executor.trace_identities).keys()
+        for record in (command, outbox):
+            identities = dict(record.trace_identities)
+            assert {"task_id", "attempt_id", "command_id", "outbox_id"} <= identities.keys()
+            assert all(identities[key].startswith("lvpub:") for key in ("task_id", "attempt_id", "command_id", "outbox_id"))
+        for key in ("task_id", "attempt_id", "command_id"):
+            assert dict(command.trace_identities)[key] == dict(outbox.trace_identities)[key] == dict(executor.trace_identities)[key]
+        failure_generation = next(record for record in records if record.seam.value == "generation"
+                                  and b'"live_voice.outcome":"failed"' in record.record.canonical_bytes)
+        failure_event = next(record for record in records if record.seam.value == "event"
+                             and b'"live_voice.outcome":"failed"' in record.record.canonical_bytes)
+        ack = next(record for record in records if record.seam.value == "ack"
+                   and dict(record.trace_identities).get("event_id") == dict(failure_generation.trace_identities)["event_id"])
+        assert {"task_id", "attempt_id", "event_id", "presentation_id"} <= dict(failure_generation.trace_identities).keys()
+        assert {"task_id", "attempt_id", "event_id"} <= dict(failure_event.trace_identities).keys()
+        assert {"task_id", "attempt_id", "command_id", "event_id", "presentation_id"} <= dict(ack.trace_identities).keys()
+        for record in (failure_event, failure_generation, ack):
+            assert dict(record.trace_identities)["task_id"] == dict(command.trace_identities)["task_id"]
+        serialized = b"\n".join(record.record.canonical_bytes for record in records)
+        for private in (task_id, attempt_id, outbox_id, task.spec.name, task.spec.instruction,
+                        task.spec.context.uri, task.create_command_id, "private executor failure detail",
+                        str(terminal_payload["source_event"]["event_id"])):
+            assert private.encode() not in serialized
+    finally:
+        await registry.stop()
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_confirmation_of_one_continuation_creates_one_task(semantic_runtime):
+    s = semantic_runtime
+    params = {
+        "auth_token": TOKEN, "session_id": "session-1", "correlation_id": "concurrent-confirmation",
+        "source": "structured", "source_id": "one-create-origin",
+        "structured_intent": {"operation": "task.create", "target": None,
+                              "arguments": {"name": "Report", "instruction": "Save one report."}},
+    }
+    proposed = await s.registry.handle_p3_intent(
+        params=params, request_id="one-create-proposal", session_id="session-1")
+    assert proposed.ok, proposed.payload
+    params = {**params, "continuation_id": proposed.payload["result"]["confirmation_token"]}
+    results = await asyncio.gather(*(
+        s.registry.handle_p3_intent(params=params, request_id=f"same-confirmation-{index}", session_id="session-1")
+        for index in range(2)
+    ))
+    assert sum(result.ok and result.payload["result"]["status"] == "dispatched" for result in results) == 1
+    counts = s.harness.composition._core.store.counts()
+    assert counts["tasks"] == counts["attempts"] == counts["outbox"] == 1
+    assert not s.harness.executor.dispatches
+    assert not s.manager.agent.executions
+    assert s.registry._pending_production_task_intents == {}
+    for index, result in enumerate(results):
+        replay = await s.registry.handle_p3_intent(
+            params=params, request_id=f"same-confirmation-{index}", session_id="session-1")
+        assert replay.payload == result.payload
+        assert s.harness.composition._core.store.counts() == counts
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "create_source,confirm_source",
     [

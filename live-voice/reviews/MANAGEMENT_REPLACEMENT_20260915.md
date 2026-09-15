@@ -1345,3 +1345,68 @@ completed-adjust receipt/notification test on the final source. These tests over
 the 166-test group and are not added to it as unique coverage. Scoped diff and
 production evidence hashes verified; no deployment, service restart, private
 configuration, user-project write, SDK change or remote update is included.
+
+### Retire replaced primitive non-retry admission
+
+Tier 2, Registry product confirmation/mutation adapters and their retained Voice
+origin state. Current FormalP3TaskExperienceOwner uses production intent for every
+mutation except retry; Native also uses production intent. Two-repository source
+search found no remaining producer of primitive create/adjust/cancel product RPCs.
+Host's general Task API still has an AgentServer formal RPC consumer and remains.
+No retry intent schema/classifier or audio/Work policy is introduced.
+
+Implemented: primitive product validation accepts retry only; non-retry field
+branches, Voice-origin reservation/consumption helpers, their three private maps
+and mutation-eviction cleanup are deleted. Current accepted/unknown Voice origins,
+production continuation ownership and retry confirmation/clean-worktree/Attempt,
+unknown-outcome replay, capacity and stop fences remain. Non-retry product calls
+reject before confirmation/request ledger allocation, authority preparation or
+Core execution; accepted production-intent mutations retain their existing path.
+
+Command/outbox diagnostics had remained attached only to the old primitive
+mutation path. Its accepted-receipt projection is now shared with the production
+confirmation path, after create-receipt validation. It reports canonical receipt
+identities and delegates to the existing exception-contained exporter; it neither
+claims execution nor controls business state. This is counted as necessary retained
+adapter work, not an additional management-owner replacement.
+
+Independent complete-diff review found no production blocker. It found one new
+test using an incorrect issue-ledger attribute; this was fixed before final checks.
+Independent oracle review prevented inappropriate deletion of two unique trace
+checks. Five old test functions and their unused Store-only create fixture retire:
+
+| Old test oracle | Current disposition/evidence |
+|---|---|
+| Initial real command/outbox four-identity export and sensitive values withheld | Merged into `test_current_task_failure_trace_links_saved_command_through_ack` on the current production-intent creation path |
+| Real SQLite/Executor failed Task through event/generation/ACK trace correlation and redaction | Same new journey uses actual Host/Core/SQLite, controlled Executor observations, actual progress subscription/ACK and real observability runtime; retains queue/command/outbox/executor/event/generation/ACK and private failure/command/path checks |
+| Concurrent primitive creates claiming one Voice origin | `test_concurrent_confirmation_of_one_continuation_creates_one_task` concurrently confirms one live continuation, proves one Task/Attempt/initial outbox and exact per-request replay |
+| Closed public P2 origin later accepted by primitive create | Retired entry contract, not preserved as current behavior; current Native close/scope and semantic unknown-result nonreplay protections remain separately verified |
+| Failed primitive mutation reservation-map eviction | Retired with the private reservation owner; current accepted/unknown Voice origin and intent cleanup code remain, not claimed equivalent to the deleted map lifecycle |
+
+Generic product confirmation, permission, replay, capacity and stop tests now use
+the real remaining primitive retry purpose instead of cancel. Six explicit retired
+operation issue/mutate cases assert zero admission/confirmation/Core effects.
+An initial trace-test failure with missing executor/event observations proved the
+end-to-end assertions are active; the final test performs the real status/events
+queries that disclose those facts and validates failed-result unavailability.
+Independent follow-up review confirmed trace/redaction and concurrency oracle
+coverage and the receipt projection; the reviewer did not run Main's tests.
+
+Final backend group: **162 passed, 202 deselected**. Command selects the complete
+semantic Registry, Native Registry and Native authority files, plus product retry,
+confirmation, replay, capacity, stop, structural/authentication and retired-operation
+checks. The 202 unrelated legacy Registry tests are not claimed passing. Earlier
+20 product checks and 140 semantic/Native checks are superseded by this group;
+the two added trace/concurrency checks are included. Frontend common Task owner
+**67 passed** on unchanged frontend source. Scoped diff, local documentation
+links and current production evidence hashes verified. No physical Provider,
+browser audio or deployed-service acceptance is claimed.
+
+[Physical production accounting](../evidence/MANAGEMENT_TASK_ADMISSION_RETIREMENT_20260915.json):
+Voice **+56/-213 = -157** against `0301a736`; Host and SDK unchanged. All diagnostic
+projection additions are counted; test/fixture deletions are excluded. Cumulative
+Goal **+1133/-3592 = -2459**; official-baseline additions: Voice **109518**, Host
+**48341**, SDK **34212**, total **192071**. Exact per-file hashes and merged module
+totals are in the evidence. This retires a replaced product admission branch;
+full Host admission/application receipt ownership remains open. No remote update,
+deployment/restart, private configuration or user-project write is included.
