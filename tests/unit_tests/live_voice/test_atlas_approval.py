@@ -115,7 +115,7 @@ async def test_final_result_separates_consumed_purchase_approval_from_memory_rev
 
 
 @pytest.mark.asyncio
-async def test_expense_context_and_notification_keep_decisions_in_ui(tmp_path):
+async def test_legacy_expense_adapter_without_form_state_keeps_decisions_in_ui(tmp_path):
     host, call, calls = fixture(tmp_path)
     original = host._call
     async def expense(binding, method, params):
@@ -131,7 +131,7 @@ async def test_expense_context_and_notification_keep_decisions_in_ui(tmp_path):
     assert snapshot["capabilities"] == ["expense"]
     assert snapshot["tasks"][0]["approval_channel"] == "atlas_ui"
     assert "task.approve" not in snapshot["tasks"][0]["supported_operations"]
-    assert snapshot["events"][0]["reason"] == "ATLAS_EXPENSE_UI_APPROVAL_REQUIRED"
+    assert snapshot["events"][0]["reason"] == "ATLAS_EXPENSE_APPROVAL_REQUIRED"
     call["revision"] += 1
     assert (await host.context(binding))["events"] == snapshot["events"]
     for operation in ["task.approve", "task.reject"]:
@@ -140,8 +140,9 @@ async def test_expense_context_and_notification_keep_decisions_in_ui(tmp_path):
     assert not any(method == "decide" for method, _ in calls)
     call.update(status="completed", pending=None, answer="Expense materials generated; meal cap exceeded")
     result = await host.context(binding)
-    assert result["events"][0]["result_text"] == call["answer"]
-    assert result["tasks"][0]["result_text"] == call["answer"]
+    import json
+    assert json.loads(result["events"][0]["result_text"])["executor_result"] == call["answer"]
+    assert result["tasks"][0]["result_text"] == result["events"][0]["result_text"]
 
 
 @pytest.mark.asyncio
@@ -163,3 +164,39 @@ async def test_combined_capabilities_apply_decision_policy_per_task(tmp_path, ki
     delegate = SimpleNamespace(business=SimpleNamespace(operation="task.approve", target_id="atlas:task:c", expected_revision=5), request_text="yes")
     await host.execute(binding, delegate, snapshot=snapshot)
     assert any(method == "decide" for method, _ in effects) == (kind == "repurchase")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("form_submit", [False, True])
+@pytest.mark.parametrize("operation", ["task.approve", "task.reject"])
+async def test_expense_directory_and_form_have_separate_spoken_decisions(tmp_path, form_submit, operation):
+    host, call, effects = fixture(tmp_path)
+    call["demoKind"] = "expense"
+    digest = "a" * 64
+    call["expense"] = {"snapshot_hash": digest, "demo_only": True, "state": {
+        "status": "draft", "totals": {"EUR": 1382.9}, "findings": ["Dinner exceeds cap"],
+        "lines": [{"label": "Dinner", "amount": 86.5}]}}
+    if form_submit:
+        call["pending"] = {"interactionId": "expense-submit:" + digest, "kind": "confirm",
+            "message": "Submit this mock expense claim?", "preparedActionHash": digest}
+    binding = SimpleNamespace(session_id="s")
+    snapshot = await host.context(binding)
+    assert snapshot["events"][0]["reason"] == "ATLAS_EXPENSE_APPROVAL_REQUIRED"
+    assert operation in snapshot["tasks"][0]["supported_operations"]
+    details = await host.execute(binding, SimpleNamespace(business=SimpleNamespace(operation="task.details", target_id="atlas:task:c")))
+    assert details["expense"]["state"]["lines"][0]["amount"] == 86.5
+    delegate = SimpleNamespace(business=SimpleNamespace(operation=operation, target_id="atlas:task:c", expected_revision=5))
+    await host.execute(binding, delegate, snapshot=snapshot)
+    decisions = [params for method, params in effects if method == "decide"]
+    assert len(decisions) == 1
+    assert decisions[0]["approved"] == (operation == "task.approve")
+    assert decisions[0]["interactionId"] == ("expense-submit:" + digest if form_submit else "i")
+
+
+def test_form_confirmation_requires_matching_expense_snapshot():
+    digest = "a" * 64
+    call = {"demoKind": "expense", "expense": {"snapshot_hash": digest},
+        "pending": {"interactionId": "expense-submit:" + digest, "kind": "confirm", "message": "Submit?", "preparedActionHash": digest}}
+    assert AtlasLocalHost._pending(call) is not None
+    call["expense"]["snapshot_hash"] = "b" * 64
+    assert AtlasLocalHost._pending(call) is None

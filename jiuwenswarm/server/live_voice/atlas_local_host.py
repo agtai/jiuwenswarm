@@ -30,9 +30,16 @@ class AtlasLocalHost:
         pending = call.get("pending")
         if pending is None:
             return None
+        expense = call.get("expense")
+        digest = expense.get("snapshot_hash") if isinstance(expense, dict) else None
+        form_confirmation = (call.get("demoKind") == "expense" and isinstance(pending, dict)
+            and isinstance(digest, str) and len(digest) == 64 and all(c in "0123456789abcdef" for c in digest)
+            and pending.get("interactionId") == "expense-submit:" + digest
+            and pending.get("preparedActionHash") == digest)
+        required = ("interactionId", "message", "preparedActionHash") if form_confirmation else ("interactionId", "message", "receiptId", "preparedActionHash")
         if (type(pending) is not dict or pending.get("kind") != "confirm"
                 or any(type(pending.get(key)) is not str or not pending[key]
-                       for key in ("interactionId", "message", "receiptId", "preparedActionHash"))):
+                       for key in required)):
             return None  # Older/non-purchase questions remain in the Atlas UI.
         return json.loads(json.dumps(pending))
 
@@ -116,10 +123,17 @@ class AtlasLocalHost:
                 final = json.dumps({"executor_result": final,
                     "purchase_decision": call["decision"], "pending_purchase_approval": pending,
                     "memory_review_is_separate_from_purchase": True}, ensure_ascii=False)
+            expense_snapshot = call.get("expense") if expense else None
+            expense_summary = ({key: expense_snapshot.get("state", {}).get(key)
+                for key in ("status", "claim_id", "totals", "findings")} if isinstance(expense_snapshot, dict) else None)
+            if expense:
+                final = json.dumps({"executor_result": final, "expense_form": expense_summary,
+                    "form_state_unavailable": bool(call.get("expenseStateUnavailable")),
+                    "demo_only": True, "real_reimbursement_submitted": False}, ensure_ascii=False)
             common = {"execution_owner": "atlas", "atlas_turn_id": call["turnId"], "atlas_mandate_id": call["mandateId"],
                       "request_text": call["requestText"],
                       **({"demo_kind": kind} if kind else {}),
-                      **({"approval_channel": "atlas_ui"} if expense else {}),
+                      **({"approval_channel": "voice_and_ui" if expense_snapshot is not None else "atlas_ui", "expense_form": expense_summary} if expense else {}),
                       "phase": phase, "result_text": final if terminal else None, "files": call["files"],
                       **({"pending": pending} if pending else {}),
                       "result_truncated": call["textTruncated"]}
@@ -127,7 +141,7 @@ class AtlasLocalHost:
                 tasks.append({**common, "task_id": target, "name": call["requestText"][:80], "revision_number": revision,
                               "state": "terminal" if terminal else "running", "outcome": outcome if terminal else None,
                               "supported_operations": ["task.status", "task.result", "task.details"]
-                              + (["task.approve", "task.reject"] if pending and kind == "repurchase" else [])})
+                              + (["task.approve", "task.reject"] if pending and (kind == "repurchase" or expense_snapshot is not None) else [])})
                 # This identifies the Atlas execution for Native delivery. It is
                 # not a Swarm Task adjustment and must not claim applied/rejected.
                 identity = {"work_id": target}
@@ -137,7 +151,7 @@ class AtlasLocalHost:
                               "execution_settled": terminal, "reason": "awaiting_atlas_user" if phase == "waiting_for_user" else None})
                 identity = {"work_id": target}
             if pending:
-                key = (binding.session_id, target, pending["interactionId"], pending["preparedActionHash"])
+                key = (binding.session_id, target, pending["interactionId"], pending["preparedActionHash"], expense_snapshot.get("snapshot_hash") if isinstance(expense_snapshot, dict) else None)
                 if key not in self._approval_events:
                     if len(self._approval_events) >= 128:
                         raise NativeBusinessViolation("ATLAS_APPROVAL_CAPACITY")
@@ -145,8 +159,9 @@ class AtlasLocalHost:
                         "event_id": "atlas-approval-" + hashlib.sha256(json.dumps(key).encode()).hexdigest(),
                         "revision": revision, "state": "awaiting_approval",
                         "result_text": json.dumps({"request": call["requestText"],
+                            "expense_form": expense_summary,
                             "approval": {key: pending[key] for key in ("message", "money", "merchant") if key in pending}}, ensure_ascii=False),
-                        "reason": "ATLAS_EXPENSE_UI_APPROVAL_REQUIRED" if expense else "ATLAS_APPROVAL_REQUIRED"}
+                        "reason": "ATLAS_EXPENSE_APPROVAL_REQUIRED" if expense else "ATLAS_APPROVAL_REQUIRED"}
                 events.append(self._approval_events[key])
             if terminal:
                 text = final
@@ -173,11 +188,12 @@ class AtlasLocalHost:
                         "pending": self._pending(current), "decision": current.get("decision"),
                         "operations": current.get("operations", []),
                         "operations_truncated": current.get("operationsTruncated", False),
-                        "answer": current.get("answer"), "files": current["files"]}
-            # Re-read the bound host: a model must not bypass UI-only expense decisions.
+                        "answer": current.get("answer"), "files": current["files"],
+                        "expense": current.get("expense"), "expense_state_unavailable": current.get("expenseStateUnavailable", False)}
+            # Re-read authority; expense voice decisions require a current form-aware adapter.
             authority = await self._call(binding, "context", {})
             kind = current.get("demoKind") or (authority.get("capabilities", [None])[0] if len(authority.get("capabilities", [])) == 1 else None)
-            if kind != "repurchase":
+            if kind != "repurchase" and not (kind == "expense" and isinstance(current.get("expense"), dict)):
                 return {"status": "rejected", "reason": "ATLAS_EXPENSE_APPROVAL_REQUIRES_UI"}
             observed = next((task for task in (snapshot or {}).get("tasks", [])
                              if task.get("task_id") == action.target_id), {})
@@ -196,7 +212,10 @@ class AtlasLocalHost:
             if result.get("decision") != {"interactionId": pending["interactionId"], "approved": action.operation == "task.approve"}:
                 return {"status": "unknown", "reason": "ATLAS_DECISION_RECEIPT_MISMATCH"}
             return {"status": "approved" if action.operation == "task.approve" else "rejected_by_user",
-                    "task_id": action.target_id, "phase": result["status"], "purchase_completed": False}
+                    "task_id": action.target_id, "phase": result["status"], "purchase_completed": False,
+                    "demo_kind": kind,
+                    **({"decision_scope": "expense_form_submission" if pending["interactionId"].startswith("expense-submit:") else "directory_listing",
+                        "expense_form": result.get("expense", {}).get("state")} if kind == "expense" else {})}
         if action.operation in {"task.create", "work.start"}:
             call_id = action.operation.split(".")[0] + ":" + delegate.source_identity
             text = delegate.request_text

@@ -1922,7 +1922,7 @@ class OpenAIRealtimeNativeInteractionEngine:
                             "input": self._work_response_input(work),
                             "max_output_tokens": self._max_output_tokens,
                             "instructions": (_TASK_NOTIFICATION_INSTRUCTIONS if "task_id" in work
-                                             else _ATLAS_EXPENSE_APPROVAL_INSTRUCTIONS if work.get("reason") == "ATLAS_EXPENSE_UI_APPROVAL_REQUIRED"
+                                             else _ATLAS_EXPENSE_APPROVAL_INSTRUCTIONS if work.get("reason") == "ATLAS_EXPENSE_APPROVAL_REQUIRED"
                                              else _ATLAS_APPROVAL_INSTRUCTIONS if work["state"] == "awaiting_approval"
                                              else _WORK_NOTIFICATION_INSTRUCTIONS),
                         }})
