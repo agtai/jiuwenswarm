@@ -97,8 +97,9 @@ class AtlasLocalHost:
                 or type(result["history"]) is not list or type(result["calls"]) is not list
                 or len(result["calls"]) > 128):
             raise NativeBusinessViolation("ATLAS_HOST_CONTEXT_INVALID")
-        if "capabilities" in result and result["capabilities"] not in ([], ["repurchase"]):
+        if "capabilities" in result and result["capabilities"] not in ([], ["repurchase"], ["expense"]):
             raise NativeBusinessViolation("ATLAS_HOST_CONTEXT_INVALID")
+        expense = result.get("capabilities") == ["expense"]
         tasks, works, events = [], [], []
         for call in result["calls"]:
             call_id, revision, phase = call["callId"], call["revision"], call["status"]
@@ -110,12 +111,13 @@ class AtlasLocalHost:
             target = "atlas:" + call_id
             final = call.get("answer") or call["text"]
             pending = self._pending(call) if phase == "waiting_for_user" else None
-            if terminal and call.get("decision") is not None:
+            if terminal and not expense and call.get("decision") is not None:
                 final = json.dumps({"executor_result": final,
                     "purchase_decision": call["decision"], "pending_purchase_approval": pending,
                     "memory_review_is_separate_from_purchase": True}, ensure_ascii=False)
             common = {"execution_owner": "atlas", "atlas_turn_id": call["turnId"], "atlas_mandate_id": call["mandateId"],
                       "request_text": call["requestText"],
+                      **({"approval_channel": "atlas_ui", "demo_kind": "expense"} if expense else {}),
                       "phase": phase, "result_text": final if terminal else None, "files": call["files"],
                       **({"pending": pending} if pending else {}),
                       "result_truncated": call["textTruncated"]}
@@ -123,7 +125,7 @@ class AtlasLocalHost:
                 tasks.append({**common, "task_id": target, "name": call["requestText"][:80], "revision_number": revision,
                               "state": "terminal" if terminal else "running", "outcome": outcome if terminal else None,
                               "supported_operations": ["task.status", "task.result", "task.details"]
-                              + (["task.approve", "task.reject"] if pending else [])})
+                              + (["task.approve", "task.reject"] if pending and not expense else [])})
                 # This identifies the Atlas execution for Native delivery. It is
                 # not a Swarm Task adjustment and must not claim applied/rejected.
                 identity = {"work_id": target}
@@ -142,7 +144,7 @@ class AtlasLocalHost:
                         "revision": revision, "state": "awaiting_approval",
                         "result_text": json.dumps({"request": call["requestText"],
                             "approval": {key: pending[key] for key in ("message", "money", "merchant") if key in pending}}, ensure_ascii=False),
-                        "reason": "ATLAS_APPROVAL_REQUIRED"}
+                        "reason": "ATLAS_EXPENSE_UI_APPROVAL_REQUIRED" if expense else "ATLAS_APPROVAL_REQUIRED"}
                 events.append(self._approval_events[key])
             if terminal:
                 text = final
@@ -170,6 +172,10 @@ class AtlasLocalHost:
                         "operations": current.get("operations", []),
                         "operations_truncated": current.get("operationsTruncated", False),
                         "answer": current.get("answer"), "files": current["files"]}
+            # Re-read the bound host: a model must not bypass UI-only expense decisions.
+            authority = await self._call(binding, "context", {})
+            if authority.get("capabilities") == ["expense"]:
+                return {"status": "rejected", "reason": "ATLAS_EXPENSE_APPROVAL_REQUIRES_UI"}
             observed = next((task for task in (snapshot or {}).get("tasks", [])
                              if task.get("task_id") == action.target_id), {})
             pending = self._pending(current)

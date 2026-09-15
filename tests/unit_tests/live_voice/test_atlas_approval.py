@@ -112,3 +112,33 @@ async def test_final_result_separates_consumed_purchase_approval_from_memory_rev
     assert result["purchase_decision"]["approved"] is True
     assert result["pending_purchase_approval"] is None
     assert result["memory_review_is_separate_from_purchase"] is True
+
+
+@pytest.mark.asyncio
+async def test_expense_context_and_notification_keep_decisions_in_ui(tmp_path):
+    host, call, calls = fixture(tmp_path)
+    original = host._call
+    async def expense(binding, method, params):
+        result = await original(binding, method, params)
+        if method == "context":
+            result["capabilities"] = ["expense"]
+        return result
+    host._call = expense
+    call["requestText"] = "报销巴黎出差费用"
+    call["pending"]["message"] = "List the working area before publishing the claim."
+    binding = SimpleNamespace(session_id="s")
+    snapshot = await host.context(binding)
+    assert snapshot["capabilities"] == ["expense"]
+    assert snapshot["tasks"][0]["approval_channel"] == "atlas_ui"
+    assert "task.approve" not in snapshot["tasks"][0]["supported_operations"]
+    assert snapshot["events"][0]["reason"] == "ATLAS_EXPENSE_UI_APPROVAL_REQUIRED"
+    call["revision"] += 1
+    assert (await host.context(binding))["events"] == snapshot["events"]
+    for operation in ["task.approve", "task.reject"]:
+        delegate = SimpleNamespace(business=SimpleNamespace(operation=operation, target_id="atlas:task:c"))
+        assert (await host.execute(binding, delegate, snapshot=snapshot))["reason"] == "ATLAS_EXPENSE_APPROVAL_REQUIRES_UI"
+    assert not any(method == "decide" for method, _ in calls)
+    call.update(status="completed", pending=None, answer="Expense materials generated; meal cap exceeded")
+    result = await host.context(binding)
+    assert result["events"][0]["result_text"] == call["answer"]
+    assert result["tasks"][0]["result_text"] == call["answer"]

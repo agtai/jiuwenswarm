@@ -60,6 +60,7 @@ from jiuwenswarm.server.live_voice.native_business_instructions import (
     TASK_OBSERVATION_INSTRUCTIONS as _TASK_OBSERVATION_INSTRUCTIONS,
     WORK_RESULT_INSTRUCTIONS as _WORK_NOTIFICATION_INSTRUCTIONS,
     ATLAS_APPROVAL_INSTRUCTIONS as _ATLAS_APPROVAL_INSTRUCTIONS,
+    ATLAS_EXPENSE_APPROVAL_INSTRUCTIONS as _ATLAS_EXPENSE_APPROVAL_INSTRUCTIONS,
     TASK_ADJUSTMENT_RESULT_INSTRUCTIONS as _TASK_NOTIFICATION_INSTRUCTIONS,
     ARGUMENT_CORRECTION_SUFFIX as _BUSINESS_ARGUMENT_CORRECTION_INSTRUCTIONS,
     CORRECTION_EXHAUSTED_SUFFIX as _BUSINESS_ARGUMENT_CORRECTION_EXHAUSTED,
@@ -964,7 +965,7 @@ class OpenAIRealtimeNativeInteractionEngine:
     def _business_context_copy(context: Mapping[str, object]) -> dict[str, object]:
         try:
             if (not isinstance(context, Mapping) or set(context) - {"capabilities"} != {"context_id", "history", "tasks", "works", "model"}
-                    or context.get("capabilities", []) not in ([], ["repurchase"])):
+                    or context.get("capabilities", []) not in ([], ["repurchase"], ["expense"])):
                 raise ValueError()
             context_id = context["context_id"]
             if type(context_id) is not str or len(context_id) != 64 or any(c not in "0123456789abcdef" for c in context_id):
@@ -1921,6 +1922,7 @@ class OpenAIRealtimeNativeInteractionEngine:
                             "input": self._work_response_input(work),
                             "max_output_tokens": self._max_output_tokens,
                             "instructions": (_TASK_NOTIFICATION_INSTRUCTIONS if "task_id" in work
+                                             else _ATLAS_EXPENSE_APPROVAL_INSTRUCTIONS if work.get("reason") == "ATLAS_EXPENSE_UI_APPROVAL_REQUIRED"
                                              else _ATLAS_APPROVAL_INSTRUCTIONS if work["state"] == "awaiting_approval"
                                              else _WORK_NOTIFICATION_INSTRUCTIONS),
                         }})
@@ -2219,7 +2221,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             if (type(context_id) is str and len(context_id) == 64
                     and all(character in "0123456789abcdef" for character in context_id)
                     and set(published_context) - {"capabilities"} == {"context_id", "history", "tasks", "works", "model"}
-                    and published_context.get("capabilities", []) in ([], ["repurchase"])):
+                    and published_context.get("capabilities", []) in ([], ["repurchase"], ["expense"])):
                 self._sent_business_context_id = context_id
                 # Adopt the complete receipt only if no newer observation has
                 # replaced the source response's facts. A delayed receipt must

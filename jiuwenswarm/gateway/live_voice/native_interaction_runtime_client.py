@@ -385,7 +385,7 @@ def _validate_business_context_result(result: dict[str, object]) -> dict[str, ob
             raise ValueError("unsupported context version")
         context = result["context"]
         if (type(context) is not dict or set(context) - {"capabilities"} != {"context_id", "history", "tasks", "works", "model"}
-                or context.get("capabilities", []) not in ([], ["repurchase"])):
+                or context.get("capabilities", []) not in ([], ["repurchase"], ["expense"])):
             raise ValueError("context fields are not closed")
         identity = context["context_id"]
         if type(identity) is not str or len(identity) != 64 or any(char not in "0123456789abcdef" for char in identity):
