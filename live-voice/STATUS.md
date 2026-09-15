@@ -108,24 +108,41 @@ support has been discussed, not implemented.
 
 ## Current execution packet
 
-### Active management replacement (2026-09-15)
+### Active management replacement (2026-09-15, user-adjusted objective)
 
-Continue [Task → Work → Host/Voice replacement](reviews/MANAGEMENT_REPLACEMENT_20260915.md),
-with audit, refactoring, affected tests, documentation and local commits authorized.
-The first bounded changes reuse the existing Task artifact reader, native Work
-finalizer and Host Task presentation functions. The next batch removes Host
-creation-spec construction and duplicate source helpers, reusing Core creation
-preparation for Host selection and Core create/successor; this does not close the retained
-management implementations. No pushes, history rewriting, service restart or
-deployment; no private configuration or user-project edits. Preserve the
-15-second prepared-response timeout and all existing voice/authorization policy.
-New product semantics, security/authority changes and irreversible migrations
-still require a concrete user decision. Broader management replacement remains
-active. The status-query batch now shares the existing Store authority snapshot
-between Core status and Host product facts, deleting Registry reread orchestration.
-HostWorkService now owns Work submission and the retained execution closure;
-Voice objects can be released while accepted Work continues. WorkStore management,
-Voice context/presentation and wider business convergence remain unfinished.
+The user retained all five required outcomes and their order: (1) accurate
+completion/gap accounting; (2) Task主体 comparison and actual replacement;
+(3) Work convergence; (4) Host/Voice convergence; (5) module verification and
+local delivery. Do not replace that scope with entrypoint unification alone.
+
+The next implementation must follow a concrete Task management comparison and
+replace one complete responsibility, including real consumers, state ownership,
+and obsolete production branches. Choose existing capability reuse, bounded
+native enhancement, or justified retention per responsibility. A shared facade,
+file move, dead-code cleanup or small deletion does not by itself close a
+management boundary. Integrate the implicated Host/Voice call chain in the same
+boundary; then continue Work and remaining Host/Voice responsibilities. Group
+verification/review/commits at that complete boundary instead of repeating full
+closure for incidental cleanups. Production line counts remain cost accounting,
+not the acceptance criterion. Prior partial results stay valid but do not close
+the objective; see the [replacement audit](reviews/MANAGEMENT_REPLACEMENT_20260915.md).
+
+The resumed independent comparison rejects wholesale Controller/Team replacement
+of Formal Task cancellation/recovery and rejects treating Host/Voice as additional
+Work state owners. Team already has transactions and CAS; its missing contract is
+the specific command/attempt/outbox/effect and physical-settlement combination.
+The first new complete implementable replacement remains unproven. Host/Voice
+business convergence is still open; no new production deletion is credited to
+this comparison. The audit records exact consumers, enhancement costs and
+counterexamples instead of assuming a whole owner must be removable.
+
+Audit, reasonable refactoring, necessary tests, docs and local commits remain
+authorized. Compatibility is limited to these two repositories. Preserve accepted
+behavior, exact scope/authorization, durable truth and background Work lifetime.
+No push, history rewrite, service restart/deployment, private config or user-project
+writes. Keep the 15-second prepared timeout and current voice policy. New product
+semantics, authorization/security changes and irreversible migrations require a
+concrete user decision; they do not block unrelated authorized progress.
 
 ### Previous session repair evidence (2026-09-14)
 

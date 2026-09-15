@@ -17,6 +17,10 @@ coordination. Existing acceptance is evidence for the deployed pair only.
 
 ## Initial decisions from inspected production calls
 
+This is the initial audit snapshot. Later implementation sections supersede its
+candidate/deletion status. The resumed independent comparison below corrects
+the retention rationale; in particular, Team already has transactions and CAS.
+
 | Responsibility / current implementation and consumers | Existing capability / real entry | Overlap and decision | Deletion / sole authority / acceptance |
 |---|---|---|---|
 | Task admission, cancellation, retry, reconciliation: Host P3 composition → PersistentTaskCore → SqliteTaskStore | Controller TaskManager.add_task/update_task_status/get_state; TaskScheduler.execute_ability; Team TaskDao SQL transition helpers | Partial. Controller owns mutable session indexes; Team owns dynamic session tables, dependency release and member assignment. Retain command/attempt/outbox transaction pending finer replacement; no additional Controller/Team task row | No bulk deletion claimed. TaskStore remains authoritative. Verify real SQLite replay, stale scope, ordered adjustments, cancellation and restart |
@@ -796,3 +800,65 @@ service restart, private configuration, schema migration or user project changes
 These installed executions overlap source tests; they are not additive coverage.
 
 SDK local commit: `3300504a7e88b4f5436040c1deace4be322c4623` — `refactor(tasks): retire legacy non-atomic event subscription`. The paired Host commit contains the two constructor updates and this evidence.
+
+
+## User-adjusted objective: complete management responsibilities
+
+The user confirmed that the original five workstreams remain mandatory and
+ordered. Change the execution unit, not the total scope: compare Task主体 first,
+select a complete replaceable responsibility, integrate its real consumers,
+remove the old owner/branches and verify the boundary together. Continue Work
+and remaining Host/Voice afterward. Task entrypoint unification is a candidate,
+not a predetermined route or a replacement for the Task comparison.
+
+Baseline for resumed work: Host 7c4802ca6aae91cdc3f056fc6572406e02dbc50c;
+SDK 3300504a7e88b4f5436040c1deace4be322c4623; both clean; Host ahead 58/behind 0;
+SDK has no upstream. Keep the original frozen cumulative accounting baseline.
+The previous net -1299 includes -1003 dormant frontend lines and does not prove
+large management replacement. Avoid repeating broad audit prose or installed
+checks for incidental cleanup. Prior compatibility decisions and exclusions hold.
+
+The app goal record retains its original matching umbrella objective and an old
+blocked status. Available goal tools cannot edit/resume an unfinished goal; do
+not falsely complete it to replace that record. The accepted objective and active
+execution are recorded here and in STATUS; the old compatibility block is resolved.
+
+### Resumed independent comparison: replacement feasibility
+
+Main and the user-authorized read-only reviewer inspected the current paired
+source. No production changes or test executions are credited to this comparison.
+It does not establish that every retained implementation is minimal. It rejects
+the following proposed wholesale substitutions on concrete consumer contracts.
+
+| Current responsibility and consumers | Existing native entry and actual overlap | Missing interface/lifecycle and consumer impact of enhancement | Decision, sole authority and deletion status |
+|---|---|---|---|
+| Formal Task cancellation, adjustment, retry and recovery: authenticated P3 composition calls PersistentTaskCore, which commits through SqliteTaskStore | Controller TaskScheduler.cancel_task and TeamTaskManager.cancel both expose cancellation. Team TaskDao.start_task/claim_task use SQL CAS; cancel_task/complete_task transact state and dependency release | Controller marks CANCELED before awaiting execution termination; timeout becomes FAILED. Team commits CANCELLED and releases dependencies before execution notification. Reuse requires command identity and durable receipts, attempt/effect leases, an outbox in the same transaction, and cancellation request versus physical settlement as separate facts. Existing Controller session restoration and Team dependency release would need explicit adapters or would change behavior | Retain the Formal Task management chain. Core is orchestration and Store is atomic truth, not two competing Task managers. No full owner deletion is justified by matching method names |
+| Project attempt execution and physical settlement: Core outbox → project executor → Host Agent/Harness | Native root TaskManager and Runner already own coroutine execution; Harness owns Agent execution | Native cancellation does not prove a worker thread stopped, Git apply settled, protected bytes survived, or a persisted artifact hash matches disk. An enhancement needs executor cleanup acknowledgment, durable effect identity and recovery against the actual project journal; a native Task status alias cannot supply these | Retain project attempt/effect journal as physical authority. Previous artifact-reader and native-root reuse remain bounded completed replacements; this audit adds no new deletion |
+| Work admission/revision/cancellation/recovery: HostWorkService.submit → WorkRuntime → SqliteWorkStore | Native scheduling/finalizer already reused. Router.works returns the very same service.work_runtime object | Mapping to Task would require preserving Work revision supersession, foreground reservation, read-only execution, original input/context/model binding and UNKNOWN without replay; it must not invent a visible Task card. No existing alternate Work state owner was found in the Host/Voice chain | WorkRuntime remains the single Work state owner, WorkStore its checkpoint authority. Host producer pool owns session generation and Agent pins; Voice does not maintain another Work state machine |
+| Native original call receipt versus current Work state: Router.handle uses the existing unified journal; WorkRuntime deduplicates admission | Journal.admit/complete/wait_for_completion already own the immutable call receipt | A repeated work.start must replay its original accepted receipt even after Work completes. WorkRuntime.query returns current state, and its request map does not retain rejected calls or original get/list/cancel responses and context. Replacing receipts with current snapshots changes recovery and repeat-call behavior | Retain both distinct facts. Do not call the receipt journal a duplicate Work store or delete it to reduce line count |
+| Host producer cleanup versus Work cleanup: HostWorkService.close | Existing Harness.close, WorkRuntime.close and AgentManager.unpin_agent | Work cancellation begins before producer close; physical settlement is checked again afterward. WorkRuntime cannot release Host Agent pins or session-generation producers. Closing only the producer loses durable Work outcome ownership | Keep the ordered cleanup chain. It is one lifecycle across owners with different resources, not duplicate shutdown orchestration |
+| Formal Task intent/confirmation: active frontend formalP3TaskExperience, natural committed input, NativeBusinessRouter._task | Existing Host intent resolver, authenticated composition, durable confirmation owner and call-local forwarding permit | Structured frontend still calls p3.intent; retry still calls confirmation.issue/mutate. Pending clarification/confirmation carries current origin and continuation ownership; durable confirmation proves a consumed exact grant; forwarding permit proves the current caller. Neither current Host component alone replaces all three. Native _task also calls Registry issue/confirm, so merely routing it through a new facade leaves the same management chain | Host/Voice convergence remains open. Do not retire active intent RPCs, merge different confirmation authorities, or count moving Registry methods as replacement |
+
+Source anchors checked at the resumed paired baseline:
+
+- SDK `openjiuwen/agent_teams/tools/database/task_dao.py`: start_task 584,
+  claim_task 634, cancel_task 1238, complete_task 1316; Team manager cancel 1271.
+- SDK `openjiuwen/core/controller/modules/task_scheduler.py`: timeout wrapper
+  338 and cancellation 716; Controller base session restore/save 222/250.
+- SDK `openjiuwen/core/application/tasks/work_runtime.py`: admission 515,
+  update 707, cancel 750. Host `server/runtime/work/service.py`: submit 148,
+  producer allocation 183, close 300.
+- Host `channels/live_voice/native_business_router.py`: borrowed Work owner 65,
+  Work calls 287, Task calls 314, immutable call receipts 413.
+- Host `channels/live_voice/product_composition_registry.py`: confirmation issue
+  11967, confirmation consumption 12094, production intent orchestration 12217.
+
+These are code-review anchors, not executable evidence or permanent line numbers.
+The reviewer made no edits, Git mutations, test runs or deployment changes.
+
+The first new implementable complete replacement is still **not established**.
+The adjusted goal cannot honestly promise a whole-owner deletion before finding
+equivalent capabilities or specifying a bounded native enhancement. No reduction
+in correctness, recovery, authorization or existing consumer behavior is implied
+by the user's request to adjust the goal. Further tiny cleanups would not resolve
+this feasibility gap and must not be presented as the requested delivery.
