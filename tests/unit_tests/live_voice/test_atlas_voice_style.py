@@ -23,8 +23,9 @@ def test_language_comes_from_user_speech(texts, expected):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("direct", [False, True])
 @pytest.mark.parametrize("capabilities", [[], ["expense"], ["repurchase", "expense"]])
-async def test_isolated_english_result_keeps_chinese_and_does_not_mutate_request(capabilities):
+async def test_isolated_english_result_keeps_chinese_and_does_not_mutate_request(capabilities, direct):
     sent = []
     async def send(event, payload):
         sent.append((event, payload))
@@ -39,11 +40,16 @@ async def test_isolated_english_result_keeps_chinese_and_does_not_mutate_request
     engine._session = SimpleNamespace(send_event=send)
     payload = {"response": {"instructions": "Summarize the result", "tool_choice": "none",
         "input": [{"text": "Expense the Paris trip. Mock claim submitted."}]}}
+    if direct:
+        payload = {}  # Real first-turn requests inherit the provider session defaults.
     before = json.dumps(payload)
     request = SimpleNamespace(turn_id="turn", payload=payload)
     await engine._send_response_request_locked(request)
-    actual = sent[0][1]["response"]
-    assert ("Speak entirely in Mandarin Chinese" in actual["instructions"]) == bool(capabilities)
-    assert actual["tool_choice"] == "none"
-    assert actual["input"] == payload["response"]["input"]
+    actual = sent[0][1].get("response", {})
+    assert ("Speak entirely in Mandarin Chinese" in actual.get("instructions", "")) == bool(capabilities)
+    if not direct:
+        assert actual["tool_choice"] == "none"
+        assert actual["input"] == payload["response"]["input"]
+    else:
+        assert "tools" not in actual and "input" not in actual
     assert json.dumps(payload) == before

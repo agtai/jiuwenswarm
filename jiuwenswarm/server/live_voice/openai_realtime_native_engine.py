@@ -1248,7 +1248,8 @@ class OpenAIRealtimeNativeInteractionEngine:
         if self._business_context is not None and self._business_context.get("capabilities"):
             language = language_instruction(item.transcript for item in self._input_transcripts_by_item.values())
             if language:
-                response = dict(payload["response"])
+                # Direct first-turn requests are {} and inherit session defaults.
+                response = dict(payload.get("response", {}))
                 response["instructions"] = response.get("instructions", _BUSINESS_INSTRUCTIONS) + language
                 payload = {**payload, "response": response}
         return await self._session.send_event("response.create", payload)
