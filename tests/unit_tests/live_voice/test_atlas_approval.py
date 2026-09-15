@@ -294,3 +294,41 @@ async def test_malformed_pending_is_not_reported_as_no_approval(tmp_path):
     result = await host.execute(SimpleNamespace(session_id="s"), delegate, snapshot={})
     assert result["status"] == "rejected" and result["reason"] == "ATLAS_APPROVAL_STALE"
     assert not any(method == "decide" for method, _ in effects)
+
+
+@pytest.mark.asyncio
+async def test_expense_adjustment_uses_exact_snapshot_and_keeps_task(tmp_path):
+    import json
+    host, call, effects = fixture(tmp_path)
+    digest = "a" * 64
+    call.update(demoKind="expense", expense={"snapshot_hash": digest, "state": {"status": "draft"}})
+    original = host._call
+    edits = []
+    async def callback(binding, method, params):
+        if method == "adjust":
+            edits.append(params)
+            call["expense"] = {"snapshot_hash": "b" * 64, "state": {"status": "draft", "totals": {"EUR": 1376.4},
+                "last_adjustment": {"status": "applied", "line_id": "email:mail-1002", "amount": 80}}}
+            return call
+        return await original(binding, method, params)
+    host._call = callback
+    binding = SimpleNamespace(session_id="s")
+    assert "task.adjust" in (await host.context(binding))["tasks"][0]["supported_operations"]
+    action = SimpleNamespace(operation="task.adjust", target_id="atlas:task:c", expected_revision=5,
+        adjustment=json.dumps({"line_id": "email:mail-1002", "amount": 80, "expected_hash": digest}))
+    result = await host.execute(binding, SimpleNamespace(business=action, turn_id="edit-turn"))
+    assert result["status"] == "applied" and result["submitted"] is False
+    assert result["task_id"] == "atlas:task:c"
+    assert edits == [{"callId": "task:c", "lineId": "email:mail-1002", "expectedHash": digest, "amount": 80}]
+    assert (await host.execute(binding, SimpleNamespace(business=action)))["status"] == "rejected"
+    assert len(edits) == 1
+    assert not any(method == "decide" for method, _ in effects)
+
+    call.update(status="waiting_for_user", pending={"interactionId": "expense-submit:" + "b" * 64,
+        "kind": "confirm", "message": "Submit?", "preparedActionHash": "b" * 64})
+    approval = SimpleNamespace(business=SimpleNamespace(operation="task.approve", target_id="atlas:task:c", expected_revision=5), turn_id="edit-turn")
+    snapshot = await host.context(binding)
+    assert (await host.execute(binding, approval, snapshot=snapshot))["reason"] == "ATLAS_APPROVAL_REQUIRES_NEW_USER_TURN"
+    assert not any(method == "decide" for method, _ in effects)
+    approval.turn_id = "new-explicit-answer"
+    assert (await host.execute(binding, approval, snapshot=snapshot))["status"] == "approved"

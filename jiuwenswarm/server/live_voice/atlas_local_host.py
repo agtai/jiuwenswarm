@@ -152,6 +152,7 @@ class AtlasLocalHost:
                 tasks.append({**common, "task_id": target, "name": call["requestText"][:80], "revision_number": revision,
                               "state": "terminal" if terminal else "running", "outcome": outcome if terminal else None,
                               "supported_operations": ["task.status", "task.result", "task.details"]
+                              + (["task.adjust"] if expense_snapshot and expense_snapshot.get("state", {}).get("status") == "draft" else [])
                               + (["task.approve", "task.reject"] if pending and (kind == "repurchase" or expense_snapshot is not None) else [])})
                 # This identifies the Atlas execution for Native delivery. It is
                 # not a Swarm Task adjustment and must not claim applied/rejected.
@@ -190,6 +191,46 @@ class AtlasLocalHost:
 
     async def execute(self, binding, delegate, *, snapshot=None):
         action = delegate.business
+        if action.operation == "task.adjust":
+            if not action.target_id.startswith("atlas:task:"):
+                return {"status": "rejected", "reason": "ATLAS_TARGET_NOT_FOUND"}
+            try:
+                edit = json.loads(action.adjustment)
+                if type(edit) is not dict or set(edit) != {"line_id", "amount", "expected_hash"}:
+                    raise ValueError()
+                if type(edit["line_id"]) is not str or not edit["line_id"] or type(edit["expected_hash"]) is not str:
+                    raise ValueError()
+                if type(edit["amount"]) not in (int, float):
+                    raise ValueError()
+            except (ValueError, TypeError):
+                return {"status": "rejected", "reason": "ATLAS_EXPENSE_ADJUSTMENT_INVALID",
+                        "hint": "adjustment must be JSON with the exact observed line_id, amount and expected_hash from task.details expense.snapshot_hash."}
+            current = await self._call(binding, "observe", {"callId": action.target_id[len("atlas:"):]})
+            expense = current.get("expense") or {}
+            if (current.get("demoKind") != "expense" or current["revision"] != action.expected_revision
+                    or expense.get("snapshot_hash") != edit["expected_hash"] or expense.get("state", {}).get("status") != "draft"):
+                return {"status": "rejected", "reason": "ATLAS_EXPENSE_ADJUSTMENT_STALE"}
+            turn_id = getattr(delegate, "turn_id", None)
+            if turn_id is not None:
+                turn_key = (binding.session_id, getattr(binding, "interaction_id", None), turn_id)
+                if turn_key not in self._decision_turns and len(self._decision_turns) >= 512:
+                    return {"status": "rejected", "reason": "ATLAS_APPROVAL_TURN_CAPACITY"}
+                # A correction cannot also approve its newly calculated amount.
+                # Keep the fence even when the callback outcome is unknown.
+                self._decision_turns[turn_key] = (action.target_id, "expense-adjust", edit["expected_hash"])
+            try:
+                result = await self._call(binding, "adjust", {"callId": action.target_id[len("atlas:"):],
+                    "expectedHash": edit["expected_hash"], "lineId": edit["line_id"], "amount": edit["amount"]})
+            except Exception:
+                return {"status": "unknown", "reason": "ATLAS_EXPENSE_ADJUSTMENT_OUTCOME_UNKNOWN",
+                        "hint": "Read task.details to verify the actual form and last_adjustment. Do not blindly retry or submit."}
+            state = (result.get("expense") or {}).get("state", {})
+            receipt = state.get("last_adjustment", {})
+            if receipt.get("status") != "applied" or receipt.get("line_id") != edit["line_id"] or receipt.get("amount") != edit["amount"]:
+                return {"status": "unknown", "reason": "ATLAS_EXPENSE_ADJUSTMENT_RECEIPT_MISMATCH"}
+            return {"status": "applied", "task_id": action.target_id, "expense_form": state,
+                    "adjustment_receipt": receipt, "submitted": False,
+                    "hint": "The amount was updated and artifacts published. Ask for confirmation of the new total and remaining policy exceptions before submission; old approval is invalid."}
         if action.operation in {"task.details", "task.approve", "task.reject"}:
             if not action.target_id.startswith("atlas:task:"):
                 return {"status": "rejected", "reason": "ATLAS_TARGET_NOT_FOUND"}
