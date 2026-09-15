@@ -14,6 +14,21 @@ def task_subject(facts: Mapping[str, object], *, chinese: bool) -> str:
     return f"“{name}”" if chinese else f'Task "{name}"'
 
 
+def task_completion_text(subject: str, outcome: object, *, chinese: bool, result_available: bool) -> str:
+    """Render verified completion facts shared by progress and notifications."""
+    if outcome == "completed" and not result_available:
+        return (f"{subject}已经结束，但没有可用的合法结果。" if chinese
+                else f"{subject} ended, but no valid result is available.")
+    descriptions = {
+        "completed": ("已完成，结果已经生成。", " is complete and its result is ready."),
+        "cancelled": ("已取消。", " was cancelled."),
+        "failed": ("失败了。", " failed."),
+        "interrupted": ("已中断。", " was interrupted."),
+    }
+    fallback = ("已经结束，但终态不可用。", " ended with an unavailable terminal state.")
+    return subject + descriptions.get(outcome, fallback)[0 if chinese else 1]
+
+
 def adjustment_status_text(state: object, *, chinese: bool) -> str:
     if chinese:
         return {

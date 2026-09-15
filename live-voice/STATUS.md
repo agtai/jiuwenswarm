@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-13 — official develop rebaseline source verified; actual runtime readiness is recorded by the deployed contract.
+> Updated: 2026-09-15 — management replacement is active; running services have not been redeployed.
 > Default bootstrap reads only Project judgement and Current execution packet.
 > Stop at Completion boundaries unless the task needs wider planning or acceptance.
 
@@ -8,6 +8,20 @@
 
 **PARTIAL — bounded repairs and user acceptance exist; the full product is not
 feature complete or a newly accepted controlled candidate.**
+
+Execution integration and management integration are separate: formal attempts
+and Work use native Runner/TaskManager and Host Agent/Harness, while TaskStore,
+PersistentTaskCore, WorkStore/WorkRuntime and Voice business coordination retain
+substantial management code. Their replacement is **incomplete**. The current
+[replacement audit](reviews/MANAGEMENT_REPLACEMENT_20260915.md) freezes the actual
+paired source baseline and records concrete deletions, retained responsibilities
+and evidence. Prior packet-delivered wording does not close this scope.
+The user accepted the deployed 09-15 session's tested behaviors; it proves
+pre-dispatch cancellation, not human acceptance of running cancellation. Empty
+diff success semantics remain undecided and do not block this audit.
+
+The following earlier observations retain their original evidence boundaries;
+their old repair/deployment permissions are superseded by the current packet.
 
 Deployment of `57d3b29f18` exposed a 5,272-byte compiled adjustment instruction
 against the 4,096-byte command bound. Its pending row blocked dispatch and P3
@@ -84,7 +98,20 @@ support has been discussed, not implemented.
 
 ## Current execution packet
 
-### Active session repair (2026-09-14)
+### Active management replacement (2026-09-15)
+
+Continue [Task → Work → Host/Voice replacement](reviews/MANAGEMENT_REPLACEMENT_20260915.md),
+with audit, refactoring, affected tests, documentation and local commits authorized.
+The first bounded changes reuse the existing Task artifact reader, native Work
+finalizer and Host Task presentation functions; this does not close the retained
+management implementations. No pushes, history rewriting, service restart or
+deployment; no private configuration or user-project edits. Preserve the
+15-second prepared-response timeout and all existing voice/authorization policy.
+New product semantics, security/authority changes and irreversible migrations
+still require a concrete user decision. Broader management replacement remains
+active after these initial batches.
+
+### Previous session repair evidence (2026-09-14)
 
 The user authorized the [three-stage repair](reviews/SESSION_REPAIR_20260914.md)
 after testing session `web_1a0a051ff63_fca69639db63`: Task correctness, Voice
@@ -96,15 +123,16 @@ Deployed audio analysis distinguishes prepared notification playback from
 admission latency. Interruption feedback repair passes scoped checks and awaits
 deployment; read-scope audit remains open. Multiple
 local commits are authorized; final root-cause review must remove ineffective
-or unnecessary fixes. Stage 2 investigation is active. No new full-product acceptance is claimed.
+or unnecessary fixes. Those diagnostics do not replace current management work.
+No new full-product acceptance is claimed.
 The deferred prepared-response timeout and buffering/latency policy remain
 unchanged. No remote update or history rewrite is authorized.
 
 ### Continuation boundary
 
 
-**Current deep-integration packet (2026-09-13/14): code-level audit and authorized
-refactor delivered after D-128. Overall product readiness remains PARTIAL.** The user explicitly
+**Previous deep-integration packet (2026-09-13/14): bounded execution integration
+delivered after D-128; management replacement remains incomplete.** The user explicitly
 requires code-level native-capability audit, not directory/import ownership
 claims. [Audit, changes and evidence](reviews/DEEP_INTEGRATION_20260913.md) owns
 this packet, beginning at Host `948cfc7920fd35fdf0f4b9a476cd567bb4af9108` and SDK

@@ -1,0 +1,20 @@
+{
+  "isolated_target": "C:\\Users\\admin\\AppData\\Local\\Temp\\management-pair-1wvfuu2b",
+  "matched_installed_python_files": {
+    "jiuwenswarm": 1016,
+    "openjiuwen": 2409
+  },
+  "changed_source_files_verified": 4,
+  "test_exit_code": 0,
+  "wheels": [
+    {
+      "name": "openjiuwen-0.1.17+livevoice.9-py3-none-any.whl",
+      "sha256": "580cf0f72e2b26b3444da2c9e49748aeb2000160d17205d633bf5a3a23df66c4"
+    },
+    {
+      "name": "workswarm-0.2.5b1-py3-none-any.whl",
+      "sha256": "3e4fa5e7dd81bb42747b44eee99c50f56cf724bc39fd24083804df035254f487"
+    }
+  ],
+  "limits": "All installed package Python files match tracked source snapshots; third-party dependencies reused. No dependency resolution or deployment. Initial reverse inventory incorrectly required excluded package tests and was corrected before checks."
+}

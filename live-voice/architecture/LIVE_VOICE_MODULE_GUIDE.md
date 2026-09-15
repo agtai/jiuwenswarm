@@ -1,9 +1,10 @@
 # LiveVoice：模块、运行位置与数据流
 
 > 2026-09-14 正式 Task 原生执行收敛：AgentServer → P3 factory → AgentRuntime → 既有 Runner 根任务组 / TaskManager，原生 Task 直接运行唯一 `_run_attempt`。Harness 仍是前台 round 身份权威，Voice Bridge 只持有有界输出消费许可。
-> 配套 SDK `0.1.17+livevoice.9`。Work 和正式 Task 尝试共用原生执行、取消及事件能力；Task journal/Store 的事务、副作用与恢复事实仍是业务权威，不用原生瞬时状态替代。AgentServer 是装配应用服务与执行依赖的运行容器。本轮代码级融合审计与已授权改造已交付；整体产品验收仍为 PARTIAL。
-> 当前相同口径：Voice **112101** / Host **48048** / SDK **34307**，合计净增 **194456**；本批 **+181**，较初始 **−1224**。本批没有大批删除重复代码，不将接线和必要取消保护算作代码消除。[逐文件统计](../evidence/DEEP_FORMAL_NATIVE_COUNTS_20260914.json)、[合并模块统计](../evidence/DEEP_FORMAL_NATIVE_MODULES_20260914.json)。后文旧数字为历史阶段。
+> 配套 SDK `0.1.17+livevoice.9`。Work 和正式 Task 尝试共用原生执行、取消及事件能力；Task journal/Store 的事务、副作用与恢复事实仍是业务权威，不用原生瞬时状态替代。AgentServer 是装配应用服务与执行依赖的运行容器。执行接入有分项证据，管理能力尚未充分统一；整体产品验收仍为 PARTIAL。
+> 2026-09-15 首批替代后相同口径：Voice **112094** / Host **48073** / SDK **34296**，合计净增 **194463**；相对本轮实际 HEAD 基线 **194530** 净减 **67**。生产新增 **57** / 删除 **124**，不含测试和文档；没有生产文件搬迁。[逐项替代与保留原因](../reviews/MANAGEMENT_REPLACEMENT_20260915.md)、[本轮差量](../evidence/MANAGEMENT_DELTA_20260915.json)、[完整统计](../evidence/MANAGEMENT_COUNTS_20260915.json)、[合并模块统计](../evidence/MANAGEMENT_MODULES_20260915.json)。后文数字保留各自历史阶段。
 > M4+M5、M7+M9 保持合并。Hermes 和多模态方案未重新核验，保留原固定版本和静态证据边界；本批不形成性能、延迟或物理音频优势证据。
+> 当前内部流程：Task collect → 既有 applied-artifact reader；Work TaskManager → 原生 finalizer → 业务结算；Voice 两条 Task 通知 → Host task_control_presentation → 原有播放/ACK。AgentServer 仍为装配会话、授权、应用服务与执行依赖的运行容器；未新建管理框架，未删除 TaskStore/WorkStore 主体。
 
 > 本文由 2026-09-13 的模块导读持续更新；早期 `.5` 阶段结论应结合上述当前调用关系阅读。
 > 对应[统一记录](../reviews/TASK_WORK_UNIFICATION_20260913.md)和[代码量清单](UNIFIED_CODE_ACCOUNTING.md)。这是源码说明；当前产品验收边界仍由 [STATUS](../STATUS.md) 管理。

@@ -1,0 +1,68 @@
+{
+  "host_baseline": "a1e3f7eecb6cc80d4c3fcfffd306265a65a58fd1",
+  "sdk_baseline": "b5534de51a9bc32f8cc65bf8ce4ba266e74e5771",
+  "line_metric": "physical lines; same owner/filter/diff algorithm as frozen baseline; production only",
+  "totals": {
+    "voice": {
+      "added_lines": 24,
+      "removed_lines": 70,
+      "net_lines": -46
+    },
+    "jiuwenswarm": {
+      "added_lines": 15,
+      "removed_lines": 0,
+      "net_lines": 15
+    },
+    "agentcore": {
+      "added_lines": 18,
+      "removed_lines": 54,
+      "net_lines": -36
+    }
+  },
+  "files": [
+    {
+      "path": "jiuwenswarm/channels/live_voice/product_composition_registry.py",
+      "owner": "voice",
+      "new_file": false,
+      "current_lines": 14991,
+      "baseline_lines": 15037,
+      "added_lines": 24,
+      "removed_lines": 70,
+      "net_lines": -46,
+      "sha256": "53c6ce92844aa46c0e63a8932d5e73d027f001bad7386993a940ce13d412f644"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/formal_tasks/task_control_presentation.py",
+      "owner": "jiuwenswarm",
+      "new_file": false,
+      "current_lines": 189,
+      "baseline_lines": 174,
+      "added_lines": 15,
+      "removed_lines": 0,
+      "net_lines": 15,
+      "sha256": "e60f923628de5c4e8b1a5161bfe8db451d724263886d9a2096d62d1b99fcd171"
+    },
+    {
+      "path": "openjiuwen/core/application/tasks/project_executor.py",
+      "owner": "agentcore",
+      "new_file": false,
+      "current_lines": 6340,
+      "baseline_lines": 6375,
+      "added_lines": 4,
+      "removed_lines": 39,
+      "net_lines": -35,
+      "sha256": "f58de19fc8de5a2b07b8eede40809792f3d7a6a2660783b6b52d9334383a0b40"
+    },
+    {
+      "path": "openjiuwen/core/application/tasks/work_runtime.py",
+      "owner": "agentcore",
+      "new_file": false,
+      "current_lines": 954,
+      "baseline_lines": 955,
+      "added_lines": 14,
+      "removed_lines": 15,
+      "net_lines": -1,
+      "sha256": "09a3848d8ac239ff4d8b86f49f6753eae838f5907b846be2231df2bc651deb63"
+    }
+  ]
+}

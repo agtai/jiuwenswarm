@@ -1,5 +1,11 @@
 # Deep integration audit and execution
 
+> 2026-09-15 scope correction: the delivered claims below cover bounded execution
+> integration and their recorded deletions. They do not establish completed
+> management replacement. The active [replacement audit](MANAGEMENT_REPLACEMENT_20260915.md)
+> starts from the actual later paired HEADs and retains those management gaps.
+
+
 ## Scope and evidence
 
 User-authorized audit/refactor; Host baseline `948cfc7920fd35fdf0f4b9a476cd567bb4af9108`,

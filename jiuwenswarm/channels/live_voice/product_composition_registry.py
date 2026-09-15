@@ -13,6 +13,7 @@ from __future__ import annotations
 from jiuwenswarm.common.live_voice_profiling import profiled, identity_fields, profile_event
 from jiuwenswarm.common.live_voice_lock_diagnostics import ObservedAsyncLock
 from jiuwenswarm.server.runtime.work.native_foreground import NATIVE_FOREGROUND, NativeForegroundControl
+from jiuwenswarm.server.runtime.formal_tasks.task_control_presentation import task_completion_text, task_subject
 
 import asyncio
 import hashlib
@@ -2073,37 +2074,26 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
             )
             retained_progress.notification_chinese = self._is_chinese_voice_text(instruction)
             retained_progress.notification_name = name
-        subject = self._task_notification_subject(
-            retained_progress.notification_name or event.task_event.task_id,
+        subject = task_subject(
+            {"name": retained_progress.notification_name, "task_id": event.task_event.task_id},
             chinese=retained_progress.notification_chinese,
         )
-        if event.task_event.event_type != "task.terminal":
-            text = f"{subject} update: {event.task_event.state}."
-        elif outcome == TerminalOutcome.COMPLETED.value:
-            text = f"{subject} is complete and its result is ready."
-        elif outcome == TerminalOutcome.CANCELLED.value:
-            text = f"{subject} was cancelled."
-        elif outcome == TerminalOutcome.FAILED.value:
-            text = f"{subject} failed."
-        elif outcome == TerminalOutcome.INTERRUPTED.value:
-            text = f"{subject} was interrupted."
-        else:
-            text = f"{subject} ended with an unknown outcome."
-        if retained_progress.notification_chinese:
-            if event.task_event.event_type == "task.terminal":
-                text = {
-                    "completed": f"{subject}已完成，结果已经生成。",
-                    "cancelled": f"{subject}已取消。",
-                    "failed": f"{subject}失败了。",
-                    "interrupted": f"{subject}已中断。",
-                }.get(outcome, f"{subject}已经结束，结果状态未知。")
+        if event.task_event.event_type == "task.terminal":
+            if outcome in {"completed", "cancelled", "failed", "interrupted"}:
+                text = task_completion_text(subject, outcome,
+                    chinese=retained_progress.notification_chinese, result_available=result_record is not None)
             else:
-                text = {
-                    "accepted": f"{subject}已受理，等待执行。",
-                    "running": f"{subject}正在执行。",
-                    "blocked": f"{subject}受阻，等待所需条件。",
-                    "decision_required": f"{subject}需要你的决定。",
-                }.get(event.task_event.state, f"{subject}状态已更新。")
+                text = (f"{subject}已经结束，结果状态未知。" if retained_progress.notification_chinese
+                        else f"{subject} ended with an unknown outcome.")
+        elif retained_progress.notification_chinese:
+            text = {
+                "accepted": f"{subject}已受理，等待执行。",
+                "running": f"{subject}正在执行。",
+                "blocked": f"{subject}受阻，等待所需条件。",
+                "decision_required": f"{subject}需要你的决定。",
+            }.get(event.task_event.state, f"{subject}状态已更新。")
+        else:
+            text = f"{subject} update: {event.task_event.state}."
         commit = TurnCommit.from_dict(
             {
                 "contract_version": CONTRACT_VERSION,
@@ -2960,12 +2950,6 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
             if authority.lease is not None:
                 await authority.lease.close()
 
-    @staticmethod
-    def _task_notification_subject(name: str, *, chinese: bool) -> str:
-        # Display metadata only; exact Task/scope/attempt authority is resolved
-        # before reading the name. Never use the name to select a Task.
-        return f"“{name}”" if chinese else f'Task "{name}"'
-
     async def _terminal_notification_text(self, task_event: PersistentTaskEvent) -> str:
         name = task_event.task_id
         try:
@@ -2985,42 +2969,12 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
             chinese = False
             availability = TaskResultAvailability.UNAVAILABLE
             record = None
-        subject = self._task_notification_subject(name, chinese=chinese)
-        outcome = task_event.outcome
-        if outcome == TerminalOutcome.COMPLETED.value:
-            result_valid = bool(
-                availability is TaskResultAvailability.AVAILABLE
-                and record is not None
-                and record.task_id == task_event.task_id
-                and record.attempt_id == task_event.attempt_id
-            )
-            if result_valid:
-                return (
-                    f"{subject}已完成，结果已经生成。"
-                    if chinese
-                    else f"{subject} is complete and its result is ready."
-                )
-            return (
-                f"{subject}已经结束，但没有可用的合法结果。"
-                if chinese
-                else f"{subject} ended, but no valid result is available."
-            )
-        if outcome == TerminalOutcome.CANCELLED.value:
-            return (
-                f"{subject}已取消。" if chinese else f"{subject} was cancelled."
-            )
-        if outcome == TerminalOutcome.FAILED.value:
-            return f"{subject}失败了。" if chinese else f"{subject} failed."
-        if outcome == TerminalOutcome.INTERRUPTED.value:
-            return (
-                f"{subject}已中断。"
-                if chinese
-                else f"{subject} was interrupted."
-            )
-        return (
-            f"{subject}已经结束，但终态不可用。"
-            if chinese
-            else f"{subject} ended with an unavailable terminal state."
+        subject = task_subject({"name": name, "task_id": task_event.task_id}, chinese=chinese)
+        return task_completion_text(
+            subject, task_event.outcome, chinese=chinese,
+            result_available=bool(task_event.outcome == "completed" and availability is TaskResultAvailability.AVAILABLE
+                and record is not None and record.task_id == task_event.task_id
+                and record.attempt_id == task_event.attempt_id),
         )
 
     @profiled('notification.terminal_delivery', 'event', 'event.origin')

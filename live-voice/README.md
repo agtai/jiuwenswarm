@@ -20,7 +20,7 @@ linked history is conditional and does not activate work.
 | Documentation change | [Documentation rules](DOCUMENTATION_RULES.md), [documentation-only checks](../TESTING.md#documentation-only-verification) and only the authorities changed by the edit |
 | Architecture/authority/protocol/security/durability change | Exact ACG and governing decision sections; full design only if the long-term boundary itself changes or is ambiguous |
 | Git/review/parallel work | Root `AGENTS.md`, applicable root `TESTING.md` sections and only the active packet named by STATUS |
-| LiveVoice / Host / AgentCore deep integration | [Current code audit](reviews/DEEP_INTEGRATION_20260913.md), then the affected native capability and [same-basis accounting](architecture/UNIFIED_CODE_ACCOUNTING.md); earlier extraction is not native-reuse proof |
+| LiveVoice / Host / AgentCore deep integration | [Current management replacement](reviews/MANAGEMENT_REPLACEMENT_20260915.md), then affected native code and [same-basis accounting](architecture/UNIFIED_CODE_ACCOUNTING.md); [earlier execution audit](reviews/DEEP_INTEGRATION_20260913.md) is bounded evidence, not management-unification proof |
 | Historical/migration/forensic work | One route from the conditional [reference index](REFERENCE_INDEX.md); never use historical priority/status as the current queue |
 
 ## Section rules
