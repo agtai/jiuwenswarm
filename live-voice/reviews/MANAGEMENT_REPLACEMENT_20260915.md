@@ -260,3 +260,54 @@ SDK second-batch commit: `6c6da6c47ef185c072fd305964d2e3954cb6e94b`
 (`refactor(tasks): centralize creation spec preparation`). Host companion removes
 the duplicate builder/source helpers and updates current audit/architecture. Both
 sources are required for a later deployment; deployment remains explicitly deferred.
+
+## Host Agent adapter cleanup boundary
+
+Tier 0, removal of a shadowed duplicate only. JiuWenSwarm's shared Agent facade
+defines `_make_retry_without_a2ui_call` twice in the same class with identical
+ASTs. Python uses only the latter for both non-streaming and streaming finalization
+callers. Delete the first definition; retain the existing latter implementation
+and all retry/tool/interaction behavior. No new fallback or invocation is added.
+Acceptance: prove both old definitions identical and every other class/body node
+unchanged after deletion, compile the resulting module, and check scoped diff.
+This is Host cleanup, not replacement of TaskStore/WorkStore or Voice routing.
+
+Result: Host +0/-36=-36; no SDK or Voice production change. The retained method
+is AST-identical to both prior definitions; the complete module AST differs only
+by deletion of the overridden definition. Compilation and scoped whitespace checks
+pass. No synthetic per-function test or full suite is needed for this unreachable
+copy. Cumulative production +141/-328=-187.
+[Cleanup delta and current merged counts](../evidence/MANAGEMENT_ADAPTER_CLEANUP_20260915.json)
+reference the prior full manifest and identify its one changed file.
+
+### Query and Work routing follow-up: actual retained calls
+
+- Registry `_handle_p3_query` calls ProductP3TextAdapter.activate_prepared_query,
+  which uses FormalTaskPolicy.map and P3AuthenticatedComposition.query. The latter
+  re-resolves current context before Core.query and validates list results after
+  the read. The ordinary query already has a Host/Core owner. Removing the adapter
+  without preserving canonical resource/grant bindings and feature-off failures
+  would change existing consumers, not eliminate a second Task authority.
+- Registry status projection separately reads retry admission and authenticated
+  task facts, with a bounded reread when event heads advance. Host's direct handle
+  also uses `_read_status_retry_admission`; the retry decision is already shared.
+  The remaining Registry loop joins separate snapshots to UI-supported operations.
+  A substantive replacement needs a Host status snapshot API that binds task,
+  attempt, event head, retry facts and operation grants. It must preserve stale
+  rejection, per-operation reauthorization and diagnostic non-authority; moving
+  this loop alone would not remove the duplicate read lifecycle. This API/atomic
+  boundary is not implemented or claimed complete in this cleanup.
+- NativeBusinessRouter._work calls the same WorkRuntime start/update/cancel/query
+  and HostWorkService.get_executor; its runner delegates to HostWorkAgentExecutor
+  and JiuWenSwarmRoundHarness. It has no separate Work row or scheduler. It still
+  builds the admitted context and runner closure, which is business coordination
+  remaining in Voice. HostWorkService currently owns producer/session-generation
+  lifetime, not a complete authorized Work admission service. Merely relocating
+  that closure does not satisfy replacement.
+- HostWorkAgentExecutor's collect_final_text and wait_settled are distinct Harness
+  facts. Replacing the latter with text completion would release capacity/Agent
+  pins before real cleanup and violate cancellation/unknown semantics. Keep both.
+
+These traces narrow the next substantive Host work to coherent status reads and
+Work admission ownership. The full management objective stays active; the
+shadowed-method deletion is only verified cleanup and does not close those gaps.
