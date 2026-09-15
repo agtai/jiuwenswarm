@@ -28,6 +28,7 @@ async def test_explicit_demo_selector_survives_chinese_request(tmp_path, name, k
     assert sent[0]["text"].startswith(entry + "\n" if entry else user_text)
     assert user_text in sent[0]["text"] and "保留原始要求" in sent[0]["text"]
     assert sent[0]["userText"] == user_text
+    assert sent[0]["demoKind"] == kind
     receipt = {"turnId": "fallback", "mandateId": None, "demoKind": "repurchase"}
     result = await host.execute(SimpleNamespace(interaction_id="i"), delegate)
     assert result["status"] == "unknown" and result["reason"] == "ATLAS_DEMO_ROUTE_MISMATCH"
@@ -138,3 +139,16 @@ async def test_explicit_demo_does_not_create_swarm_executor(tmp_path, monkeypatc
     finally:
         await env.registry.stop()
         await env.harness.composition.stop()
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["DEMO_TASK_ACTIVE", "DEMO_REQUEST_NOT_RECOGNIZED", "DEMO_ROUTE_UNAVAILABLE"])
+async def test_explicit_no_start_refusal_is_not_unknown_or_completed(tmp_path, reason):
+    host = AtlasLocalHost(tmp_path / "unused")
+    async def callback(*args):
+        raise NativeBusinessViolation(reason)
+    host._call = callback
+    delegate = SimpleNamespace(business=SimpleNamespace(operation="task.create", name="atlas:repurchase", instruction=None),
+        source_identity="id", request_text="重购三月份买过的咖啡", turn_id="turn")
+    result = await host.execute(SimpleNamespace(interaction_id="i"), delegate)
+    assert result == {"status": "rejected", "reason": reason, "executed": False,
+        "hint": "No new task started. Report this exact refusal; do not describe it as completed or automatically retry."}

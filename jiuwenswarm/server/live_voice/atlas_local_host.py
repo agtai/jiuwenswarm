@@ -95,6 +95,14 @@ class AtlasLocalHost:
                     headers={"Authorization": "Bearer " + registration["token"]},
                     json={"version": VERSION, "binding": registration["binding"], "method": method, "params": params}) as response:
                 if response.status != 200:
+                    if response.status == 409:
+                        refusal = await response.content.read(4096)
+                        try:
+                            reason = json.loads(refusal).get("error")
+                        except (ValueError, AttributeError):
+                            reason = None
+                        if reason in ("DEMO_TASK_ACTIVE", "DEMO_REQUEST_NOT_RECOGNIZED", "DEMO_ROUTE_UNAVAILABLE"):
+                            raise NativeBusinessViolation(reason)
                     raise NativeBusinessViolation("ATLAS_HOST_UNAVAILABLE")
                 body = bytearray()
                 async for chunk in response.content.iter_chunked(16384):
@@ -311,10 +319,13 @@ class AtlasLocalHost:
             try:
                 accepted = await self._call(binding, "submit", {"callId": call_id, "text": text,
                     "nativeTurnKey": json.dumps([binding.interaction_id, delegate.turn_id], separators=(",", ":")),
-                    "userText": delegate.request_text})
+                    "userText": delegate.request_text, **({"demoKind": demo_kind} if demo_kind else {})})
                 if type(accepted) is not dict or type(accepted.get("turnId")) is not str or not accepted["turnId"]:
                     raise ValueError()
-            except Exception:
+            except Exception as error:
+                if getattr(error, "reason", None) in ("DEMO_TASK_ACTIVE", "DEMO_REQUEST_NOT_RECOGNIZED", "DEMO_ROUTE_UNAVAILABLE"):
+                    return {"status": "rejected", "reason": error.reason, "executed": False,
+                            "hint": "No new task started. Report this exact refusal; do not describe it as completed or automatically retry."}
                 # The Atlas request may already have run. Never label a lost
                 # acceptance as rejection or retry with a different request ID.
                 return {"status": "unknown", "reason": "ATLAS_ACCEPTANCE_UNKNOWN", "host_call_id": call_id}
