@@ -672,6 +672,28 @@ def test_store_reader_atomic_collection_excludes_concurrent_insert(tmp_path: Pat
     assert store.counts() == counts_after_write[0]
 
 
+def test_store_reader_queue_control_uses_same_snapshot_during_takeover(tmp_path: Path, monkeypatch) -> None:
+    store = SqliteTaskStore(tmp_path / "reader-queue-takeover.sqlite3")
+    task_id, _ = _seed_selected_task(store, tmp_path, suffix="queue-snapshot")
+    claimed = []
+
+    def takeover_after_task_read(name):
+        if name == "list_task_authority_snapshots_page.after_tasks" and not claimed:
+            claimed.append(store.claim_outbox("concurrent-takeover", observed_at=NOW))
+            assert claimed[0] is not None
+
+    monkeypatch.setattr(store, "_hit", takeover_after_task_read)
+    reader = StoreProductionTaskAuthorityReader(store=store, principal_id=SCOPE.subject_id, scope=SCOPE)
+    first = reader.get_task(SCOPE, task_id)
+    assert first.dispatch_control == "unclaimed"
+    assert {"task.update", "task.reprioritize"} <= first.supported_operations
+    before = store.counts()
+    second = reader.get_task(SCOPE, task_id)
+    assert second.dispatch_control == "taken_over"
+    assert {"task.update", "task.reprioritize"}.isdisjoint(second.supported_operations)
+    assert store.counts() == before
+
+
 def test_store_reader_projects_completed_result_digest(tmp_path: Path) -> None:
     store = SqliteTaskStore(tmp_path / "production-reader-result.sqlite3")
     task_id, attempt_id = _seed_selected_task(store, tmp_path, suffix="result")

@@ -26,10 +26,8 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 
 from openjiuwen.core.application.tasks.executor_capabilities import ExecutorCapabilityProfile
 from openjiuwen.core.application.tasks.formal_task_models import (
-    FormalAttemptState,
     FormalTaskState,
     FormalTaskViolation,
-    PersistentAdmissionRecord,
     PersistentAttemptRecord,
     PersistentTaskRecord,
     ResolvedTaskContext,
@@ -455,10 +453,9 @@ class StoreProductionTaskAuthorityReader:
 
     @staticmethod
     def _dispatch_control(
-        task: PersistentTaskRecord,
-        attempt: PersistentAttemptRecord,
-        admission: PersistentAdmissionRecord | None,
+        snapshot: TaskAuthorityReadSnapshot,
     ) -> tuple[str, str | None, frozenset[str]]:
+        attempt, admission = snapshot.attempt, snapshot.admission
         if attempt.selection is None:
             if admission is not None:
                 raise _reader_violation(
@@ -471,36 +468,10 @@ class StoreProductionTaskAuthorityReader:
                 "PRODUCTION_TASK_ADMISSION_AUTHORITY_CORRUPT",
                 "selected Task is missing its admission projection",
             )
-        fingerprint = hashlib.sha256(
-            canonical_json_bytes(admission.to_dict())
-        ).hexdigest()
-        unclaimed = (
-            task.state is FormalTaskState.ACCEPTED
-            and not task.cancel_requested
-            and not task.dispatch_fenced
-            and attempt.state is FormalAttemptState.ACCEPTED
-            and attempt.executor_ref is None
-            and attempt.source_seq == -1
-            and admission.queued
-            and not admission.reconciliation_required
-            and task.reconciliation_state is None
-        )
-        queue_operations: set[str] = set()
-        if unclaimed:
-            if admission.attempt_count == 0 and admission.reason is None:
-                queue_operations.add("task.update")
-            if (
-                admission.attempt_count == 0
-                and admission.reason is None
-                or admission.attempt_count > 0
-                and admission.reason
-                in {"EXECUTOR_PROJECT_BUSY", "EXECUTOR_CAPACITY_EXHAUSTED"}
-            ):
-                queue_operations.add("task.reprioritize")
         return (
-            "unclaimed" if unclaimed else "taken_over",
-            fingerprint,
-            frozenset(queue_operations),
+            snapshot.queue_control.dispatch_control,
+            hashlib.sha256(canonical_json_bytes(admission.to_dict())).hexdigest(),
+            snapshot.queue_control.operations,
         )
 
     @staticmethod
@@ -596,7 +567,7 @@ class StoreProductionTaskAuthorityReader:
             profile_digest, versions = self._profile(task, attempt)
             profile_digests[task.task_id] = profile_digest
             operation_versions[task.task_id] = versions
-            dispatch[task.task_id] = self._dispatch_control(task, attempt, admission)
+            dispatch[task.task_id] = self._dispatch_control(snapshot)
 
         for task, _attempt, _admission in records:
             result_digest = result_digests[task.task_id]

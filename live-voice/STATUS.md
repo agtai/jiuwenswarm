@@ -131,10 +131,13 @@ The resumed independent comparison rejects wholesale Controller/Team replacement
 of Formal Task cancellation/recovery and rejects treating Host/Voice as additional
 Work state owners. Team already has transactions and CAS; its missing contract is
 the specific command/attempt/outbox/effect and physical-settlement combination.
-The first new complete implementable replacement remains unproven. Host/Voice
-business convergence is still open; no new production deletion is credited to
-this comparison. The audit records exact consumers, enhancement costs and
-counterexamples instead of assuming a whole owner must be removable.
+The subsequent queued-control batch removes Host's independent queue eligibility
+rules and Store's duplicate reprioritize predicate. Atomic read projections and
+update/reprioritize transactions share Store queue control, using the existing
+exact unbound-queue proof. This closes that rule-ownership boundary only;
+Host/Voice business convergence and wholesale management replacement remain open.
+The audit records focused SQLite/concurrency/replay evidence, the independent
+review and the modest actual code delta without claiming a full owner deletion.
 
 Audit, reasonable refactoring, necessary tests, docs and local commits remain
 authorized. Compatibility is limited to these two repositories. Preserve accepted

@@ -1,0 +1,144 @@
+{
+  "previous_manifest": "MANAGEMENT_ATOMIC_SUBSCRIPTION_20260915.json",
+  "host_batch_baseline": "41a64fae03de03c68b6e6188c53a27f1ccabb543",
+  "sdk_batch_baseline": "3300504a7e88b4f5436040c1deace4be322c4623",
+  "line_metric": "physical; comments/blanks included; tests/docs/config excluded",
+  "files": [
+    {
+      "path": "jiuwenswarm/server/runtime/formal_tasks/p3_production_intent_composition.py",
+      "owner": "jiuwenswarm",
+      "new_file": false,
+      "current_lines": 796,
+      "baseline_lines": 825,
+      "added_lines": 6,
+      "removed_lines": 35,
+      "net_lines": -29,
+      "sha256": "cb6800d1241b31aacb7658d6e75441072c03a82cac90094cb7bac2aad5e21e3b"
+    },
+    {
+      "path": "openjiuwen/core/application/tasks/task_store.py",
+      "owner": "agentcore",
+      "new_file": false,
+      "current_lines": 13925,
+      "baseline_lines": 13901,
+      "added_lines": 69,
+      "removed_lines": 45,
+      "net_lines": 24,
+      "sha256": "5f1c5fe7af5cd4977e8b7b4d6d7f9a4e4583a7848fc86ba066b9106cdf5281a3"
+    }
+  ],
+  "batch_totals": {
+    "voice": {
+      "added_lines": 0,
+      "removed_lines": 0,
+      "net_lines": 0
+    },
+    "jiuwenswarm": {
+      "added_lines": 6,
+      "removed_lines": 35,
+      "net_lines": -29
+    },
+    "agentcore": {
+      "added_lines": 69,
+      "removed_lines": 45,
+      "net_lines": 24
+    }
+  },
+  "cumulative_totals": {
+    "voice": {
+      "added_lines": 54,
+      "removed_lines": 1173,
+      "net_lines": -1119
+    },
+    "jiuwenswarm": {
+      "added_lines": 148,
+      "removed_lines": 213,
+      "net_lines": -65
+    },
+    "agentcore": {
+      "added_lines": 250,
+      "removed_lines": 370,
+      "net_lines": -120
+    }
+  },
+  "current_official_totals": {
+    "voice": {
+      "current_lines": 111021,
+      "baseline_lines": 0,
+      "added_lines": 111021,
+      "removed_lines": 0,
+      "net_lines": 111021,
+      "new_file_lines": 111021,
+      "current_files": 102
+    },
+    "jiuwenswarm": {
+      "current_lines": 150508,
+      "baseline_lines": 102515,
+      "added_lines": 48914,
+      "removed_lines": 921,
+      "net_lines": 47993,
+      "new_file_lines": 39818,
+      "current_files": 119
+    },
+    "agentcore": {
+      "current_lines": 36518,
+      "baseline_lines": 2306,
+      "added_lines": 34228,
+      "removed_lines": 16,
+      "net_lines": 34212,
+      "new_file_lines": 34065,
+      "current_files": 30
+    }
+  },
+  "current_module_totals": {
+    "M7+M9": {
+      "current_lines": 51050,
+      "new_file_lines": 12968,
+      "net_lines": 17030
+    },
+    "M4+M5": {
+      "current_lines": 37991,
+      "new_file_lines": 37991,
+      "net_lines": 37991
+    },
+    "M3": {
+      "current_lines": 14427,
+      "new_file_lines": 14427,
+      "net_lines": 14427
+    },
+    "shared": {
+      "current_lines": 47114,
+      "new_file_lines": 19469,
+      "net_lines": 21345
+    },
+    "M1+M2": {
+      "current_lines": 69836,
+      "new_file_lines": 44134,
+      "net_lines": 44992
+    },
+    "G": {
+      "current_lines": 38391,
+      "new_file_lines": 18173,
+      "net_lines": 19556
+    },
+    "M6+M8": {
+      "current_lines": 39238,
+      "new_file_lines": 37742,
+      "net_lines": 37885
+    }
+  },
+  "verification": {
+    "paired_source": "149 passed, 380 deselected",
+    "host_intent_trust": "35 passed, 15 deselected; may overlap paired source",
+    "atomic_queue_takeover": "1 passed, 15 deselected",
+    "initial_test_fixture_failure": "Two new cases initially used a legacy capability profile; replaced with existing canonical production fixture. Both pass.",
+    "exclusions": "No wheel rebuild, deployment, physical Agent/Provider/audio or full-suite claim; package/build configuration unchanged."
+  },
+  "independent_review": {
+    "reviewer": "/root/independent_management_review",
+    "findings": [],
+    "tests": "3 passed, 114 deselected; overlap Main",
+    "zero_attempt_difference": "Already invalid: PersistentAdmissionRecord requires zero iff reason is None; existing Store verification rejects pending zero-delivery last_error."
+  },
+  "sdk_commit": "e57563a308c8b55f27673e7e04e33de3f9254471"
+}

@@ -2524,6 +2524,54 @@ async def test_unbound_reconciliation_rejects_unproven_selected_queue(
     assert executor.adjustments == []
 
 
+@pytest.mark.parametrize("deferred", [False, True])
+def test_host_queue_read_cannot_authorize_after_dispatch_claim(tmp_path: Path, deferred: bool) -> None:
+    """A displayed queue operation is not a permit to mutate after takeover."""
+    from jiuwenswarm.server.runtime.formal_tasks.p3_production_intent_composition import (
+        StoreProductionTaskAuthorityReader,
+    )
+    from tests.unit_tests.live_voice.test_p3_production_intent_composition import (
+        _seed_selected_task, SCOPE, NOW as read_now, EXPIRY,
+    )
+
+    store = SqliteTaskStore(tmp_path / "queue-read-takeover.sqlite")
+    task_id, attempt_id = _seed_selected_task(store, tmp_path, suffix="queue-takeover")
+    if deferred:
+        claimed = store.claim_outbox("defer", observed_at=read_now)
+        assert claimed is not None
+        assert store.defer_admission(claimed, reason="EXECUTOR_PROJECT_BUSY",
+                                    policy=AdmissionPolicy(), observed_at=read_now) is AdmissionDisposition.DEFERRED
+    reader = StoreProductionTaskAuthorityReader(store=store, principal_id=SCOPE.subject_id, scope=SCOPE)
+    fact = reader.get_task(SCOPE, task_id)
+    assert fact is not None and fact.dispatch_control == "unclaimed"
+    assert "task.reprioritize" in fact.supported_operations
+    assert ("task.update" in fact.supported_operations) is (not deferred)
+    before_read = _database_dump(store.database_path)
+    snapshot = store.list_task_authority_snapshots_page(SCOPE)[0][0]
+    assert snapshot.queue_control.operations == fact.supported_operations & {"task.update", "task.reprioritize"}
+    assert _database_dump(store.database_path) == before_read
+
+    assert store.claim_outbox("takeover", observed_at="2026-08-21T10:00:10Z") is not None
+    current = reader.get_task(SCOPE, task_id)
+    assert current is not None and current.dispatch_control == "taken_over"
+    assert {"task.update", "task.reprioritize"}.isdisjoint(current.supported_operations)
+    # The old immutable observation remains unchanged, but execution rereads
+    # the current transaction rather than accepting its displayed permission.
+    assert "task.reprioritize" in snapshot.queue_control.operations
+    command, authorization = _reprioritize(task_id, attempt_id, fact.event_head, "urgent",
+                                          command_id="stale-queue-read")
+    command = replace(command, scope=SCOPE, issued_at=read_now)
+    authorization = replace(authorization, scope=SCOPE, principal_id=SCOPE.subject_id, expires_at=EXPIRY)
+    executor = _Executor()
+    before_write = _task_authority_dump(store.database_path)
+    rejected = PersistentTaskCore(store, executor).execute(command, authorization, now="2026-08-21T10:00:11Z")
+    assert not rejected.ok and rejected.error.reason == "TASK_CONTROL_STATE_CONFLICT"
+    assert _task_authority_dump(store.database_path) == before_write
+    assert not executor.dispatches and not executor.cancels and not executor.adjustments
+    reopened = SqliteTaskStore(store.database_path)
+    assert not reopened.list_task_authority_snapshots_page(SCOPE)[0][0].queue_control.operations
+
+
 def test_reprioritize_pending_selected_attempt_is_atomic_replayable_and_reopens(
     tmp_path: Path,
 ) -> None:

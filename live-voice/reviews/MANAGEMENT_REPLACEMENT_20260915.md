@@ -862,3 +862,74 @@ equivalent capabilities or specifying a bounded native enhancement. No reduction
 in correctness, recovery, authorization or existing consumer behavior is implied
 by the user's request to adjust the goal. Further tiny cleanups would not resolve
 this feasibility gap and must not be presented as the requested delivery.
+
+### Active implementation: queued Task control authority
+
+Tier 2, paired boundary: SDK TaskStore update/reprioritize and atomic authority
+snapshot; Host StoreProductionTaskAuthorityReader and its real structured/Native
+consumers. Consolidate queued dispatch control in Store using its existing exact
+unbound-queue proof (also used by cancellation/reconciliation), remove Host's
+independent queue eligibility algorithm and the duplicated Store reprioritize
+predicate. Read projection is advisory; exact command replay, Attempt/event-head
+preconditions and write-transaction checks remain authoritative. Preserve legacy
+unselected update behavior. No wire/schema migration or new Task operation.
+Acceptance: real SQLite untouched/deferred/claimed/running/fenced cases, stale
+reads versus later writes, exact replay, reopen and zero forbidden effects;
+affected Host authority/intent checks and one independent paired review. This
+owns queued control, not all Task cancellation/recovery or overall integration.
+
+### Queued-control implementation and verification
+
+Implemented: `TaskQueueControl` is an immutable as-of read projection, not a new
+state machine or persistent table. Store `_queue_control` serves the update and
+reprioritize write transactions and the existing atomic authority page. It reuses
+`_is_exact_unbound_queue`, already used by cancellation/reconciliation. Host
+`StoreProductionTaskAuthorityReader` retains admission-binding validation and
+fingerprinting but no longer reconstructs queue eligibility. Task/Attempt/event
+preconditions, command replay, transaction writes and physical cleanup retain
+their existing owners. No generic manager or alternate executor was introduced.
+
+The independent reviewer found no confirmed legal-state or atomicity regression.
+The shared proof rejects zero-delivery rows with a reason/last_error: those rows
+were already invalid under `PersistentAdmissionRecord.__post_init__` and Store
+integrity verification. Legal creation starts at zero/NULL; deferred admission
+follows a claim and advances its count. Legacy unselected update remains valid;
+its raw Store admission is intentionally broader than selected-Executor UI
+advertisement. Neither cancellation nor recovery implementation changed.
+
+Paired-source commands use the Host `.venv/Scripts/python.exe`, explicit Host and
+SDK checkout PYTHONPATH, and `-o addopts= -o log_cli=false -q --tb=short`:
+
+- `test_task_admission.py`, `test_p3_production_intent_composition.py`,
+  `test_production_multi_task_resolver_trust.py`, `test_persistent_task_core.py`,
+  `-k 'admission or store_reader or reprioritize or predispatch_update or queue_read'`:
+  **149 passed, 380 deselected**.
+- The two intent composition/trust files, `-k 'not store_reader and not reprioritize'`:
+  **35 passed, 15 deselected**; overlap is not additive coverage.
+- Newly added `test_store_reader_queue_control_uses_same_snapshot_during_takeover`:
+  **1 passed, 15 deselected**. A concurrent writer claims the dispatch between
+  SELECTs; the first result stays wholly pre-claim, the next wholly post-claim.
+- Independent `test_task_admission.py`,
+  `-k 'host_queue_read_cannot_authorize_after_dispatch_claim or reprioritize_pending_selected_attempt_is_atomic_replayable_and_reopens'`:
+  **3 passed, 114 deselected**, overlapping Main.
+
+Two new cross-layer cases initially failed because the older admission fixture
+uses a legacy capability profile rejected by the production reader. They now
+use the existing canonical production fixture and pass. Tests prove stale
+displayed capabilities cannot change queue/Task state after takeover, and assert
+zero Executor calls; original tests cover successful update/reprioritize,
+closed defer, stale identity, replay, rollback, concurrency and reopening.
+No package/build configuration changed. These are current source-pair checks,
+not rebuilt-wheel, deployed, physical Agent/Provider/audio or full-suite evidence.
+
+[Exact accounting and production hashes](../evidence/MANAGEMENT_QUEUE_CONTROL_20260915.json):
+Voice +0/-0; Host +6/-35; SDK +69/-45; combined **+75/-80, net -5**.
+The small net reduction is reported directly: this is shared queue-control rule
+ownership, not the large management-body replacement requested overall. Cumulative
+production delta is +452/-1756, net -1304, including the earlier dormant frontend
+deletion. Broader Task/Work/Host convergence remains unfinished.
+
+SDK commit `e57563a308c8b55f27673e7e04e33de3f9254471`:
+`refactor(tasks): share durable queue control between reads and mutations`.
+The paired Host commit contains the consumer replacement, scoped tests and this
+evidence. Production hashes match the reviewed/tested working source.
