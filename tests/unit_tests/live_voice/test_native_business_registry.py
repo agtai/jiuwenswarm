@@ -386,11 +386,16 @@ async def test_native_completed_adjust_preserves_speech_and_exposes_final_saved_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("ack_before_done", [False, True])
-async def test_queried_results_retire_notifications_only_at_canonical_played_history(tmp_path, monkeypatch, ack_before_done):
+@pytest.mark.parametrize("atlas_enabled", [False, True])
+async def test_queried_results_retire_notifications_only_at_canonical_played_history(tmp_path, monkeypatch, ack_before_done, atlas_enabled):
     from tests.unit_tests.live_voice import test_product_composition_registry as f
     from tests.unit_tests.live_voice.test_native_work_runtime import admission, terminal
     env = await make_registry(tmp_path, monkeypatch)
     router = env.registry._native_business
+    if atlas_enabled:
+        async def atlas_context(_binding):
+            return {"history": [], "tasks": [], "works": [], "events": [], "capabilities": ["expense", "repurchase"]}
+        router._atlas_host = SimpleNamespace(context=atlas_context)
     route = env.registry._p2_routes[(env.binding.scope.session_id, env.binding.interaction_id)]
     history = f._HistoryWriter()
     route.activation_lease._runtime._history_writer = history

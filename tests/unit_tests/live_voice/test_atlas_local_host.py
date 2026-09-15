@@ -86,12 +86,12 @@ async def test_terminal_facts_and_explicit_ui_only_operations(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_opted_in_router_does_not_create_swarm_executor(tmp_path, monkeypatch):
+async def test_explicit_demo_does_not_create_swarm_executor(tmp_path, monkeypatch):
     from tests.unit_tests.live_voice.test_native_business_registry import make_registry, context, call
     env = await make_registry(tmp_path, monkeypatch)
     executions = []
     async def host_context(_binding):
-        return {"history": [], "tasks": [], "works": [], "events": []}
+        return {"history": [], "tasks": [], "works": [], "events": [], "capabilities": ["repurchase", "expense"]}
     async def host_execute(_binding, delegate):
         executions.append(delegate.request_text)
         return {"status": "dispatched", "task_id": "atlas:task:c", "receipt": {"state": "accepted"}}
@@ -99,7 +99,7 @@ async def test_opted_in_router_does_not_create_swarm_executor(tmp_path, monkeypa
     try:
         await context(env)
         # The registry test's public helper exercises native admission and journal.
-        result, _ = await call(env, "task.create", name="Atlas work", instruction="work")
+        result, _ = await call(env, "task.create", name="atlas:expense", instruction="Expense the Paris trip")
         assert result["status"] == "dispatched"
         assert executions
         assert env.manager.agent.executions == []

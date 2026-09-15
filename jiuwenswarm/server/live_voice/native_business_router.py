@@ -28,6 +28,7 @@ from .native_interaction_contract import NativeInteractionBinding
 from .native_interaction_runtime import NativeInteractionRuntimeError
 from .voice_task_bridge import UnifiedCommittedInputRoute
 from .atlas_local_host import AtlasLocalHost
+from .atlas_demo_routing import DEMO_TASK_NAMES, is_atlas_target, routes_to_atlas
 
 
 def _now():
@@ -103,20 +104,6 @@ class NativeBusinessRouter:
 
     @profiled("native.context_read", "route.binding")
     async def _read_context(self, route):
-        if self._atlas_host is not None:
-            await self._require_context_authority(route)
-            observed = await self._atlas_host.context(route.binding)
-            await self._require_context_authority(route)
-            scope, native = route.binding.scope, route.native_p3_authority
-            self.works()  # Reuse the existing heard-result ledger, not an executor.
-            self._task_events[scope] = observed["events"]
-            selection = self.contexts.select(scope=scope,
-                history=select_conversation_history(observed["history"]),
-                tasks=observed["tasks"], works=observed["works"],
-                capabilities=observed.get("capabilities"),
-                model={"model_identity": native.model_identity, "model_config_version": native.model_config_version})
-            self._context_read_sequence += 1
-            return selection, self._context_read_sequence
         with ProfileSpan("native.context_authorize"):
             authority = await asyncio.to_thread(
                 self.registry._p3_composition.prepare_production_intent_authority,
@@ -149,9 +136,27 @@ class NativeBusinessRouter:
             item.state.value in {"accepted", "running", "cancelling"} or not item.execution_settled,
             item.updated_at), reverse=True)
         works = [self._work_fact(snapshot) for snapshot in ordered[:32]]
+        capabilities = None
+        if self._atlas_host is not None:
+            # A missing local Demo must not take the native Agent offline.
+            try:
+                observed = await asyncio.wait_for(self._atlas_host.context(route.binding), timeout=2)
+            except Exception:
+                observed = {"history": [], "tasks": [], "works": [], "events": [], "capabilities": []}
+            await self._require_context_authority(route)
+            tasks += observed["tasks"]
+            works += observed["works"]
+            self._task_events[authority.scope] += observed["events"]
+            # Swarm persists this voice session's canonical heard timeline,
+            # including Demo speech. Atlas history has no timestamps and must
+            # never displace newer native turns; use it only before that exists.
+            if not select_conversation_history(history):
+                history = observed["history"]
+            capabilities = observed.get("capabilities", [])
         native = route.native_p3_authority
         selection = self.contexts.select(scope=authority.scope,
             history=select_conversation_history(history), tasks=tasks, works=works,
+            capabilities=capabilities,
             model={"model_identity": native.model_identity, "model_config_version": native.model_config_version})
         self._context_read_sequence += 1
         return selection, self._context_read_sequence
@@ -222,7 +227,7 @@ class NativeBusinessRouter:
                     correlation_id=route.binding.correlation_id, response_ref=None)
 
     def _record_task_origin(self, route, delegate, admission, result):
-        if self._atlas_host is not None:
+        if is_atlas_target(result.get("task_id")):
             return None  # Atlas IDs must never be written into Swarm Task discovery.
         if (result.get("status") != "dispatched" or not result.get("task_id")
             or delegate.business.operation not in {"task.create", "task.create_successor"}):
@@ -549,7 +554,20 @@ class NativeBusinessRouter:
                         facts = {"status": "rejected", "reason": invalid}
                     elif delegate.business.operation == "context.get":
                         facts = {"status": "observed"}
-                    elif self._atlas_host is not None:
+                    elif self._atlas_host is not None and delegate.business.operation in {"task.list", "work.list"}:
+                        fresh = (await self.context(route)).payload()
+                        key = "tasks" if delegate.business.operation == "task.list" else "works"
+                        facts = {"status": "observed", key: fresh[key]}
+                    elif routes_to_atlas(delegate.business):
+                        if self._atlas_host is None:
+                            raise NativeBusinessViolation("ATLAS_HOST_REQUIRED")
+                        if delegate.business.operation == "task.create" and DEMO_TASK_NAMES[delegate.business.name] not in selection.payload().get("capabilities", []):
+                            raise NativeBusinessViolation("ATLAS_DEMO_UNAVAILABLE")
+                        if delegate.business.operation == "task.create" and any(
+                            is_atlas_target(task.get("task_id")) and task.get("state") != "terminal"
+                            for task in selection.payload()["tasks"]
+                        ):
+                            raise NativeBusinessViolation("ATLAS_DEMO_BUSY")
                         await self._require_context_authority(route)
                         if delegate.business.operation in {"task.approve", "task.reject"}:
                             facts = await self._atlas_host.execute(route.binding, delegate, snapshot=selection.payload())
@@ -577,7 +595,7 @@ class NativeBusinessRouter:
                 # Save the creation association before any optional await. A
                 # reconnect can discover the true receipt even while refresh is
                 # pending. Recording is idempotent and also retried on replay.
-                if (self._atlas_host is None and result.get("status") == "dispatched" and result.get("task_id")
+                if (not is_atlas_target(result.get("task_id")) and result.get("status") == "dispatched" and result.get("task_id")
                     and delegate.business.operation in {"task.create", "task.create_successor"}):
                     result["native_origin"] = {
                         "scope_sha256": hashlib.sha256(canonical_json_bytes(route.binding.scope.to_dict())).hexdigest(),
@@ -620,7 +638,7 @@ class NativeBusinessRouter:
             result_route = UnifiedCommittedInputRoute.TASK if delegate.business.operation.startswith("task.") else UnifiedCommittedInputRoute.DIALOGUE
             prepared = await owner.prepare_delegate_result(admission, canonical_text=text, route=result_route, allow_interrupted=True)
             task_id = result.get("task_id")
-            if self._atlas_host is None and type(task_id) is str:
+            if type(task_id) is str and not is_atlas_target(task_id):
                 async with self.registry._lock:
                     if (self.registry._p2_routes.get((route.binding.session_id, route.binding.interaction_id)) is route
                         and not route.native_closed and not self.registry._stopped
@@ -680,7 +698,7 @@ class NativeBusinessRouter:
         events = set()
         for text in receipts:
             receipt = json.loads(text)
-            if self._atlas_host is not None:
+            if "host_notifications" in receipt:
                 for event in receipt.get("host_notifications", ()):
                     if event in self._task_events.get(scope, ()) and not self._work_journal.presented(event["event_id"], scope):
                         events.add(event["event_id"])

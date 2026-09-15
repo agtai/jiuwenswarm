@@ -93,7 +93,7 @@ def _property(field: str, operation: str) -> dict[str, object]:
             "description": "The user's current request preserving intent and requirements, trimmed and control-free, at most 16384 UTF-8 bytes. Does not replace instruction or adjustment.",
         }
     meaning = {
-        "name": "A concise name for the new background Task",
+        "name": "A concise name for an ordinary native Task. Only when invoking an advertised Atlas demo, set exactly atlas:repurchase for coffee repurchase or atlas:expense for Paris reimbursement. Never use these reserved names for weather, itineraries or other native tasks",
         "instruction": "The complete analysis or artifact requirements, retaining every relevant user constraint. For derived artifacts, specify the source input, all requested transformations, exact output filename and which originals must remain unchanged",
         "adjustment": "The user's requested change to the existing background Task",
     }[field]
