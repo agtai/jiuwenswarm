@@ -1906,6 +1906,17 @@ class P3AuthenticatedComposition:
     ) -> ResultEnvelope:
         """Revalidate one prepared product query before entering Task Core."""
 
+        return self._query_product(query, now=now)[0]
+
+    def query_status_authority(self, query: ProductP3AuthorizedQuery, *, now: str | None = None):
+        """Return the status and product fact from the same native read snapshot."""
+        return self._query_product(query, now=now, include_status_authority=True)
+
+    def _query_product(
+        self, query: ProductP3AuthorizedQuery, *, now: str | None = None,
+        include_status_authority: bool = False,
+    ):
+
         if not self._accepting or not isinstance(query, ProductP3AuthorizedQuery):
             raise FormalTaskViolation(
                 "FORMAL_TASK_ROUTE_DISABLED",
@@ -1959,18 +1970,31 @@ class P3AuthenticatedComposition:
                 "formal task operation is unsupported",
                 ErrorCode.UNSUPPORTED,
             )
-        result = self._core.query(
-            query.envelope,
-            query.authorization,
-            now=observed_at,
-        )
+        status_fact = None
+        if include_status_authority:
+            result, snapshots = self._core.query_status_authority(
+                query.envelope, query.authorization, now=observed_at,
+            )
+            if result.ok:
+                reader = StoreProductionTaskAuthorityReader(
+                    store=self._core.store, principal_id=canonical.principal_id, scope=canonical.scope,
+                )
+                try:
+                    facts = reader.project_visible_tasks(canonical.scope, snapshots)
+                    status_fact = next((fact for fact in facts.tasks if fact.task_id == target_task_id), None)
+                except FormalTaskViolation as error:
+                    # Keep the existing product projection error reason; the
+                    # carrier must reject it rather than publish partial facts.
+                    status_fact = error
+        else:
+            result = self._core.query(query.envelope, query.authorization, now=observed_at)
         if operation == "task.list":
             self._require_list_result_contexts(
                 authority=current,
                 result=result,
                 now=observed_at,
             )
-        return result
+        return result, status_fact
 
     def create_product_subscription(
         self,

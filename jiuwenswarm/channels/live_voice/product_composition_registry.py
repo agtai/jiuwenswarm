@@ -13129,45 +13129,12 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
                         operation="task.status",
                         session_id=routed_session,
                     )
-                    for read_attempt in range(3):
-                        if read_attempt:
-                            await activate_query(ProductCompositionContext(routed_session, correlation_id))
-                            refreshed = getattr(holder.get("result"), "result", None)
-                            if refreshed is None or not refreshed.ok:
-                                raise FormalTaskViolation("PRODUCT_P3_QUERY_FAILED", "Task status reread failed", ErrorCode.STALE)
-                            envelope = refreshed
-                            payload = envelope.to_dict()
-                            result_payload = payload.get("result")
-                            if not isinstance(result_payload, dict):
-                                raise FormalTaskViolation("PRODUCTION_TASK_AUTHORITY_PROJECTION_MISMATCH", "Task status reread is malformed", ErrorCode.PROTOCOL_VIOLATION)
-                        retry_admission = await self._p3_composition.read_product_status_retry_admission(
-                            bearer_token=params.get("auth_token"), session_id=routed_session, task_id=str(task_id or ""),
-                        )
-                        authority_fact = await asyncio.to_thread(
-                            production_authority.reader.task_status, production_authority.scope, str(task_id or ""),
-                        )
-                        raw_task = result_payload.get("task")
-                        raw_attempt = result_payload.get("attempt")
-                        if (type(authority_fact) is not AuthenticatedTaskFact
-                            or not isinstance(raw_task, Mapping)
-                            or not isinstance(raw_attempt, Mapping)
-                            or raw_attempt.get("task_id") != task_id
-                            or raw_attempt.get("attempt_id") != raw_task.get("attempt_id")
-                            or raw_task.get("scope") != production_authority.scope.to_dict()
-                            or raw_task.get("task_id") != task_id
-                            or authority_fact.task_id != task_id
-                            or type(raw_task.get("event_head")) is not int
-                            or raw_task["event_head"] < 0
-                            or raw_task["event_head"] >= authority_fact.event_head):
-                            # Stable snapshots still pass every strict projection
-                            # check below; mismatches never gain retry authority.
-                            break
-                        logger.info("[LiveVoiceProduct] Task status snapshot advanced; "
-                            "read_attempt=%s raw_head=%s authority_head=%s", read_attempt + 1,
-                            raw_task["event_head"], authority_fact.event_head)
-                        if read_attempt == 2:
-                            raise FormalTaskViolation("PRODUCTION_TASK_AUTHORITY_CHANGED",
-                                "Task advanced throughout the bounded status read", ErrorCode.STALE)
+                    retry_admission = await self._p3_composition.read_product_status_retry_admission(
+                        bearer_token=params.get("auth_token"), session_id=routed_session, task_id=str(task_id or ""),
+                    )
+                    authority_fact = getattr(holder.get("result"), "status_authority", None)
+                    if isinstance(authority_fact, FormalTaskViolation):
+                        raise authority_fact
                 except FormalTaskViolation as exc:
                     return _error_result(
                         request_id,

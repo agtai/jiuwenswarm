@@ -311,3 +311,86 @@ reference the prior full manifest and identify its one changed file.
 These traces narrow the next substantive Host work to coherent status reads and
 Work admission ownership. The full management objective stays active; the
 shadowed-method deletion is only verified cleanup and does not close those gaps.
+
+## Coherent status-query boundary (in progress)
+
+Tier 3 internal cross-repository read seam; no wire/schema, grant or persisted
+state change. Intended behavior: the raw status and Host capability fact derive
+from the existing Store list_task_authority_snapshots_page transaction. Core
+retains exact query authorization and payload checks. Host uses the snapshots
+only in-process to build its existing fact; other Task snapshots never enter the
+response. Remove Registry's separate fact read and bounded status reread loop.
+Keep retry reauthorization, exact attempt matching, supported-operation grants,
+projection validation and diagnostic non-authority. Existing ordinary Core.query
+and generic adapter query owners retain their entrypoint. No new writes, Agent
+calls, migrations, cancellation or audio behavior.
+
+Owned surfaces: Core status read, Host production authority projection/query
+owner, product adapter result carrier and Registry status assembly. Acceptance:
+real SQLite snapshot consistency during a competing mutation; exact wrong-scope,
+stale/invalid grant, malformed query, missing task and capacity rejection with
+zero effects; Host status projection/authorization tests and installed pair.
+Closure requires removing the actual redundant production read path, not only
+adding a currently unused API. Work admission is a subsequent boundary.
+
+### Status-query implementation and checks
+
+Core.query_status_authority uses the existing list_task_authority_snapshots_page
+transaction; ordinary Core.query shares the same authorization/result code. Host
+StoreProductionTaskAuthorityReader projects those inputs using its existing
+validation algorithm. ProductP3TextAdapter carries only the requested in-process
+fact (or typed projection error). Registry no longer separately reads task_status
+or runs a three-attempt read loop. Its exact projection checks, retry eligibility
+and per-operation grants remain. Invalid supplied pairs fail closed once; the
+real database race now succeeds with one coherent snapshot.
+
+Actual production change: Voice +6/-39=-33; Host +56/-15=+41; SDK +51/-2=+49;
+total +113/-56=+57. This batch adds necessary shared/native adaptation rather
+than claiming a net deletion. Cumulative goal +254/-384=-130. No relocation, new
+Store, parallel lifecycle, schema or dependency was introduced.
+
+- Host authority reader + generic product adapter: 41 passed, including actual
+  SQLite completion between Task-row and event/result reads. Status payload and
+  Host fact retain identical state/head/Attempt; next read observes completion.
+- Host authenticated composition status/query/read-cancel selection: 9 passed,
+  162 deselected. Real Store and principal restrictions remain effective.
+- Final Registry status/query + real Host registry permission scenario: 13 passed,
+  380 deselected. Missing/malformed facts, mismatched scope/Attempt/head and typed
+  projection failure remain closed with no Agent, push or project effects.
+- SDK application boundary: 6 passed. Status equals ordinary query on stable
+  data; invalid/expired/wrong-scope/wrong-target grants, malformed payload, wrong
+  capability, missing task and capacity reject with no snapshots or effects.
+  Two-task internal metadata never discloses the other task in the wire result.
+  Existing durable admission/replay/reopen assertions remain.
+- Scoped Ruff and both diff whitespace checks pass.
+
+A broader status/query selection found eight existing natural-language routing
+failures (implicit adjustment, result context, status routing and pending intent
+recovery). All eight reproduce with the previous installed production pair,
+including the same unavailable-intent/misrouting results. Three additional old-pair
+failures are expected because the current tests require this new owner seam;
+they are not counted as pre-existing failures. Initial baseline collection hit
+an unchanged SDK SyntaxWarning promoted by pytest; ignoring only SyntaxWarning
+allowed the comparison. This does not establish a green full product suite.
+Those routing failures remain excluded, unresolved evidence.
+
+Cold complete-diff review checked authorization-before-read, bounded complete
+scope metadata, target-only wire output, projection exception propagation,
+legacy query-owner compatibility and unchanged retry authority. The optional
+metadata seam is used by actual Host production status; generic adapter owners
+retain query behavior, but a Registry status owner must provide a coherent fact
+or fail closed. Independent review tooling remains unavailable; this is the
+recorded non-independent substitute and independent evidence stays PARTIAL.
+
+[Installed status pair](../evidence/MANAGEMENT_STATUS_INSTALLED_20260915.json):
+all 1016 Host/2409 SDK installed Python files match tracked snapshots, both owner
+imports resolve to the isolated target and six SDK SQLite/application checks pass.
+Third-party dependencies reused; no deployment or resolution claim. The installed
+checks overlap source checks. SDK commit `b292d2eb5663bdc6d3181a0c840d5ac8933be129`
+(`refactor(tasks): share atomic status authority reads`) requires its companion
+Host adapter/Registry changes for the new internal status path.
+
+Remaining: ordinary Work admission/context assembly in Voice, status operation
+projection ownership, retained Task/Work management and the wider incomplete
+objective. Existing barge fence, protected project artifacts, no-effective-change
+failure, Work physical cleanup and deferred audio policy remain untouched.

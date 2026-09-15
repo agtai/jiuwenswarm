@@ -1,0 +1,148 @@
+{
+  "totals": {
+    "voice": {
+      "added_lines": 30,
+      "removed_lines": 109,
+      "net_lines": -79
+    },
+    "jiuwenswarm": {
+      "added_lines": 72,
+      "removed_lines": 109,
+      "net_lines": -37
+    },
+    "agentcore": {
+      "added_lines": 152,
+      "removed_lines": 166,
+      "net_lines": -14
+    }
+  },
+  "batch_totals": {
+    "voice": {
+      "added_lines": 6,
+      "removed_lines": 39,
+      "net_lines": -33
+    },
+    "jiuwenswarm": {
+      "added_lines": 56,
+      "removed_lines": 15,
+      "net_lines": 41
+    },
+    "agentcore": {
+      "added_lines": 51,
+      "removed_lines": 2,
+      "net_lines": 49
+    }
+  },
+  "files": [
+    {
+      "path": "jiuwenswarm/channels/live_voice/product_composition_registry.py",
+      "owner": "voice",
+      "new_file": false,
+      "current_lines": 14958,
+      "baseline_lines": 15037,
+      "added_lines": 30,
+      "removed_lines": 109,
+      "net_lines": -79,
+      "sha256": "81abcfc32601d9a647fa7ca4771fcddd9c50cbfdee01acb2f17fd8f177ce78f7"
+    },
+    {
+      "path": "jiuwenswarm/common/schema/native_task_source.py",
+      "owner": "jiuwenswarm",
+      "new_file": false,
+      "current_lines": 161,
+      "baseline_lines": 184,
+      "added_lines": 0,
+      "removed_lines": 23,
+      "net_lines": -23,
+      "sha256": "a70f6ae78b9a7326aebfda6457c31011e5058bceef50805e0975e7a768530e60"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/agent_adapter/interface.py",
+      "owner": "jiuwenswarm",
+      "new_file": false,
+      "current_lines": 4855,
+      "baseline_lines": 4891,
+      "added_lines": 0,
+      "removed_lines": 36,
+      "net_lines": -36,
+      "sha256": "d8510b8c18d7436b1493f874aa374a91b540905a00d22a81f746ff48290e3f2c"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/formal_tasks/p3_authenticated_composition.py",
+      "owner": "jiuwenswarm",
+      "new_file": false,
+      "current_lines": 5302,
+      "baseline_lines": 5312,
+      "added_lines": 31,
+      "removed_lines": 41,
+      "net_lines": -10,
+      "sha256": "b7cdccbfb65f6a63115ad1e6b334abc2c26c8eab3f3753501ede8897e2b3b8e6"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/formal_tasks/p3_production_intent_composition.py",
+      "owner": "jiuwenswarm",
+      "new_file": false,
+      "current_lines": 825,
+      "baseline_lines": 813,
+      "added_lines": 13,
+      "removed_lines": 1,
+      "net_lines": 12,
+      "sha256": "e0ef8022bc4087d58e8d9919b25896906307509dbb5446d9fc3b56f3c3ec5d1f"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/formal_tasks/product_p3_text_adapter.py",
+      "owner": "jiuwenswarm",
+      "new_file": false,
+      "current_lines": 1212,
+      "baseline_lines": 1207,
+      "added_lines": 13,
+      "removed_lines": 8,
+      "net_lines": 5,
+      "sha256": "cad671f6816dd7b84333cdfd7228b23b065a0ca0c10159a218674a29878a936e"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/formal_tasks/task_control_presentation.py",
+      "owner": "jiuwenswarm",
+      "new_file": false,
+      "current_lines": 189,
+      "baseline_lines": 174,
+      "added_lines": 15,
+      "removed_lines": 0,
+      "net_lines": 15,
+      "sha256": "e60f923628de5c4e8b1a5161bfe8db451d724263886d9a2096d62d1b99fcd171"
+    },
+    {
+      "path": "openjiuwen/core/application/tasks/persistent_task_core.py",
+      "owner": "agentcore",
+      "new_file": false,
+      "current_lines": 1584,
+      "baseline_lines": 1562,
+      "added_lines": 134,
+      "removed_lines": 112,
+      "net_lines": 22,
+      "sha256": "1ea3024aa329e5d3a12f0688fa7ae6902dfc58e08a9dcfeba41a41bc89048839"
+    },
+    {
+      "path": "openjiuwen/core/application/tasks/project_executor.py",
+      "owner": "agentcore",
+      "new_file": false,
+      "current_lines": 6340,
+      "baseline_lines": 6375,
+      "added_lines": 4,
+      "removed_lines": 39,
+      "net_lines": -35,
+      "sha256": "f58de19fc8de5a2b07b8eede40809792f3d7a6a2660783b6b52d9334383a0b40"
+    },
+    {
+      "path": "openjiuwen/core/application/tasks/work_runtime.py",
+      "owner": "agentcore",
+      "new_file": false,
+      "current_lines": 954,
+      "baseline_lines": 955,
+      "added_lines": 14,
+      "removed_lines": 15,
+      "net_lines": -1,
+      "sha256": "09a3848d8ac239ff4d8b86f49f6753eae838f5907b846be2231df2bc651deb63"
+    }
+  ]
+}

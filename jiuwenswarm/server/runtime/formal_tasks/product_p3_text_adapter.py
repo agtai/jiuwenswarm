@@ -155,6 +155,8 @@ class ProductP3QueryResult:
     ok: bool
     reason_id: ProductP3TextReason
     result: ResultEnvelope | None
+    # In-process Host fact or projection violation; never serialized to callers.
+    status_authority: object | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -763,15 +765,17 @@ class ProductP3TextAdapter:
             )
             if not isinstance(invocation.envelope, QueryEnvelope):
                 raise TypeError("query policy emitted a command")
-            result = await asyncio.to_thread(
-                self._query_owner.query,
-                ProductP3AuthorizedQuery(
-                    authority=context,
-                    envelope=invocation.envelope,
-                    authorization=invocation.authorization,
-                ),
-                now=now,
+            authorized = ProductP3AuthorizedQuery(
+                authority=context,
+                envelope=invocation.envelope,
+                authorization=invocation.authorization,
             )
+            status_reader = getattr(self._query_owner, "query_status_authority", None)
+            status_authority = None
+            if request.operation == "task.status" and callable(status_reader):
+                result, status_authority = await asyncio.to_thread(status_reader, authorized, now=now)
+            else:
+                result = await asyncio.to_thread(self._query_owner.query, authorized, now=now)
             if not isinstance(result, ResultEnvelope):
                 raise TypeError("query owner returned a non-result")
             result = ResultEnvelope.from_dict(
@@ -789,6 +793,7 @@ class ProductP3TextAdapter:
                 else ProductP3TextReason.QUERY_REJECTED
             ),
             result,
+            status_authority,
         )
 
     async def activate_progress(self, request: object) -> ProductP3ProgressActivation:

@@ -111,7 +111,9 @@ deployment; no private configuration or user-project edits. Preserve the
 15-second prepared-response timeout and all existing voice/authorization policy.
 New product semantics, security/authority changes and irreversible migrations
 still require a concrete user decision. Broader management replacement remains
-active after these initial batches.
+active. The status-query batch now shares the existing Store authority snapshot
+between Core status and Host product facts, deleting Registry reread orchestration.
+Work admission ownership and broader Voice business management remain unfinished.
 
 ### Previous session repair evidence (2026-09-14)
 

@@ -545,7 +545,19 @@ class StoreProductionTaskAuthorityReader:
 
     def list_visible_tasks(self, scope: ScopeRef) -> TaskAuthorityRead:
         self._require_scope(scope)
-        snapshots = self._read_complete_page()
+        return self.project_visible_tasks(scope, self._read_complete_page())
+
+    def project_visible_tasks(
+        self, scope: ScopeRef, snapshots: tuple[TaskAuthorityReadSnapshot, ...],
+    ) -> TaskAuthorityRead:
+        """Project the same Store snapshot used by an authorized status read."""
+        self._require_scope(scope)
+        if len(snapshots) > self._capacity:
+            raise _reader_violation(
+                "PRODUCTION_TASK_AUTHORITY_CAPACITY_EXCEEDED",
+                "the complete visible Task set exceeds its closed authority bound",
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+            )
         records = tuple((item.task, item.attempt, item.admission) for item in snapshots)
         heads: dict[str, object] = {}
         result_digests: dict[str, str | None] = {}

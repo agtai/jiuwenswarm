@@ -1,0 +1,19 @@
+{
+  "isolated_target": "C:\\Users\\admin\\AppData\\Local\\Temp\\management-status-q0hgydmb",
+  "matched_installed_python_files": {
+    "jiuwenswarm": 1016,
+    "openjiuwen": 2409
+  },
+  "test_exit_code": 0,
+  "wheels": [
+    {
+      "name": "openjiuwen-0.1.17+livevoice.9-py3-none-any.whl",
+      "sha256": "d3c83d05bb3f907a3b92c4a3ecac2f289603653d0d6cb6d48a5196f0d959dae3"
+    },
+    {
+      "name": "workswarm-0.2.5b1-py3-none-any.whl",
+      "sha256": "d7931a181bfa0b0c4a1969a4b78e6b239be7a165713f09dedb756e70ae218cdf"
+    }
+  ],
+  "limits": "Tracked snapshots, isolated package imports, existing third-party dependencies; no deployment or dependency resolution."
+}

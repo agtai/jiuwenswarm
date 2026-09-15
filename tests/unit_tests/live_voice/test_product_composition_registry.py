@@ -936,6 +936,11 @@ class _P3Composition(P3AuthenticatedComposition):
             observed_at=now or NOW,
         )
 
+    def query_status_authority(self, query, *, now=None):
+        return self.query(query, now=now), self._production_reader.task_status(
+            query.envelope.scope, query.envelope.target_ref.id,
+        )
+
     def prepare_production_intent_authority(
         self,
         *,
@@ -8834,7 +8839,7 @@ async def test_p3_status_retry_admission_failure_is_stable_and_fail_closed(
             "session_id": "session-product",
         }
     ]
-    assert p3.production_reader_calls == []
+    assert p3.production_reader_calls == [("task.status", "task-1")]
     assert manager.get_calls == []
     assert list(tmp_path.iterdir()) == []
 
@@ -18383,7 +18388,7 @@ async def test_native_interrupt_after_task_admission_preserves_discovery_without
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scenario", ["advance", "continuous", "same_version_corrupt", "foreign", "foreign_attempt", "negative_head"])
+@pytest.mark.parametrize("scenario", ["advance", "continuous", "same_version_corrupt", "foreign", "foreign_attempt", "negative_head", "projection_error", "missing_fact"])
 async def test_p3_status_reads_a_coherent_task_version_without_relaxing_projection(tmp_path, monkeypatch, scenario):
     registry, p3, manager, pushed = _registry(tmp_path)
     original_query = p3.query
@@ -18405,17 +18410,21 @@ async def test_p3_status_reads_a_coherent_task_version_without_relaxing_projecti
             raw["event_head"] = 2
         return ResultEnvelope.from_dict(data, owner=request.envelope)
     monkeypatch.setattr(p3, "query", query)
+    if scenario in {"projection_error", "missing_fact"}:
+        def status_owner(request, *, now=None):
+            error = (FormalTaskViolation("PRODUCTION_TASK_AUTHORITY_PROJECTION_MISMATCH",
+                     "invalid owner projection", ErrorCode.PROTOCOL_VIOLATION)
+                     if scenario == "projection_error" else None)
+            return original_query(request, now=now), error
+        monkeypatch.setattr(p3, "query_status_authority", status_owner)
+
     result = await registry.handle_p3_query(operation="task.status",
         params={"auth_token": "trusted-token", "session_id": "session-product", "task_id": "task-1"},
         request_id="request-coherent-status", session_id="session-product")
-    if scenario == "advance":
-        assert result.ok is True
-        assert result.payload["result"]["task"]["event_head"] == 3
-        assert len(p3.query_calls) == len(p3.retry_admission_calls) == len(p3.production_reader_calls) == 2
-    else:
-        assert result.ok is False
-        expected = "PRODUCTION_TASK_AUTHORITY_CHANGED" if scenario == "continuous" else "PRODUCTION_TASK_AUTHORITY_PROJECTION_MISMATCH"
-        assert result.payload["error"]["reason"] == expected
-        assert len(p3.query_calls) == (3 if scenario == "continuous" else 1)
+    # A supplied status/fact pair must already be coherent. Registry cannot
+    # repair an invalid owner result by running another business read lifecycle.
+    assert result.ok is False
+    assert result.payload["error"]["reason"] == "PRODUCTION_TASK_AUTHORITY_PROJECTION_MISMATCH"
+    assert len(p3.query_calls) == 1
     assert manager.get_calls == [] and pushed == []
     assert list(tmp_path.iterdir()) == []

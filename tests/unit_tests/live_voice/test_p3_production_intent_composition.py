@@ -621,11 +621,26 @@ def test_store_reader_atomic_snapshot_excludes_concurrent_completion(
         scope=SCOPE,
     )
 
-    authority = reader.list_visible_tasks(SCOPE)
+    grant = TaskAuthorizationGrant(
+        SCOPE.subject_id, SCOPE, "task.status", None, task_id,
+        frozenset({"task.status"}), None, False, EXPIRY,
+    )
+    invocation = FormalTaskPolicyAdapter().map(FormalTaskPolicyInput(
+        state=InputCommitState.COMMITTED, source="structured", operation="task.status",
+        request_id="atomic-status", issued_at=NOW, scope=SCOPE, correlation_id="atomic-status",
+        authorization=grant, task_id=task_id,
+    ))
+    core = PersistentTaskCore(store, object())
+    result, snapshots = core.query_status_authority(invocation.envelope, grant, now=NOW)
+    assert result.ok
+    authority = reader.project_visible_tasks(SCOPE, snapshots)
     fact = next(item for item in authority.tasks if item.task_id == task_id)
 
     assert completed
     assert fact.state.value == "running"
+    assert result.result["task"]["state"] == fact.state.value
+    assert result.result["task"]["event_head"] == fact.event_head
+    assert result.result["attempt"]["attempt_id"] == fact.attempt_id
     assert fact.result_digest is None and fact.outcome is None
     fact = reader.get_task(SCOPE, task_id)
     assert fact is not None
