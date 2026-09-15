@@ -1,0 +1,124 @@
+{
+  "previous_manifest": "MANAGEMENT_ROOT_SCHEDULING_20260915.json",
+  "host_batch_baseline": "cb71a64a126f72de3a8cae2e110e64ad9cbcf919",
+  "sdk_unchanged": "3ae2047817621e7d80bd2c064afa16b1b1868330",
+  "batch_totals": {
+    "voice": {
+      "added_lines": 0,
+      "removed_lines": 1003,
+      "net_lines": -1003
+    },
+    "jiuwenswarm": {
+      "added_lines": 0,
+      "removed_lines": 0,
+      "net_lines": 0
+    }
+  },
+  "cumulative_totals": {
+    "voice": {
+      "added_lines": 54,
+      "removed_lines": 1173,
+      "net_lines": -1119
+    },
+    "jiuwenswarm": {
+      "added_lines": 142,
+      "removed_lines": 176,
+      "net_lines": -34
+    },
+    "agentcore": {
+      "added_lines": 173,
+      "removed_lines": 185,
+      "net_lines": -12
+    }
+  },
+  "current_official_totals": {
+    "voice": {
+      "current_lines": 111021,
+      "baseline_lines": 0,
+      "added_lines": 111021,
+      "removed_lines": 0,
+      "net_lines": 111021,
+      "new_file_lines": 111021,
+      "current_files": 102
+    },
+    "jiuwenswarm": {
+      "current_lines": 150539,
+      "baseline_lines": 102515,
+      "added_lines": 48945,
+      "removed_lines": 921,
+      "net_lines": 48024,
+      "new_file_lines": 39849,
+      "current_files": 119
+    },
+    "agentcore": {
+      "current_lines": 36626,
+      "baseline_lines": 2306,
+      "added_lines": 34336,
+      "removed_lines": 16,
+      "net_lines": 34320,
+      "new_file_lines": 34173,
+      "current_files": 30
+    }
+  },
+  "current_module_totals": {
+    "M7+M9": {
+      "current_lines": 51050,
+      "new_file_lines": 12968,
+      "net_lines": 17030
+    },
+    "M4+M5": {
+      "current_lines": 37992,
+      "new_file_lines": 37992,
+      "net_lines": 37992
+    },
+    "M3": {
+      "current_lines": 14427,
+      "new_file_lines": 14427,
+      "net_lines": 14427
+    },
+    "shared": {
+      "current_lines": 47114,
+      "new_file_lines": 19469,
+      "net_lines": 21345
+    },
+    "M1+M2": {
+      "current_lines": 69836,
+      "new_file_lines": 44134,
+      "net_lines": 44992
+    },
+    "G": {
+      "current_lines": 38391,
+      "new_file_lines": 18173,
+      "net_lines": 19556
+    },
+    "M6+M8": {
+      "current_lines": 39376,
+      "new_file_lines": 37880,
+      "net_lines": 38023
+    }
+  },
+  "changed_files": [
+    {
+      "path": "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/formalTaskIntentRoute.ts",
+      "owner": "voice",
+      "new_file": false,
+      "current_lines": 0,
+      "baseline_lines": 995,
+      "added_lines": 0,
+      "removed_lines": 995,
+      "net_lines": -995,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/productP3TaskTargetJournal.ts",
+      "owner": "voice",
+      "new_file": false,
+      "current_lines": 140,
+      "baseline_lines": 148,
+      "added_lines": 0,
+      "removed_lines": 8,
+      "net_lines": -8,
+      "sha256": "0cdec8b21faf511ac87f8d1b023c8506ee194ab8bf97fef45395c5b2473fcd3b"
+    }
+  ]
+}

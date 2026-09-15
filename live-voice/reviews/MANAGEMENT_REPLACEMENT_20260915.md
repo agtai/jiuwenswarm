@@ -581,3 +581,62 @@ still own durable business state and executor cleanup still owns physical effect
 Those distinctions remain the concrete retention gaps documented above.
 
 SDK implementation commit: `3ae204781` (refactor(tasks): centralize native root scheduling ownership).
+
+## Dormant frontend intent management removal
+
+Tier 0 unreachable production-code deletion. Whole source/repository caller
+inspection finds no production import of formalTaskIntentRoute.ts or construction
+of ProductFormalTaskIntentOwner; only its own tests and explicit test compilation
+entry remain. LiveVoiceIntegratedRoutePanel.test already prohibits that owner.
+The active panel submits through ProductUnifiedCommittedInputOwner; ChatPanel's
+FormalTaskSessionProvider owns FormalP3TaskExperienceOwner. Delete the obsolete
+995-line owner (confirmation state, retained RPC, sessionStorage CAS checkpoint,
+restore/reconnect status polling) and its 20 obsolete-owner scenarios. Delete the
+unused target-journal nullable reader; actual callers use inspect's absent/valid/
+invalid union. Keep the active target journal and its historical compatibility
+barrier. No data deletion/migration, no new dispatch/confirmation policy.
+
+Old scenario mapping before deletion: exact same request replay, unresolved input
+fencing and rebuilt-owner replay belong to unifiedCommittedInputOwner tests;
+foreign binding, unsupported/flag-off zero effects, unknown command outcome and
+scope/disconnect/reconnect no replay belong to formalP3TaskExperience tests;
+disconnected late responses are covered by the active Task owner suite. The old
+transport-error redaction assertion targets its retired UI snapshot; the unified
+input owner exposes only pending/replay state, not that snapshot. This deletion
+does not claim general frontend error-redaction coverage. Old later-utterance confirmation,
+16-key v2 sessionStorage bucket/CAS, checkpoint-before-network and post-create
+checkpoint transitions are no longer reachable product mechanisms, so their
+private implementation tests are retired rather than preserving a test-only
+production manager. Active target-journal malformed/scope/storage tests remain
+and directly assert the richer inspection result. Verify current integrated web
+suite and actual TS/Panel bundle compilation; no physical audio/product claim.
+
+Implemented: deleted formalTaskIntentRoute.ts (995 production lines) and its
+nullable target-journal wrapper (8). No new production code. Removed the obsolete
+20-test owner suite and its test compiler/runner entry; retained current Task,
+unified input and mounted Panel suites. The target-journal tests now use inspect
+rather than preserving a dead public wrapper solely for tests. Whole source and
+script search leaves only the existing negative Panel assertion against the old
+owner. Historical evidence manifests intentionally retain original source paths.
+
+Verification: package test:live-voice-integrated-web (existing script executed
+with bundled Node and local compiler/bundler): **700 passed, 1 skipped, 0 failed**
+(701 tests, 70.43 seconds). Strict TS compiler, dedicated media and actual Panel
+bundles succeeded. This is automated browser/DOM evidence, not physical Provider
+or human acceptance. The deleted module was already excluded from the reachable
+Panel bundle; this changes retained production implementation, not running UI
+behavior. No Python/SDK runtime or packaging seam changed. Complete scoped cold
+review and whitespace checks pass. Tier 0 does not require an independent review;
+previous higher-tier independent evidence remains PARTIAL.
+
+Count: Voice +0/-1003, Host/SDK unchanged. Session cumulative Voice +54/-1173,
+Host +142/-176, SDK +173/-185; combined +369/-1534 = -1165. Current compatible
+baseline net additions 111021 + 48024 + 34320 = 193365. Production deletion does
+not include 883 removed test lines or package/docs changes. Compact accounting:
+`../evidence/MANAGEMENT_FRONTEND_RETIREMENT_20260915.json`.
+The active target journal's binding/integrity barrier, Task control leaf and
+current Host result/progress ownership are retained because inspected callers
+still use them. Backend confirmation continuations also remain: unlike the dead
+browser owner, they carry real one-shot durable authorization and semantic
+continuation consumers. Their replacement requires preserving those consumers,
+not simply deleting pending state by analogy.

@@ -138,11 +138,3 @@ export function inspectProductP3TaskTarget(
     return Object.freeze({ status: 'invalid', record: null });
   }
 }
-
-export function readProductP3TaskTarget(
-  input: Readonly<{ session_id: string }>,
-  storage?: ProductP3TaskTargetJournalStore,
-): ProductP3TaskTargetJournalRecord | null {
-  const inspected = inspectProductP3TaskTarget(input, storage);
-  return inspected.status === 'valid' ? inspected.record : null;
-}
