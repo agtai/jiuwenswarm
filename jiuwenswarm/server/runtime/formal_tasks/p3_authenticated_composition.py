@@ -2432,40 +2432,6 @@ class P3AuthenticatedComposition:
                 ErrorCode.CAPABILITY_UNAVAILABLE,
             )
 
-    @staticmethod
-    def _resolved_create_spec(
-        command: CommandEnvelope,
-        context: ResolvedTaskContext,
-    ) -> FormalTaskSpec:
-        """Close the exact Task spec before selecting an Executor profile."""
-
-        if command.command_type != "task.create":
-            raise FormalTaskViolation(
-                "INVALID_TASK_CREATE_INTENT",
-                "Executor selection requires an exact task.create command",
-                ErrorCode.PROTOCOL_VIOLATION,
-            )
-        payload = command.payload
-        attributes = payload.get("attributes")
-        if type(attributes) is not dict:
-            raise FormalTaskViolation(
-                "INVALID_FORMAL_TASK_ATTRIBUTES",
-                "task attributes must be a string map",
-                ErrorCode.INVALID_ARGUMENT,
-            )
-        from jiuwenswarm.common.schema.native_task_source import source_from_payload
-        return FormalTaskSpec(
-            name=payload.get("name"),
-            instruction=payload.get("instruction"),
-            origin=command.origin,
-            context=context,
-            executor_id=payload.get("executor_id"),
-            required_capabilities=tuple(command.required_capabilities),
-            side_effect_class=payload.get("side_effect_class"),
-            attributes=tuple(sorted(attributes.items())),
-            native_source=source_from_payload(payload),
-        )
-
     def _select_create_executor(
         self,
         command: CommandEnvelope,
@@ -2481,7 +2447,7 @@ class P3AuthenticatedComposition:
                 "task.create requires server-resolved project context",
                 ErrorCode.PERMISSION_DENIED,
             )
-        spec = self._resolved_create_spec(command, context)
+        spec = self._core.prepare_creation_spec(command, context, now=self._clock())
         requirements = _product_execution_requirements(
             executor_id=spec.executor_id,
             side_effect_class=spec.side_effect_class,

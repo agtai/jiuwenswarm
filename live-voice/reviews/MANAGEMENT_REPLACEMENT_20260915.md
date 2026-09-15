@@ -184,3 +184,79 @@ SDK first-batch commit: `c7cd48fe2b56ae878c4c1175936b5fd35f0ffc2a`
 Host commit contains the shared renderer and this audit/evidence. Deployment is
 still deferred; applying this pair later requires both new sources. No remote
 update, history rewrite, private configuration or user-project change was made.
+
+## Second boundary: one native creation-spec owner
+
+Baseline Host `292d1101`, SDK `c7cd48fe2`. Tier 2 for the admission seam, with no
+new authorization or persisted contract: the existing Core will expose its pure
+creation-spec preparation and use it for create/successor. Host Executor selection
+will call that same preparation instead of building a second spec. Delete Host
+_resolved_create_spec and its now-unused local source helper copies; SDK source
+codec registration remains the decoder/validation owner. Keep Host speech evidence
+type, model/Agent selection and grants; keep Store transactional revalidation.
+
+Preparation must perform no Store/Executor/Agent effects and grant no authority.
+Successor preconditions remain Store-owned; create and successor retain their
+closed payloads, exact model binding, context checks, constraints and immutable
+speech source. Existing Core error codes/order are preserved. Host selection may
+reject invalid context/source at native preflight before doing its pure capability
+selection, while all valid requests keep the same path and result. Verify direct
+Core real-SQLite admission, source replay/fences, successor creation, Host
+confirmation/Executor selection, invalid/expired/wrong-scope zero effects and
+cross-repository imports. No changes to Task/Work cancellation or audio policy.
+
+### Second-boundary result and review
+
+| Previous responsibility / consumer | Reused entry / decision | Deleted production / authority / evidence |
+|---|---|---|
+| Host `_resolved_create_spec` before profile selection | `PersistentTaskCore.prepare_creation_spec`, exposing and sharing existing Core validation | Delete Host spec builder; Host retains model selection, Core validates, Store admits. Real SQLite spec equality, no-effect preflight and Host creation/confirmation regressions |
+| Core create and successor duplicated validation | Same native method, with prior command-specific validation order/messages | Delete both inline copies; retain distinct Store admission methods and successor preconditions |
+| Host generic source helper functions | Existing SDK source codec payload helpers | Delete four Host copies; retain Host speech-specific evidence type and registration. Source tests verify immutable speech bindings |
+
+Production delta from first pair: Host +1/-58 = -57; SDK +83/-110 = -27;
+Voice unchanged. No file relocation. The 83 native lines consolidate existing
+validation and expose pure preflight; they are necessary shared implementation,
+not a new authorization service. Cumulative from the frozen goal baseline:
+Voice +24/-70=-46; Host +16/-58=-42; SDK +101/-164=-63; total +141/-292=-151.
+[Current manifest](../evidence/MANAGEMENT_CREATION_COUNTS_20260915.json),
+[cumulative delta](../evidence/MANAGEMENT_CREATION_DELTA_20260915.json), and
+[merged module accounting](../evidence/MANAGEMENT_CREATION_MODULES_20260915.json).
+
+Checks on final production source:
+- Host Core create/successor/authorization/context/payload/concurrent selection:
+  71 passed, 291 deselected. Includes transactional admission and successor paths.
+- Host native source plus P3 selected create/confirmation/scope/authority paths:
+  40 passed, 173 deselected.
+- Host production intent composition: 15 passed.
+- SDK application boundary: 6 passed with real SQLite acceptance, replay and
+  reopen. New preflight checks assert empty Store and zero Executor calls for
+  malformed payload, invalid source, foreign scope and expired context. Initial
+  new test failed because dataclass.replace used the read-only payload property;
+  test now constructs invalid requests through CommandEnvelope.from_dict.
+- Scoped SDK Ruff and both repository diff whitespace checks pass.
+
+Cold complete-diff review: Core preserves grant checks before mutation and the
+previous create/successor validation order, error reasons, model binding and
+constraints. Store is still independently responsible for transactional acceptance,
+not trusting preflight as authorization. No new persistent state, replay path,
+executor, fallback, diagnostic or product policy was introduced. Cancel/recovery
+implementations are unchanged. As in the first batch, this is a non-independent
+review substitute; independent-review evidence remains PARTIAL.
+
+Retained: Store admission revalidation cannot be deleted because direct callers
+and transaction races need the checks at commit; pure preflight is not that
+transaction. Host profile selection uses application model/Agent configuration
+not available in the native task service. These owners stay distinct, with one
+creation-spec algorithm. TaskStore, WorkStore and wider Registry business routing
+remain incomplete; these bounded replacements do not close their management audit.
+
+[Second installed pair](../evidence/MANAGEMENT_CREATION_INSTALLED_20260915.json):
+clean wheels, isolated imports for both changed owners, all 1016 Host and 2409 SDK
+installed Python files byte-equal to tracked snapshots, six real SQLite/application
+checks passed from the installed target. These overlap source checks and do not
+add product acceptance. Existing third-party dependencies were reused.
+
+SDK second-batch commit: `6c6da6c47ef185c072fd305964d2e3954cb6e94b`
+(`refactor(tasks): centralize creation spec preparation`). Host companion removes
+the duplicate builder/source helpers and updates current audit/architecture. Both
+sources are required for a later deployment; deployment remains explicitly deferred.

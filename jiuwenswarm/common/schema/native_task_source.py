@@ -153,29 +153,6 @@ class NativeTaskSource(TaskSourceEvidence):
         )
 
 
-def source_from_payload(payload):
-    """Absent is legacy; present null/malformed is never legacy fallback."""
-    return None if "native_source" not in payload else NativeTaskSource.from_dict(payload["native_source"])
-
-
-def source_extension(source):
-    return {} if source is None else {"native_source": source.to_dict()}
-
-
-def source_payload_fields(payload, base):
-    # Only this optional field is accepted, never arbitrary extension keys.
-    return base | ({"native_source"} if "native_source" in payload else set())
-
-
-def require_payload_source(command):
-    source = source_from_payload(command.payload)
-    if source is not None:
-        source.require_request(scope=command.scope, operation=command.command_type,
-            instruction=command.payload.get("adjustment" if command.command_type == "task.adjust" else "instruction"))
-        if command.command_type != "task.create" and source.target_id != command.target_ref.id:
-            raise NativeTaskSourceError("NATIVE_TASK_SOURCE_TARGET_MISMATCH")
-    return source
-
 def register_native_task_source_codec():
     """Register Host speech evidence before the SDK restores persisted tasks."""
     register_source_codec(NATIVE_TASK_SOURCE_VERSION, NativeTaskSource)

@@ -103,7 +103,9 @@ support has been discussed, not implemented.
 Continue [Task → Work → Host/Voice replacement](reviews/MANAGEMENT_REPLACEMENT_20260915.md),
 with audit, refactoring, affected tests, documentation and local commits authorized.
 The first bounded changes reuse the existing Task artifact reader, native Work
-finalizer and Host Task presentation functions; this does not close the retained
+finalizer and Host Task presentation functions. The next batch removes Host
+creation-spec construction and duplicate source helpers, reusing Core creation
+preparation for Host selection and Core create/successor; this does not close the retained
 management implementations. No pushes, history rewriting, service restart or
 deployment; no private configuration or user-project edits. Preserve the
 15-second prepared-response timeout and all existing voice/authorization policy.
