@@ -110,34 +110,54 @@ support has been discussed, not implemented.
 
 ### Active management replacement (2026-09-15, user-adjusted objective)
 
-The user retained all five required outcomes and their order: (1) accurate
-completion/gap accounting; (2) Task主体 comparison and actual replacement;
-(3) Work convergence; (4) Host/Voice convergence; (5) module verification and
-local delivery. Do not replace that scope with entrypoint unification alone.
+Current phase follows the user's accepted adjustment: complete the formal Task
+application-management boundary. Voice, text and the Task panel must use the same
+Host acceptance, confirmation, control, query and result services; delete their
+duplicate production management state, acceptance and recovery branches. Voice
+retains voice identity, interruption, playback and necessary adapters. A facade,
+move, import change, dormant-code deletion or isolated helper cleanup cannot close
+this phase. Use existing Host/AgentCore capabilities or bounded enhancements;
+do not force persistent application semantics into the native TaskManager.
 
-The next implementation must follow a concrete Task management comparison and
-replace one complete responsibility, including real consumers, state ownership,
-and obsolete production branches. Choose existing capability reuse, bounded
-native enhancement, or justified retention per responsibility. A shared facade,
-file move, dead-code cleanup or small deletion does not by itself close a
-management boundary. Integrate the implicated Host/Voice call chain in the same
-boundary; then continue Work and remaining Host/Voice responsibilities. Group
-verification/review/commits at that complete boundary instead of repeating full
-closure for incidental cleanups. Production line counts remain cost accounting,
-not the acceptance criterion. Prior partial results stay valid but do not close
-the objective; see the [replacement audit](reviews/MANAGEMENT_REPLACEMENT_20260915.md).
+The original five-item sequence remains the overall roadmap and audit context.
+Task comparison and affected Host/Voice integration belong to this phase;
+verification, independent review, accurate production accounting and local commits
+are its delivery requirements. Work unification and broader Host/Voice or audio
+lifecycle restructuring are not concurrent phase deliverables. After this complete
+Task boundary, report its result and determine the next Work boundary with the user.
+Do not interpret the earlier question about retaining the roadmap as authorization
+to replace the subsequently accepted bounded goal with the entire backlog.
+
+Completion requires actual consumers using the common management entry and the
+redundant production owner/branches being removed, with affected positive,
+wrong-scope, stale, cancel/recovery and zero-forbidden-effect evidence. If the
+comparison cannot establish a substantive replacement, report exact missing
+capabilities, required changes and behavior impacts instead of continuing small
+cleanups indefinitely. The overall deep-integration judgment remains PARTIAL.
 
 The resumed independent comparison rejects wholesale Controller/Team replacement
 of Formal Task cancellation/recovery and rejects treating Host/Voice as additional
 Work state owners. Team already has transactions and CAS; its missing contract is
 the specific command/attempt/outbox/effect and physical-settlement combination.
-The subsequent queued-control batch removes Host's independent queue eligibility
+The queued-control batch removes Host's independent queue eligibility
 rules and Store's duplicate reprioritize predicate. Atomic read projections and
 update/reprioritize transactions share Store queue control, using the existing
 exact unbound-queue proof. This closes that rule-ownership boundary only;
 Host/Voice business convergence and wholesale management replacement remain open.
 The audit records focused SQLite/concurrency/replay evidence, the independent
 review and the modest actual code delta without claiming a full owner deletion.
+
+The Task control/initialization group now sends Native calls through common
+production admission, keeps confirmation consumption through dispatch in Host,
+and shares Task status/history initialization between the Task panel and Voice.
+The hidden manual mutation owner, its editor, pending/prepared state and private
+accepted-command polling are deleted; visible controls retain the shared Task
+owner. Voice retains a recovery diagnostic, exact continuation/presentation fences
+and progress-event proof. This closes the duplicate manual-control and initial
+read orchestration boundary only. Common progress fact ownership and remaining
+Host admission/state responsibility still require work before the Task phase ends.
+The audit records focused checks, failed-test repairs, independent review and
+same-basis accounting, including the hidden-chain contribution to the reduction.
 
 Audit, reasonable refactoring, necessary tests, docs and local commits remain
 authorized. Compatibility is limited to these two repositories. Preserve accepted

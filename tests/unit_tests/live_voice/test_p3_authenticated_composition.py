@@ -2425,7 +2425,7 @@ async def test_registry_inflight_production_replay_reauthorizes_resolved_mutatio
             request_id="production-inflight-create", session_id="session-1")
         assert pending.ok, pending.payload
         token = pending.payload["result"]["confirmation_token"]
-        original_invoke = registry._invoke_production_resolution
+        original_invoke = harness.composition.handle_production_resolution
 
         async def retain_after_real_effect(**kwargs):
             result = await original_invoke(**kwargs)
@@ -2434,7 +2434,7 @@ async def test_registry_inflight_production_replay_reauthorizes_resolved_mutatio
             await release.wait()
             return result
 
-        monkeypatch.setattr(registry, "_invoke_production_resolution", retain_after_real_effect)
+        monkeypatch.setattr(harness.composition, "handle_production_resolution", retain_after_real_effect)
         params = _production_registry_text_params(stem="inflight-create-confirm",
             text=f"confirm task request {token}", continuation_id=token)
         original_task = asyncio.create_task(registry.handle_p3_intent(

@@ -21,7 +21,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -81,13 +81,17 @@ from openjiuwen.core.application.tasks.executor_capabilities import (
 from openjiuwen.core.application.tasks.persistent_task_core import PersistentTaskCore, ReconciliationEventSink
 from jiuwenswarm.server.runtime.presentation.p2_response_generation_store import SqliteP2ResponseGenerationOwner
 from jiuwenswarm.server.runtime.formal_tasks.p3_confirmation import (
+    BoundedP3ConfirmationOwner,
     P3ConfirmationBinding,
+    P3ConfirmationOwnerContext,
     P3ConfirmationVerifier,
     PreparedP3RetryFacts,
     SqliteP3ConfirmationLedger,
     VerifiedP3Confirmation,
     p3_confirmation_intent_fingerprint,
 )
+from jiuwenswarm.server.runtime.formal_tasks.p3_product_confirmation import ProductP3ConfirmationForwarder
+from jiuwenswarm.server.runtime.formal_tasks.voice_task_bridge import VoiceTaskBridge
 from jiuwenswarm.server.runtime.agent_adapter.p3_model_resolution import P3ModelResolver, ResolvedP3Model
 from jiuwenswarm.server.runtime.formal_tasks.p3_production_intent_composition import (
     CallLocalProductionConfirmationClaim,
@@ -108,9 +112,11 @@ from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (Direc
 from openjiuwen.core.application.tasks.project_executor import (AttemptProjectExecutorLease, DirectStreamObserver, FORMAL_PROJECT_EXECUTOR_ID, ProjectExecutionBinding)
 from jiuwenswarm.server.runtime.formal_tasks.production_task_intent import (
     AuthenticatedTaskFact,
+    BoundedClarificationOwner,
     ProductionIntentOrigin,
     ProductionOriginBinding,
     ProductionTaskPolicyOutcome,
+    ProductionTaskIntentRequest,
     ProductionTaskResolution,
     TaskAuthorityRead,
 )
@@ -3705,6 +3711,89 @@ class P3AuthenticatedComposition:
             "turn_id": binding.source_id,
             "commit_id": binding.commit_id,
         }
+
+    async def confirm_and_handle_production_request(
+        self,
+        *,
+        request: ProductionTaskIntentRequest,
+        preliminary: ProductionTaskResolution,
+        authority: PreparedProductionIntentAuthority,
+        origin_authority: CallLocalProductionOriginAuthority,
+        confirmation_owner: BoundedP3ConfirmationOwner | None,
+        confirmation_forwarder: ProductP3ConfirmationForwarder | None,
+        confirmation_id: str | None,
+        owner_context: P3ConfirmationOwnerContext | None,
+        bridge: VoiceTaskBridge,
+        clarification_owner: BoundedClarificationOwner,
+        claim_continuation: Callable[[], Awaitable[None]],
+        bearer_token: object,
+        request_id: str,
+        session_id: str,
+        correlation_id: str,
+        native_authority: NativeP3ActivationAuthority | None = None,
+    ) -> tuple[ProductionTaskResolution, P3RouteResult]:
+        """Consume exact consent and dispatch without exporting its private claim.
+
+        The transport serializes its continuation and supplies an atomic final
+        membership claim. All business confirmation and execution authority stays
+        here. Pre-dispatch failures propagate to the caller's receipt owner;
+        execution failures retain the normal formal result envelope.
+        """
+        binding = preliminary.confirmation_binding
+        if (confirmation_owner is None or confirmation_forwarder is None
+                or confirmation_id is None or owner_context is None):
+            raise FormalTaskViolation(
+                "P3_CONFIRMATION_ISSUER_UNAVAILABLE",
+                "production mutation confirmation is unavailable", ErrorCode.UNAVAILABLE,
+            )
+        if (binding is None or preliminary.confirmation != "required"
+                or preliminary.outcome is not ProductionTaskPolicyOutcome.PROPOSED):
+            raise FormalTaskViolation(
+                preliminary.reason,
+                "production continuation no longer resolves to an exact mutation", ErrorCode.CONFLICT,
+            )
+        if owner_context.session_id != session_id:
+            raise FormalTaskViolation(
+                "TASK_INTENT_CONTINUATION_SCOPE_MISMATCH",
+                "production confirmation belongs to another Session", ErrorCode.PERMISSION_DENIED,
+            )
+        validated = await asyncio.to_thread(
+            confirmation_owner.validate_for_forwarding,
+            confirmation_id,
+            P3ConfirmationBinding(
+                principal_id=binding.principal_id, scope=binding.scope,
+                operation=binding.operation, command_id=binding.command_id,
+                target_task_id=binding.target_task_id, intent_fingerprint=binding.fingerprint,
+            ),
+            owner_context, now=authority.observed_at,
+        )
+        consumer = CallLocalProductionConfirmationConsumer(
+            expected_binding=binding, validated=validated,
+            forwarder=confirmation_forwarder, now=authority.observed_at,
+        )
+        # Preliminary resolution already consumed target clarification. Preserve
+        # its exact origin digest without consuming the one-shot selection again.
+        confirmed = await asyncio.to_thread(
+            bridge.resolve_production,
+            replace(request, confirmation_id=confirmation_id, clarification_answer=None,
+                clarification_answer_fingerprint=(request.clarification_answer.fingerprint
+                    if request.clarification_answer is not None else request.clarification_answer_fingerprint)),
+            authority.reader, origin_authority, consumer, clarification_owner,
+        )
+        if (confirmed.outcome is not ProductionTaskPolicyOutcome.PROPOSED
+                or confirmed.confirmation != "confirmed"):
+            raise FormalTaskViolation(
+                confirmed.reason,
+                "production confirmation failed its final authority reread", ErrorCode.CONFLICT,
+            )
+        await claim_continuation()
+        result = await self.handle_production_resolution(
+            resolution=confirmed, bearer_token=bearer_token, request_id=request_id,
+            session_id=session_id, correlation_id=correlation_id,
+            origin_authority=origin_authority, confirmation_consumer=consumer,
+            current_background_session_id=session_id, native_authority=native_authority,
+        )
+        return confirmed, result
 
     async def handle_production_resolution(
         self,

@@ -112,6 +112,13 @@ export type FormalP3TaskRequest = (
   requestId: string,
 ) => Promise<unknown>;
 
+export type FormalP3TaskFacts = Readonly<{
+  task: FormalP3TaskRecord;
+  status_response: unknown;
+  events_response: unknown;
+  terminal_source_event_id: string | null;
+}>;
+
 export type FormalP3TaskSelectionStore = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
 const SELECTION_PREFIX = 'jiuwenswarm.live_voice.formal_p3_selection.v1:';
@@ -342,10 +349,16 @@ function parseEventPage(
     result.task_id !== record.task_id
     || result.after_seq !== expectedAfter
     || !Array.isArray(result.events)
-    || integer(result.head_seq, 'event head', -1) !== record.event_head
     || typeof result.has_more !== 'boolean'
   ) {
     throw new Error('formal P3 Task events binding mismatch');
+  }
+  if (integer(result.head_seq, 'event head', -1) !== record.event_head) {
+    // Execution may advance between status and history. Consumers may retry
+    // the complete read, but must never adopt a mixed Task revision.
+    throw Object.assign(new Error('formal P3 Task events binding mismatch'), {
+      reason: 'PRODUCTION_TASK_AUTHORITY_PROJECTION_MISMATCH',
+    });
   }
   const events = result.events.map(value => {
     const event = objectValue(value);
@@ -515,6 +528,7 @@ export class FormalP3TaskExperienceOwner {
   #mutationFlight: Promise<FormalP3TaskExperienceSnapshot> | null = null;
   #epoch = 0;
   #liveRefreshNeeded = false;
+  #factReads = new Map<string, { promise: Promise<FormalP3TaskFacts>; consumers: Set<() => boolean> }>();
 
   constructor(input: Readonly<{
     enabled: boolean;
@@ -530,6 +544,69 @@ export class FormalP3TaskExperienceOwner {
   }
 
   snapshot(): FormalP3TaskExperienceSnapshot { return this.#state; }
+
+  async readTaskFacts(sessionIdInput: string, taskIdInput: string, isCurrent: () => boolean = () => true): Promise<FormalP3TaskFacts> {
+    const sessionId = text(sessionIdInput, 'session_id');
+    const taskId = text(taskIdInput, 'task_id');
+    const epoch = this.#epoch;
+    const current = () => this.#enabled && epoch === this.#epoch
+      && !['closed', 'disconnected'].includes(this.#state.status)
+      && (this.#state.session_id === null || this.#state.session_id === sessionId);
+    if (!current() || !isCurrent()) throw new Error('formal P3 Task read became stale');
+    const key = JSON.stringify([epoch, sessionId, taskId]);
+    let flight = this.#factReads.get(key);
+    if (flight === undefined) {
+      if (this.#factReads.size >= 128) throw new Error('formal P3 Task read capacity exceeded');
+      const consumers = new Set([isCurrent]);
+      flight = { consumers, promise: this.#readTaskFacts(sessionId, taskId,
+        () => current() && [...consumers].some(consumer => consumer())) };
+      this.#factReads.set(key, flight);
+    } else {
+      flight.consumers.add(isCurrent);
+    }
+    try {
+      const facts = await flight.promise;
+      if (!current() || !isCurrent()) throw new Error('formal P3 Task read became stale');
+      return facts;
+    } finally {
+      flight.consumers.delete(isCurrent);
+      if (flight.consumers.size === 0 && this.#factReads.get(key) === flight) this.#factReads.delete(key);
+    }
+  }
+
+  async #readTaskFacts(sessionId: string, taskId: string, current: () => boolean): Promise<FormalP3TaskFacts> {
+    const statusId = requestId('formal-p3-task-status');
+    const statusResponse = await this.#request(FORMAL_P3_TASK_METHODS.status, { session_id: sessionId, task_id: taskId }, statusId);
+    if (!current()) throw new Error('formal P3 Task read became stale');
+    const status = envelope(statusResponse, statusId);
+    const selected = parseTask(status.task, sessionId, {
+      attempt: status.attempt, admission: status.admission,
+      supported_operations: status.supported_operations,
+    });
+    if (selected.task_id !== taskId) throw new Error('formal P3 Task selection target mismatch');
+    const events: JsonObject[] = [];
+    const pages: { after_seq: number; response: unknown }[] = [];
+    let afterSeq = -1;
+    for (let page = 0; page < MAX_EVENT_PAGES; page += 1) {
+      const eventsId = requestId('formal-p3-task-events');
+      const response = await this.#request(FORMAL_P3_TASK_METHODS.events, { session_id: sessionId, task_id: taskId, after_seq: afterSeq, limit: 500 }, eventsId);
+      if (!current()) throw new Error('formal P3 Task read became stale');
+      const parsed = parseEventPage(selected, response, eventsId, afterSeq);
+      pages.push(Object.freeze({ after_seq: afterSeq, response }));
+      events.push(...parsed.events);
+      if (!parsed.has_more) break;
+      if (parsed.next_after_seq === null || parsed.next_after_seq <= afterSeq || page === MAX_EVENT_PAGES - 1) throw new Error('formal P3 TaskEvent replay exceeds its bound');
+      afterSeq = parsed.next_after_seq;
+    }
+    return Object.freeze({ task: enrichEvents(selected, events), status_response: statusResponse,
+      // Every page was checked against the same Task head. The control reducer
+      // consumes a complete replay, not a page advertising a later global head.
+      events_response: Object.freeze({ ...objectValue(pages[0]?.response),
+        result: Object.freeze({ ...objectValue(objectValue(pages[0]?.response)?.result),
+          events: Object.freeze(events), after_seq: -1, has_more: false, next_after_seq: null }) }),
+      terminal_source_event_id: events.length === 0 || events[events.length - 1].source_event_id === null
+        ? null : text(events[events.length - 1].source_event_id, 'TaskEvent source_event_id') });
+  }
 
   async refreshLiveTasks(sessionId: string, isCurrent: () => boolean = () => true): Promise<FormalP3TaskExperienceSnapshot> {
     // Task execution survives speech retirement. Its collection therefore needs
@@ -549,6 +626,7 @@ export class FormalP3TaskExperienceOwner {
     if (this.#state.status === 'closed') throw new Error('formal P3 Task experience is closed');
     if (this.#state.session_id !== null && this.#state.session_id !== sessionId) {
       this.#epoch += 1;
+      this.#factReads.clear();
       this.#pending = null;
       this.#rpc = null;
       this.#mutationFlight = null;
@@ -609,17 +687,9 @@ export class FormalP3TaskExperienceOwner {
     const generation = ++this.#generation;
     this.#publish({ status: 'loading', session_id: sessionId, tasks: listedTasks, selected_task_id: null, collection_operations: Object.freeze([]), command: retainedCommand, reason: null });
     try {
-    const statusId = requestId('formal-p3-task-status');
-    const statusResponse = await this.#request(FORMAL_P3_TASK_METHODS.status, { session_id: sessionId, task_id: taskId }, statusId);
+    const facts = await this.readTaskFacts(sessionId, taskId, () => generation === this.#generation && isCurrent());
     if (generation !== this.#generation || !isCurrent()) throw new Error('formal P3 Task selection became stale');
-    const status = envelope(statusResponse, statusId);
-    const selected = parseTask(status.task, sessionId, {
-      attempt: status.attempt,
-      admission: status.admission,
-      supported_operations: status.supported_operations,
-      successor_task_id: listed.successor_task_id,
-    });
-    if (selected.task_id !== taskId) throw new Error('formal P3 Task selection target mismatch');
+    const selected = Object.freeze({ ...facts.task, successor_task_id: listed.successor_task_id });
     if (
       selected.subject_id !== listed.subject_id
       || selected.project_id !== listed.project_id
@@ -627,18 +697,6 @@ export class FormalP3TaskExperienceOwner {
       || selected.revision_number !== listed.revision_number
       || selected.predecessor_task_id !== listed.predecessor_task_id
     ) throw new Error('formal P3 Task selection authority changed identity');
-    const events: JsonObject[] = [];
-    let afterSeq = -1;
-    for (let page = 0; page < MAX_EVENT_PAGES; page += 1) {
-      const eventsId = requestId('formal-p3-task-events');
-      const response = await this.#request(FORMAL_P3_TASK_METHODS.events, { session_id: sessionId, task_id: taskId, after_seq: afterSeq, limit: 500 }, eventsId);
-      if (generation !== this.#generation || !isCurrent()) throw new Error('formal P3 Task detail became stale');
-      const parsed = parseEventPage(selected, response, eventsId, afterSeq);
-      events.push(...parsed.events);
-      if (!parsed.has_more) break;
-      if (parsed.next_after_seq === null || parsed.next_after_seq <= afterSeq || page === MAX_EVENT_PAGES - 1) throw new Error('formal P3 TaskEvent replay exceeds its bound');
-      afterSeq = parsed.next_after_seq;
-    }
     const resultId = requestId('formal-p3-task-result');
     const resultResponse = await this.#request(
       FORMAL_P3_TASK_METHODS.result,
@@ -646,10 +704,7 @@ export class FormalP3TaskExperienceOwner {
       resultId,
     );
     if (generation !== this.#generation || !isCurrent()) throw new Error('formal P3 Task detail became stale');
-    const terminalSourceEventId = events.length === 0 || events[events.length - 1].source_event_id === null
-      ? null
-      : text(events[events.length - 1].source_event_id, 'TaskEvent source_event_id');
-    const enriched = enrichResult(enrichEvents(selected, events), resultResponse, resultId, terminalSourceEventId);
+    const enriched = enrichResult(selected, resultResponse, resultId, facts.terminal_source_event_id);
     const tasks = listedTasks.map(task => task.task_id === taskId ? enriched : task);
     const currentCommand = this.#state.command;
     const command = currentCommand?.task_id === taskId
@@ -762,6 +817,7 @@ export class FormalP3TaskExperienceOwner {
   disconnect(): FormalP3TaskExperienceSnapshot {
     this.#generation += 1;
     this.#epoch += 1;
+    this.#factReads.clear();
     this.#mutationFlight = null;
     const command = this.#rpc === null ? this.#state.command
       : Object.freeze({ ...this.#rpc.command, phase: 'unknown' as const, reason: 'FORMAL_P3_RESULT_RECOVERY_REQUIRED' });
@@ -771,6 +827,7 @@ export class FormalP3TaskExperienceOwner {
   close(): FormalP3TaskExperienceSnapshot {
     this.#generation += 1;
     this.#epoch += 1;
+    this.#factReads.clear();
     this.#pending = null;
     this.#rpc = null;
     this.#mutationFlight = null;

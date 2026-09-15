@@ -255,6 +255,89 @@ function authoritativeFixture({
   return { taskA, taskB, calls, request, store: memoryStorage(selectedHint) };
 }
 
+test('background Task reads share one flight without selecting or invalidating another Task', async () => {
+  const fixture = authoritativeFixture();
+  let release;
+  let pause = false;
+  const owner = new FormalP3TaskExperienceOwner({ enabled: true, store: fixture.store, request: async (...args) => {
+    const result = await fixture.request(...args);
+    if (pause && args[0] === FORMAL_P3_TASK_METHODS.status && args[1].task_id === 'task-a') {
+      await new Promise(resolve => { release = resolve; });
+    }
+    return result;
+  } });
+  await owner.refresh(sessionId);
+  pause = true;
+  const before = fixture.calls.length;
+  let voiceCurrent = true;
+  const retired = owner.readTaskFacts(sessionId, 'task-a', () => voiceCurrent);
+  const retained = owner.readTaskFacts(sessionId, 'task-a');
+  const rejected = assert.rejects(retired, /stale/);
+  await owner.select('task-b');
+  const snapshot = owner.snapshot();
+  const storage = [...fixture.store.values];
+  voiceCurrent = false;
+  release();
+  await rejected;
+  const facts = await retained;
+  assert.equal(facts.task.task_id, 'task-a');
+  assert.equal(facts.task.replay_event_count, 2);
+  assert.equal(owner.snapshot(), snapshot);
+  assert.deepEqual([...fixture.store.values], storage);
+  assert.equal(snapshot.selected_task_id, 'task-b');
+  const reads = fixture.calls.slice(before).filter(call => call.params.task_id === 'task-a');
+  assert.deepEqual(reads.map(call => call.method), [FORMAL_P3_TASK_METHODS.status, FORMAL_P3_TASK_METHODS.events]);
+});
+
+test('Task advancement between status and history requires a fresh read without publishing mixed facts', async () => {
+  const fixture = authoritativeFixture();
+  let advance = false;
+  const owner = new FormalP3TaskExperienceOwner({ enabled: true, store: fixture.store, request: async (...args) => {
+    const response = await fixture.request(...args);
+    if (advance && args[0] === FORMAL_P3_TASK_METHODS.events) {
+      advance = false;
+      return { ...response, result: { ...response.result, head_seq: response.result.head_seq + 1 } };
+    }
+    return response;
+  } });
+  await owner.refresh(sessionId);
+  const snapshot = owner.snapshot();
+  const before = fixture.calls.length;
+  advance = true;
+  await assert.rejects(owner.readTaskFacts(sessionId, 'task-b'), error => error.reason === 'PRODUCTION_TASK_AUTHORITY_PROJECTION_MISMATCH');
+  assert.equal(owner.snapshot(), snapshot);
+  assert.equal((await owner.readTaskFacts(sessionId, 'task-b')).task.task_id, 'task-b');
+  assert.deepEqual(fixture.calls.slice(before).map(call => call.method), [
+    FORMAL_P3_TASK_METHODS.status, FORMAL_P3_TASK_METHODS.events,
+    FORMAL_P3_TASK_METHODS.status, FORMAL_P3_TASK_METHODS.events,
+  ]);
+});
+
+for (const retirement of ['caller', 'disconnect', 'session']) test(`background Task read stops before history after ${retirement} retirement`, async () => {
+  const fixture = authoritativeFixture();
+  let release;
+  let pause = false;
+  let current = true;
+  const owner = new FormalP3TaskExperienceOwner({ enabled: true, store: fixture.store, request: async (...args) => {
+    if (args[1].session_id !== sessionId) return envelope(args[2], { tasks: [], has_more: false, next_cursor: null });
+    const result = await fixture.request(...args);
+    if (pause && args[0] === FORMAL_P3_TASK_METHODS.status) await new Promise(resolve => { release = resolve; });
+    return result;
+  } });
+  await owner.refresh(sessionId);
+  pause = true;
+  const before = fixture.calls.length;
+  const reading = owner.readTaskFacts(sessionId, 'task-b', () => current);
+  const rejected = assert.rejects(reading, /stale/);
+  await Promise.resolve();
+  if (retirement === 'caller') current = false;
+  else if (retirement === 'disconnect') owner.disconnect();
+  else await owner.refresh('other-session');
+  release();
+  await rejected;
+  assert.deepEqual(fixture.calls.slice(before).map(call => call.method), [FORMAL_P3_TASK_METHODS.status]);
+});
+
 test('live Task refresh converges without a voice notification and stops reading when all Tasks are terminal', async () => {
   const fixture = authoritativeFixture();
   const owner = new FormalP3TaskExperienceOwner({ enabled: true, request: fixture.request, store: fixture.store });
@@ -859,6 +942,41 @@ test('retry uses only its exact target through the existing confirmation primiti
   ]);
   assert.equal(call.params.task_id, 'task-a');
 });
+
+for (const stage of ['issue', 'confirm']) for (const field of ['operation', 'command_id', 'target_task_id']) {
+  test(`shared retry rejects a forged ${stage} ${field} and retains only its exact RPC`, async () => {
+    const fixture = authoritativeFixture();
+    const mutationCalls = [];
+    const request = async (method, params, id) => {
+      if (![FORMAL_P3_TASK_METHODS.confirmation, FORMAL_P3_TASK_METHODS.mutate].includes(method)) return fixture.request(method, params, id);
+      mutationCalls.push({ method, params, id });
+      const issuing = method === FORMAL_P3_TASK_METHODS.confirmation;
+      const result = {
+        status: issuing ? 'confirmation_issued' : 'mutation_processed',
+        operation: 'task.retry', command_id: params.command_id, target_task_id: 'task-a',
+        confirmation_id: 'exact-retry',
+        formal_task_result: { task_id: 'task-a', attempt_id: 'attempt-next', state: 'accepted', outbox_id: 'retry-outbox' },
+      };
+      if (issuing === (stage === 'issue')) result[field] = 'foreign-binding';
+      return envelope(id, result);
+    };
+    const owner = new FormalP3TaskExperienceOwner({ enabled: true, request, store: fixture.store });
+    await owner.refresh(sessionId);
+    if (stage === 'issue') await assert.rejects(owner.issue({ operation: 'task.retry', task_id: 'task-a' }), /binding mismatch/);
+    else {
+      await owner.issue({ operation: 'task.retry', task_id: 'task-a' });
+      await assert.rejects(owner.confirm(), /binding mismatch/);
+    }
+    assert.equal(owner.snapshot().command.phase, 'unknown');
+    const last = mutationCalls.at(-1);
+    await assert.rejects(owner.issue({ operation: 'task.cancel', task_id: 'task-b' }), /unavailable/);
+    await assert.rejects(owner.confirm(), /binding mismatch/);
+    assert.deepEqual(mutationCalls.at(-1), last);
+    assert.equal(mutationCalls.filter(call => call.method === FORMAL_P3_TASK_METHODS.mutate).length, stage === 'issue' ? 0 : 2);
+    assert.equal(owner.snapshot().command.accepted, false);
+    assert.equal(owner.snapshot().tasks.find(task => task.task_id === 'task-a').attempt_id, 'attempt-a');
+  });
+}
 
 test('ready and progress-route adoption eligibility occur only after list, status, replay and result all succeed', async () => {
   const fixture = authoritativeFixture({ selectedHint: 'task-b' });

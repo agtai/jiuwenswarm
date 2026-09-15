@@ -10,7 +10,6 @@ import {
 import { productTextProgressPresentationBinding, type ProductTextProgressEvent } from '../../features/tasks/productTextProgress';
 import { type ProductWebP2ActivationSnapshot, type ProductWebP3ProgressSnapshot } from '../../features/live-voice/formal/productWebActivation';
 import { type WebPlatformDiagnosticsSnapshot } from '../../features/live-voice/formal/webPlatformDiagnostics';
-import { type ProductP3MutationStatus } from './liveVoiceProductOperations';
 
 
 function DiagnosticsFact({ label, value }: { label: string; value: string }) {
@@ -53,26 +52,8 @@ export interface LiveVoiceIntegratedRoutePanelViewProps {
   recognizedSpeechDispatching?: boolean;
   onRecognizedSpeechConfirm?: () => void;
   onRecognizedSpeechCancel?: () => void;
-  p3MutationEnabled?: boolean;
-  p3MutationOperation?: 'task.create' | 'task.cancel' | 'task.retry';
-  p3TaskName?: string;
-  p3TaskInstruction?: string;
-  p3TargetTaskId?: string;
-  p3MutationStatus?: ProductP3MutationStatus;
-  p3MutationReason?: string | null;
-  p3MutationRetained?: boolean;
-  p3RetryEligible?: boolean;
-  p3RetryAttemptNumber?: number | null;
-  p3RetryInspectionStatus?: 'idle' | 'checking' | 'eligible' | 'ineligible' | 'failed';
-  p3RetryInspectionReason?: string | null;
-  onP3MutationOperation?: (value: 'task.create' | 'task.cancel' | 'task.retry') => void;
-  onP3TaskName?: (value: string) => void;
-  onP3TaskInstruction?: (value: string) => void;
-  onP3TargetTaskId?: (value: string) => void;
-  onP3InspectRetry?: () => void;
-  onP3Issue?: () => void;
-  onP3Execute?: () => void;
   onRefresh: () => void;
+  taskRecoveryReason?: string | null;
 }
 
 
@@ -106,26 +87,8 @@ export function LiveVoiceIntegratedRoutePanelView({
   recognizedSpeechDispatching = false,
   onRecognizedSpeechConfirm,
   onRecognizedSpeechCancel,
-  p3MutationEnabled = false,
-  p3MutationOperation = 'task.create',
-  p3TaskName = '',
-  p3TaskInstruction = '',
-  p3TargetTaskId = '',
-  p3MutationStatus = 'idle',
-  p3MutationReason = null,
-  p3MutationRetained = false,
-  p3RetryEligible = false,
-  p3RetryAttemptNumber = null,
-  p3RetryInspectionStatus = 'idle',
-  p3RetryInspectionReason = null,
-  onP3MutationOperation,
-  onP3TaskName,
-  onP3TaskInstruction,
-  onP3TargetTaskId,
-  onP3InspectRetry,
-  onP3Issue,
-  onP3Execute,
   onRefresh,
+  taskRecoveryReason = null,
 }: LiveVoiceIntegratedRoutePanelViewProps) {
   const { t } = useTranslation();
 
@@ -133,13 +96,6 @@ export function LiveVoiceIntegratedRoutePanelView({
   const browserEvidence = platform?.browser_version
     ? `${platform.browser_family} ${platform.browser_version}`
     : (platform?.browser_family ?? t('liveVoice.integrated.diagnostics.pending'));
-  const structuredP3MutationLocked =
-    productOperationRetained ||
-    recognizedSpeechConfirmation !== null ||
-    ['issuing', 'confirmed', 'mutating'].includes(p3MutationStatus) ||
-    p3RetryInspectionStatus === 'checking' ||
-    (p3MutationStatus === 'failed' && p3MutationRetained);
-  const p3MutationLocked = structuredP3MutationLocked;
   const resolvedProductTextTransportRetained = productTextTransportRetained ?? (productOperationRetained && recognizedSpeechConfirmation === null);
   const productTextLocked =
     recognizedSpeechDispatching ||
@@ -169,6 +125,9 @@ export function LiveVoiceIntegratedRoutePanelView({
         <code>{compositionLabel}</code>
       </summary>
       <div className="live-voice-integrated__body">
+        {taskRecoveryReason !== null && (
+          <DiagnosticsFact label={t('liveVoice.integrated.taskControl.reason')} value={taskRecoveryReason} />
+        )}
         <div className="live-voice-integrated__warning" role="note">
           <ShieldAlert size={16} strokeWidth={2} aria-hidden="true" />
           <span>{t('liveVoice.integrated.shellOnly')}</span>
@@ -347,71 +306,7 @@ export function LiveVoiceIntegratedRoutePanelView({
               </button>
             </div>
           )}
-          {legacyManualControls && p3MutationEnabled && onP3MutationOperation && onP3TaskName && onP3TaskInstruction && onP3TargetTaskId && onP3Issue && onP3Execute && (
-            <div className="live-voice-integrated__text-route" data-testid="live-voice-integrated-p3-mutation">
-              <strong>{t('liveVoice.integrated.taskControl.title')}</strong>
-              <span className="live-voice-integrated__progress-note">{t('liveVoice.integrated.taskControl.disclosure')}</span>
-              <select
-                value={p3MutationOperation}
-                disabled={p3MutationLocked}
-                onChange={event => {
-                  const operation = event.target.value;
-                  onP3MutationOperation(operation === 'task.cancel' || operation === 'task.retry' ? operation : 'task.create');
-                }}
-              >
-                <option value="task.create">{t('liveVoice.integrated.taskControl.create')}</option>
-                <option value="task.cancel">{t('liveVoice.integrated.taskControl.cancel')}</option>
-                {p3RetryEligible && <option value="task.retry">{t('liveVoice.integrated.taskControl.retry')}</option>}
-              </select>
-              {p3MutationOperation === 'task.create' ? (
-                <>
-                  <input
-                    value={p3TaskName}
-                    disabled={p3MutationLocked}
-                    onChange={event => onP3TaskName(event.target.value)}
-                    placeholder={t('liveVoice.integrated.taskControl.name')}
-                  />
-                  <textarea
-                    value={p3TaskInstruction}
-                    disabled={p3MutationLocked}
-                    onChange={event => onP3TaskInstruction(event.target.value)}
-                    placeholder={t('liveVoice.integrated.taskControl.instruction')}
-                    maxLength={100000}
-                  />
-                </>
-              ) : (
-                <input
-                  value={p3TargetTaskId}
-                  disabled={p3MutationLocked}
-                  onChange={event => onP3TargetTaskId(event.target.value)}
-                  placeholder={t('liveVoice.integrated.taskControl.taskId')}
-                />
-              )}
-              {p3MutationOperation !== 'task.create' && onP3InspectRetry && (
-                <button type="button" onClick={onP3InspectRetry} disabled={!p3TargetTaskId.trim() || p3MutationLocked}>
-                  {t('liveVoice.integrated.taskControl.inspectRetry')}
-                </button>
-              )}
-              <DiagnosticsFact
-                label={t('liveVoice.integrated.taskControl.retryStatus')}
-                value={p3RetryEligible && p3RetryAttemptNumber !== null ? `eligible:${p3RetryAttemptNumber}/3` : p3RetryInspectionStatus}
-              />
-              {p3RetryInspectionReason !== null && (
-                <DiagnosticsFact label={t('liveVoice.integrated.taskControl.retryReason')} value={p3RetryInspectionReason} />
-              )}
-              {p3MutationStatus === 'confirmed' ? (
-                <button type="button" onClick={onP3Execute}>
-                  {t('liveVoice.integrated.taskControl.execute')}
-                </button>
-              ) : (
-                <button type="button" onClick={onP3Issue} disabled={p3MutationLocked || (p3MutationOperation === 'task.retry' && !p3RetryEligible)}>
-                  {t('liveVoice.integrated.taskControl.confirm')}
-                </button>
-              )}
-              <DiagnosticsFact label={t('liveVoice.integrated.taskControl.status')} value={p3MutationStatus} />
-              {p3MutationReason !== null && <DiagnosticsFact label={t('liveVoice.integrated.taskControl.reason')} value={p3MutationReason} />}
-            </div>
-          )}
+
         </div>
 
         {progress && (

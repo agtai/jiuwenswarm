@@ -1324,113 +1324,17 @@ test('unknown retained P2 operation locks editing and second submission', async 
       productOperationRetained: true,
       onProductInput: () => {},
       onProductSubmit: () => {},
-      p3MutationEnabled: true,
-      p3MutationOperation: 'task.create',
-      p3TaskName: 'retained task',
-      p3TaskInstruction: 'retained instruction',
-      p3MutationStatus: 'idle',
-      onP3MutationOperation: () => {},
-      onP3TaskName: () => {},
-      onP3TaskInstruction: () => {},
-      onP3TargetTaskId: () => {},
-      onP3Issue: () => {},
-      onP3Execute: () => {},
     },
   });
 
   assert.match(html, /<textarea[^>]*disabled=""[^>]*>retained exact text<\/textarea>/);
   assert.match(html, /<button[^>]*type="submit"[^>]*disabled=""/);
-  assert.match(html, /<select[^>]*disabled=""/);
-  assert.match(html, /<input[^>]*disabled=""[^>]*value="retained task"/);
-  assert.match(html, /<button[^>]*disabled="">Issue confirmation<\/button>/);
 });
 
-test('route panel renders a distinct two-action formal P3 task control', async () => {
-  const html = await renderPanel({
-    viewProps: {
-      p3MutationEnabled: true,
-      p3MutationOperation: 'task.create',
-      p3TaskName: 'task name',
-      p3TaskInstruction: 'task instruction',
-      p3MutationStatus: 'confirmed',
-      onP3MutationOperation: () => {},
-      onP3TaskName: () => {},
-      onP3TaskInstruction: () => {},
-      onP3TargetTaskId: () => {},
-      onP3Issue: () => {},
-      onP3Execute: () => {},
-    },
-  });
-
-  assert.equal(html.includes('data-testid="live-voice-integrated-p3-mutation"'), true);
-  assert.equal(html.includes('Issue confirmation'), false);
-  assert.equal(html.includes('Execute confirmed mutation'), true);
-  assert.equal(html.includes('Acceptance is not task completion.'), true);
-  assert.equal((html.match(/disabled=""/g) ?? []).length >= 3, true);
-});
-
-test('route panel renders authoritative completed and failed P3 terminal truth', async () => {
-  for (const status of ['completed', 'failed']) {
-    const html = await renderPanel({
-      viewProps: {
-        p3MutationEnabled: true,
-        p3MutationOperation: 'task.cancel',
-        p3TargetTaskId: 'task-1',
-        p3MutationStatus: status,
-        p3MutationReason: status === 'failed' ? 'TASK_ALREADY_TERMINAL' : null,
-        onP3MutationOperation: () => {},
-        onP3TaskName: () => {},
-        onP3TaskInstruction: () => {},
-        onP3TargetTaskId: () => {},
-        onP3InspectRetry: () => {},
-        onP3Issue: () => {},
-        onP3Execute: () => {},
-      },
-    });
-    assert.match(html, new RegExp(`<code>${status}</code>`));
-    if (status === 'failed') assert.match(html, /<code>TASK_ALREADY_TERMINAL<\/code>/);
-    assert.equal(html.includes('Acceptance is not task completion.'), true);
-  }
-});
-
-test('route panel exposes task.retry only for an inspected eligible terminal attempt', async () => {
-  const base = {
-    p3MutationEnabled: true,
-    p3MutationOperation: 'task.cancel',
-    p3TargetTaskId: 'task-1',
-    p3MutationStatus: 'idle',
-    onP3MutationOperation: () => {},
-    onP3TaskName: () => {},
-    onP3TaskInstruction: () => {},
-    onP3TargetTaskId: () => {},
-    onP3InspectRetry: () => {},
-    onP3Issue: () => {},
-    onP3Execute: () => {},
-  };
-  const hidden = await renderPanel({
-    viewProps: {
-      ...base,
-      p3RetryEligible: false,
-      p3RetryInspectionStatus: 'ineligible',
-    },
-  });
-  assert.equal(hidden.includes('value="task.retry"'), false);
-  assert.equal(hidden.includes('Check retry eligibility'), true);
-
-  const visible = await renderPanel({
-    viewProps: {
-      ...base,
-      p3MutationOperation: 'task.retry',
-      p3RetryEligible: true,
-      p3RetryAttemptNumber: 2,
-      p3RetryInspectionStatus: 'eligible',
-    },
-  });
-  assert.equal(visible.includes('value="task.retry"'), true);
-  assert.equal(visible.includes('Retry eligible task'), true);
-  assert.equal(visible.includes('eligible:2/3'), true);
-  assert.equal(visible.includes('Issue confirmation'), true);
-  assert.equal(visible.includes('Execute confirmed mutation'), false);
+test('Voice diagnostics no longer expose a separate formal Task mutation editor', async () => {
+  const html = await renderPanel();
+  assert.equal(html.includes('data-testid="live-voice-integrated-p3-mutation"'), false);
+  assert.equal(html.includes('Execute confirmed mutation'), false);
 });
 
 test('route panel exposes only a stable retry inspection failure reason', async () => {
@@ -1440,27 +1344,6 @@ test('route panel exposes only a stable retry inspection failure reason', async 
     'PRODUCT_P3_RETRY_INSPECTION_FAILED',
   );
 
-  const html = await renderPanel({
-    viewProps: {
-      p3MutationEnabled: true,
-      p3MutationOperation: 'task.cancel',
-      p3TargetTaskId: 'task-1',
-      p3MutationStatus: 'idle',
-      p3RetryInspectionStatus: 'failed',
-      p3RetryInspectionReason: 'EXECUTION_CONTEXT_REVISION_MISMATCH',
-      onP3MutationOperation: () => {},
-      onP3TaskName: () => {},
-      onP3TaskInstruction: () => {},
-      onP3TargetTaskId: () => {},
-      onP3InspectRetry: () => {},
-      onP3Issue: () => {},
-      onP3Execute: () => {},
-    },
-  });
-  assert.equal(html.includes('Retry eligibility'), true);
-  assert.equal(html.includes('<code>failed</code>'), true);
-  assert.equal(html.includes('Retry check reason'), true);
-  assert.equal(html.includes('<code>EXECUTION_CONTEXT_REVISION_MISMATCH</code>'), true);
 });
 
 test('an authenticated historical status bootstraps a query-only P3 leaf and still rejects foreign scope', () => {
@@ -2205,15 +2088,6 @@ test('voice Task origin adopts only the canonical CR response returned by the se
   assert.equal(origin.response_id, 'response-server-voice');
   assert.equal(origin.response_generation, 4);
   assert.notEqual(origin.response_generation, 99);
-});
-
-test('fresh task.create rebinds the panel progress owner to its exact task', async () => {
-  const source = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
-
-  assert.match(source, /setCreatedProgressRoute\([\s\S]*?task_id: createdTaskId/);
-  assert.doesNotMatch(source, /setCreatedProgressTaskId|setCreatedProgressOrigin/);
-  assert.match(source, /task_id: createdProgressTaskId/);
-  assert.match(source, /createdProgressRoute, props\.activeSessionId/);
 });
 
 test('product barge-in stops local playout before any response cancel request', async () => {

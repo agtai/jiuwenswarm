@@ -129,7 +129,6 @@ from jiuwenswarm.server.runtime.formal_tasks.p3_confirmation import (
     P3ConfirmationBinding,
     P3ConfirmationOwnerContext,
     TrustedP3ConfirmationIssue,
-    ValidatedP3ConfirmationForwarding,
 )
 from jiuwenswarm.server.runtime.formal_tasks.p3_production_intent_composition import (
     CallLocalProductionConfirmationConsumer,
@@ -12103,115 +12102,42 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
         preliminary: ProductionTaskResolution,
         native_authority: NativeP3ActivationAuthority | None = None,
     ) -> tuple[ProductionTaskResolution, P3RouteResult]:
-        owner = self._p3_confirmation_owner
-        forwarder = self._p3_confirmation_forwarder
-        binding = preliminary.confirmation_binding
-        confirmation_id = pending.confirmation_id
-        owner_context = pending.confirmation_owner_context
-        if (
-            owner is None
-            or forwarder is None
-            or confirmation_id is None
-            or owner_context is None
-        ):
-            raise FormalTaskViolation(
-                "P3_CONFIRMATION_ISSUER_UNAVAILABLE",
-                "production mutation confirmation is unavailable",
-                ErrorCode.UNAVAILABLE,
-            )
-        if (
-            binding is None
-            or preliminary.confirmation != "required"
-            or preliminary.outcome is not ProductionTaskPolicyOutcome.PROPOSED
-        ):
-            raise FormalTaskViolation(
-                preliminary.reason,
-                "production continuation no longer resolves to an exact mutation",
-                ErrorCode.CONFLICT,
-            )
-        p3_binding = P3ConfirmationBinding(
-            principal_id=binding.principal_id,
-            scope=binding.scope,
-            operation=binding.operation,
-            command_id=binding.command_id,
-            target_task_id=binding.target_task_id,
-            intent_fingerprint=binding.fingerprint,
-        )
-        if owner_context.session_id != clean["session_id"]:
-            raise FormalTaskViolation(
-                "TASK_INTENT_CONTINUATION_SCOPE_MISMATCH",
-                "production confirmation belongs to another Session",
-                ErrorCode.PERMISSION_DENIED,
-            )
-        async with self._p3_operation_lock:
+        async def claim_continuation() -> None:
             async with self._lock:
-                if (
-                    self._pending_production_task_intents.get(pending.token)
-                    is not pending
-                ):
-                    raise FormalTaskViolation(
-                        "TASK_INTENT_CONTINUATION_UNAVAILABLE",
-                        "production confirmation continuation is no longer current",
-                        ErrorCode.CONFLICT,
-                    )
-            validated: ValidatedP3ConfirmationForwarding = await asyncio.to_thread(
-                owner.validate_for_forwarding,
-                confirmation_id,
-                p3_binding,
-                owner_context,
-                now=authority.observed_at,
-            )
-            consumer = CallLocalProductionConfirmationConsumer(
-                expected_binding=binding,
-                validated=validated,
-                forwarder=forwarder,
-                now=authority.observed_at,
-            )
-            # Target clarification was consumed by the preliminary resolution.
-            # Retain its exact origin digest for the final authority reread;
-            # re-consuming the one-shot selection would reject valid consent.
-            confirmed_request = replace(
-                request, confirmation_id=confirmation_id,
-                clarification_answer=None,
-                clarification_answer_fingerprint=(request.clarification_answer.fingerprint
-                    if request.clarification_answer is not None else request.clarification_answer_fingerprint),
-            )
-            confirmed = await asyncio.to_thread(
-                self._task_intent_bridge.resolve_production,
-                confirmed_request,
-                authority.reader,
-                origin_authority,
-                consumer,
-                self._production_clarification_owner,
-            )
-            if (
-                confirmed.outcome is not ProductionTaskPolicyOutcome.PROPOSED
-                or confirmed.confirmation != "confirmed"
-            ):
-                raise FormalTaskViolation(
-                    confirmed.reason,
-                    "production confirmation failed its final authority reread",
-                    ErrorCode.CONFLICT,
-                )
-            async with self._lock:
-                if (
-                    self._pending_production_task_intents.get(pending.token)
-                    is not pending
-                ):
+                if self._pending_production_task_intents.get(pending.token) is not pending:
                     raise FormalTaskViolation(
                         "TASK_INTENT_CONTINUATION_UNAVAILABLE",
                         "production confirmation lost its exact continuation",
                         ErrorCode.CONFLICT,
                     )
                 self._pending_production_task_intents.pop(pending.token, None)
-            result = await self._invoke_production_resolution(
-                clean=clean,
-                request_id=request_id,
-                resolution=confirmed,
+
+        async with self._p3_operation_lock:
+            async with self._lock:
+                if self._pending_production_task_intents.get(pending.token) is not pending:
+                    raise FormalTaskViolation(
+                        "TASK_INTENT_CONTINUATION_UNAVAILABLE",
+                        "production confirmation continuation is no longer current",
+                        ErrorCode.CONFLICT,
+                    )
+            confirmed, result = await self._p3_composition.confirm_and_handle_production_request(
+                request=request, preliminary=preliminary, authority=authority,
                 origin_authority=origin_authority,
-                confirmation_consumer=consumer,
+                confirmation_owner=self._p3_confirmation_owner,
+                confirmation_forwarder=self._p3_confirmation_forwarder,
+                confirmation_id=pending.confirmation_id,
+                owner_context=pending.confirmation_owner_context,
+                bridge=self._task_intent_bridge,
+                clarification_owner=self._production_clarification_owner,
+                claim_continuation=claim_continuation,
+                bearer_token=clean.get("auth_token"),
+                request_id=f"production-core-{request_id}",
+                session_id=str(clean["session_id"]),
+                correlation_id=str(clean["correlation_id"]),
                 native_authority=native_authority,
             )
+            if result.ok and confirmed.operation in {"task.create", "task.create_successor"}:
+                self._require_create_receipt(result.payload.get("result"), confirmed.operation)
             return confirmed, result
 
     async def _run_p3_production_intent(
@@ -12222,16 +12148,31 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
         verified_commit: TurnCommit | None = None,
         semantic_decision: TaskSemanticDecision | None = None,
         native_authority: NativeP3ActivationAuthority | None = None,
+        native_request: ProductionTaskIntentRequest | None = None,
     ) -> P3RouteResult:
         bridge = self._task_intent_bridge
         if bridge is None:
+            if native_request is not None:
+                raise RuntimeError("Native Task intent bridge is unavailable")
             return _error_result(request_id, reason="PRODUCT_P3_INTENT_DISABLED")
         source = str(clean["source"])
         commit: TurnCommit | None = verified_commit
         pending: _PendingProductionTaskIntent | None = None
         try:
             semantic_record = None
-            if source == "structured":
+            if native_request is not None:
+                if (native_authority is None or source != "structured"
+                    or native_request.origin is not ProductionIntentOrigin.STRUCTURED
+                    or native_request.source_id != clean.get("source_id")
+                    or native_request.scope.session_id != clean.get("session_id")
+                    or clean.get("continuation_id") is not None):
+                    raise FormalTaskViolation(
+                        "NATIVE_TASK_REQUEST_BINDING_MISMATCH",
+                        "Native Task admission requires its exact internal authority",
+                        ErrorCode.PERMISSION_DENIED,
+                    )
+                proposal = native_request.proposal
+            elif source == "structured":
                 pending = await self._production_intent_continuation(
                     clean=clean, source_text=None
                 )
@@ -12362,6 +12303,7 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
                 )
             if (
                 auth_operation not in P3_PRODUCTION_MUTATIONS
+                and native_request is None
                 and not self._settings.p3_text_enabled
             ):
                 raise FormalTaskViolation(
@@ -12376,7 +12318,14 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
                 session_id=str(clean["session_id"]),
                 native_authority=native_authority,
             )
+            if native_request is not None and native_request.scope != authority.scope:
+                raise FormalTaskViolation(
+                    "NATIVE_TASK_REQUEST_BINDING_MISMATCH",
+                    "Native Task scope changed during admission",
+                    ErrorCode.PERMISSION_DENIED,
+                )
             command_id = (
+                native_request.command_id if native_request is not None else
                 str(pending.resolution.command_id)
                 if pending is not None
                 else "production-intent."
@@ -12429,7 +12378,9 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
                     scope=authority.scope, context_id=semantic_record.context_id,
                     version=semantic_record.version, commit_sha256=consumer,
                 )
-            if pending is not None and pending.kind == "confirmation":
+            if native_request is not None:
+                intent_request = native_request
+            elif pending is not None and pending.kind == "confirmation":
                 pending_origin = (
                     ProductionIntentOrigin.STRUCTURED
                     if pending.source == "structured"
@@ -12492,6 +12443,11 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
                 _RejectingProductionConfirmationConsumer(),
                 self._production_clarification_owner,
             )
+            if native_request is not None and resolution.outcome is not ProductionTaskPolicyOutcome.PROPOSED:
+                return _success_result(request_id, {
+                    "status": "rejected", "reason": resolution.reason,
+                    "operation": proposal.operation,
+                }, self._p3_control_manifest())
             if operation_hint is not None and resolution.operation != operation_hint:
                 raise FormalTaskViolation(
                     "TASK_INTENT_HINT_MISMATCH",
@@ -12540,7 +12496,8 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
                     retained.intent_task_id = resolution.target_task_id
                     retained.intent_scope = authority.scope
 
-            if (
+            native_delegation = native_request is not None and resolution.operation in P3_PRODUCTION_MUTATIONS
+            semantic_delegation = (
                 (pending is None or pending.kind == "clarification")
                 and semantic_decision is not None
                 and (semantic_decision.requests_local_artifacts
@@ -12548,12 +12505,11 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
                 and commit is not None
                 and source in {"voice", "text"}
                 and resolution.outcome is ProductionTaskPolicyOutcome.PROPOSED
-            ):
-                # Current explicit local creation/control supplies consent
-                # for this exact operation, not a fabricated second utterance.
-                # Retain/consume the normal durable, origin-bound claim, then
-                # use the same final authority reread as a two-turn confirmation.
-                if (
+            )
+            if native_delegation or semantic_delegation:
+                # Both explicit delegation sources use the same durable claim
+                # and final authority reread as a two-turn confirmation.
+                if semantic_delegation and (
                     semantic_decision.commit_sha256
                     != hashlib.sha256(commit.canonical_bytes()).hexdigest()
                     or resolution.origin_binding is None
@@ -12584,17 +12540,18 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
                 )
                 async with self._lock:
                     pending = self._pending_production_task_intents[token]
-                record = await asyncio.to_thread(
-                    self._semantic_continuity.journal.find_semantic_context,
-                    scope=authority.scope, kind="confirmation",
-                    source_id=f"intent:{resolution.fingerprint}",
-                )
-                if record is None or record.payload.get("token") != token:
-                    raise FormalTaskViolation(
-                        "SEMANTIC_DELEGATION_BINDING_MISMATCH",
-                        "local delegation lost its durable context", ErrorCode.CONFLICT,
+                if semantic_delegation:
+                    record = await asyncio.to_thread(
+                        self._semantic_continuity.journal.find_semantic_context,
+                        scope=authority.scope, kind="confirmation",
+                        source_id=f"intent:{resolution.fingerprint}",
                     )
-                await self._semantic_continuity.consume(record, commit)
+                    if record is None or record.payload.get("token") != token:
+                        raise FormalTaskViolation(
+                            "SEMANTIC_DELEGATION_BINDING_MISMATCH",
+                            "local delegation lost its durable context", ErrorCode.CONFLICT,
+                        )
+                    await self._semantic_continuity.consume(record, commit)
 
             if pending is not None and pending.kind == "confirmation":
                 voice_origin = await self._production_voice_origin(pending)
@@ -12846,6 +12803,8 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
                 ),
             )
         except FormalTaskViolation as error:
+            if native_request is not None:
+                raise  # Native's immutable call receipt owns its rejection projection.
             await self._release_failed_production_intent(
                 current_commit=commit,
                 current_source=source,
@@ -12860,6 +12819,8 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
                 origin_id=(None if commit is None else commit.interaction_id),
             )
         except Exception as error:  # noqa: BLE001 - never leak resolver details
+            if native_request is not None:
+                raise
             await self._release_failed_production_intent(
                 current_commit=commit,
                 current_source=source,

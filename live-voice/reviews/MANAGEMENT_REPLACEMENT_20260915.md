@@ -804,12 +804,17 @@ SDK local commit: `3300504a7e88b4f5436040c1deace4be322c4623` — `refactor(tasks
 
 ## User-adjusted objective: complete management responsibilities
 
-The user confirmed that the original five workstreams remain mandatory and
-ordered. Change the execution unit, not the total scope: compare Task主体 first,
-select a complete replaceable responsibility, integrate its real consumers,
-remove the old owner/branches and verify the boundary together. Continue Work
-and remaining Host/Voice afterward. Task entrypoint unification is a candidate,
-not a predetermined route or a replacement for the Task comparison.
+Corrected after checking the original request and the user's accepted adjustment:
+the five workstreams describe the overall integration roadmap. The current phase
+is the formal Task application-management boundary: shared Host acceptance,
+confirmation, control, query and results for Voice, text and the Task panel, with
+actual duplicate production state and branches removed. Task/native comparison
+informs that replacement; it does not authorize substituting an indefinite audit.
+Affected Host/Voice integration, verification, review, accounting and local
+commits are included. Work unification is decided after this Task boundary;
+broader Work/audio lifecycle restructuring is not a concurrent phase obligation.
+The earlier claim that the user reconfirmed all five as one continuous phase was
+an overstatement of the conversation. User instructions supersede that wording.
 
 Baseline for resumed work: Host 7c4802ca6aae91cdc3f056fc6572406e02dbc50c;
 SDK 3300504a7e88b4f5436040c1deace4be322c4623; both clean; Host ahead 58/behind 0;
@@ -818,10 +823,13 @@ The previous net -1299 includes -1003 dormant frontend lines and does not prove
 large management replacement. Avoid repeating broad audit prose or installed
 checks for incidental cleanup. Prior compatibility decisions and exclusions hold.
 
-The app goal record retains its original matching umbrella objective and an old
-blocked status. Available goal tools cannot edit/resume an unfinished goal; do
-not falsely complete it to replace that record. The accepted objective and active
-execution are recorded here and in STATUS; the old compatibility block is resolved.
+Goal-state correction: the earlier compatibility blocker is resolved. The user
+has now saved the concrete formal Task objective in the app, and `get_goal`
+confirms that full description with status `active`. The prior literal `resume`
+objective and blocked status are historical, not current blockers. The app goal,
+this phase description and STATUS agree: complete Task application management,
+then decide Work; do not broaden audio lifecycle scope or claim that a local
+cleanup closes the goal. Existing authorization remains in force.
 
 ### Resumed independent comparison: replacement feasibility
 
@@ -933,3 +941,238 @@ SDK commit `e57563a308c8b55f27673e7e04e33de3f9254471`:
 `refactor(tasks): share durable queue control between reads and mutations`.
 The paired Host commit contains the consumer replacement, scoped tests and this
 evidence. Production hashes match the reviewed/tested working source.
+
+
+## Active Task recovery convergence (2026-09-15)
+
+Tier 2, in progress from Host `83dc122c` / SDK `e57563a30`. Complete
+boundary: shared Task facts and recovery for the visible Task surface and Voice;
+remove duplicate Voice mutation/recovery owners while preserving exact event
+provenance before presentation ACK. Independent inspection confirms the old
+manual mutation controls are hidden diagnostics, not visible product consumers.
+Shared Owner selection cannot substitute for background reads: it changes user
+selection and invalidates concurrent reads. Its event validation must first gain
+the existing leaf's identity, attempt-segment and historical-prefix guarantees.
+
+First implementation removes duplicate initialization of the same accepted Voice
+Task: `bootstrapCreatedP3ProgressRoute` must join its existing per-task progress
+owner, rather than first constructing another retry-inspection leaf and running
+an independent status/history recovery. Preserve accepted-input non-replay,
+transient-read recovery, independent A/B owners, exact session/activation fences,
+Task-target persistence and Exit cleanup. Owned surfaces are the integrated panel
+and its mounted Voice creation/recovery tests. No audio policy, backend schema,
+retry eligibility policy, deployment or physical-device acceptance changes.
+This step is not completion of the shared Task management boundary.
+
+
+### Historical alignment check and current working evidence
+
+The recovery change above is a subordinate step, not a replacement goal or phase
+closure. It currently changes only the integrated frontend panel; no common Host
+acceptance/confirmation/control/result service replacement is claimed. The
+focused mounted checks passed 15 cases; the strengthened Native association case
+passed separately (overlapping), proving one UI status read plus two progress
+initialization status reads and two event-history reads in total, without a third
+Task replica. Frontend `tsc --noEmit` and `git diff --check` passed. Tests use mounted
+browser/transport fixtures, not physical audio or real backend integration proof.
+No commit or broad statistics update is made for this unfinished phase. Preserve
+the working changes while completing the accepted Task management boundary.
+
+
+### Common production intent admission: Native consumer
+
+Tier 3 internal authority composition, in progress. Native Task business calls
+currently independently resolve, issue a durable confirmation and confirm/invoke.
+Replace that chain with the existing production-intent admission flow also used
+by text and the Task panel. Preserve Native command IDs, typed NativeTaskSource,
+current activation authority, explicit local-delegation capability checks, durable
+confirmation and final authority reread. Native calls remain preclassified and
+never gain a natural-language classifier or fabricated second utterance. No wire
+parameter enables Native consent. Keep result/rejection projections and immutable
+call receipts; no Work, audio, schema or deployment change. Validate with actual
+SQLite Native create/status/adjust/cancel/replay/isolation and affected production
+intent regressions. This removes a duplicate consumer orchestration chain; moving
+the remaining application management out of Voice is still required.
+
+Working evidence for common Native admission: Native registry/authority **21
+passed**, including four added rejection/immutable-replay cases (capability,
+confirmation, ordinary exception, Store rejection) and existing real SQLite
+create/status/adjust/cancel/origin/replay checks. Semantic registry selection
+`local or cancel or adjust or structured`: **38 passed, 77 deselected**. Native
+command identity and persisted NativeTaskSource match the common admitted request;
+completed replay does not enter admission again. An initial added assertion used
+the wire `revision` shape on PersistentTaskRecord; corrected to its actual
+`create_command_id` field, then the complete Native selection passed.
+
+Independent design review found a preflight-error projection difference. Native
+exceptions now propagate to the original immutable-call receipt owner; Store
+rejections preserve the original nested error. New tests verify exact rejection
+replay, zero Task rows and zero Agent executions. Review found no new confirmation
+bypass or source loss; final complete-boundary review remains due after the Host
+service/state replacement. Source changes remain uncommitted as part of that
+unfinished boundary. No runtime service, private configuration or deployment
+changed. Do not rerun these checks without an affected change.
+
+### Host confirmation and execution ownership (in progress)
+
+Tier 3 continuation of common Task admission. Extend the existing authenticated
+Host composition to own confirmation binding validation, single-use consumption,
+final resolution and Core dispatch in one call. Registry retains transport
+continuation membership under its existing operation lock and exact receipt
+validation before Voice association. No new manager, ledger, wire field or
+confirmation policy. Preserve clarification origin digests, Native source,
+preflight exception projection, stale-continuation rejection and unknown outcomes.
+Affected evidence: real SQLite Native mutation/replay/isolation and semantic
+confirmation/clarification/cancel/recovery tests; final independent boundary review
+remains required. This is an implementation step toward full Task ownership,
+not a claim that remaining Registry admission or frontend state is unified.
+
+Implemented the Host confirmation-through-dispatch method. Registry no longer
+constructs the call-local confirmation consumer or passes its consumed claim
+between its confirmation and invocation methods. It holds the existing operation
+lock, checks exact pending membership before entry and atomically claims it through
+a callback immediately before Host dispatch. Create receipt validation remains
+before any Voice Task association.
+
+Current-source verification: Native registry/authority plus the entire semantic
+registry file **136 passed**. This covers real SQLite create/control, cross-entry
+confirmation, duplicate finals, clarification, replay and unknown Core outcomes.
+The rejection selection with an added lost-continuation case **5 passed, 12
+deselected** (four overlap the 136). The added case removes pending membership
+after confirmation consumption and before final dispatch: rejection is replayed
+exactly, with no Task rows or Agent executions.
+
+An additional legacy Registry selection produced **11 failed, 1 passed, 210
+deselected**. It reaches retired `handle_p2_submit` or a fixture whose production
+intent capability is unavailable, before this confirmation flow. Those guards
+are also present at HEAD; no baseline test run was performed. The failures are
+retained as a test-migration limitation, not counted as current-boundary evidence
+or silently converted into passes. Applicable confirmation evidence comes from
+the current semantic/Native consumers above. Full module closure remains pending.
+
+Independent read-only review found no confirmed new production-path issue. It
+identified one affected test hook: in-flight mutation replay paused the removed
+Registry invocation path. The test now pauses the actual Host invocation after
+the real effect, preserving revoke-after-effect, replay reauthorization and the
+single Task assertion. Host `test_p3_authenticated_composition.py`, selection
+`production and (registry or confirmation)`: **11 passed, 160 deselected**.
+`git diff --check` passed. These checks close this intermediate confirmation
+change only; no phase-completion claim, local commit, deployment or full-product
+acceptance is made. Remaining work includes common admission/state ownership and
+the Task UI/Voice fact and recovery owners.
+
+### Shared foreground/background Task reads (in progress)
+
+Tier 2, existing FormalP3TaskExperienceOwner, integrated Voice recovery and their
+tests. Give the Host Task owner a selection-independent status/history read used
+by both Task selection and Voice initialization. Concurrent reads of the same
+Task share only the in-flight read; no persistent authority cache or second Task
+store. Session/connection epoch invalidates old reads, while selecting Task B must
+not invalidate background Task A. Preserve bounded pagination and Voice's stricter
+event/Attempt validation before progress activation; background reads never select
+a Task, write selection storage, issue a command or ACK a notification. Result
+reads remain selected-detail behavior. This removes duplicate read orchestration;
+full event-state ownership and remaining mutation/recovery removal stay in scope.
+
+Implemented: `select` and Voice initialization now use the same Host Task-owner
+status/history reader. The reader bounds pagination and concurrent flights,
+shares a flight by epoch/Session/Task, and continues between pages only while a
+consumer remains current. Each consumer checks its own lifetime before using the
+result. Background reads neither publish selection nor write its storage. Voice
+no longer performs its separate bootstrap status plus retry-inspection status
+and history reads; it validates the shared response with the existing leaf.
+
+Independent inspection found two issues, both fixed: status/history head changes
+now carry the existing retryable projection-mismatch reason, and complete checked
+pages are combined before the leaf validates the event chain. Passing individual
+pages to that full-history reducer was invalid. No event proof was relaxed.
+
+Verification on current source: Task-owner **44 passed**, including joined reads
+with one retired consumer, A/B selection isolation, caller/disconnect/Session
+retirement with no subsequent history reads, and changed-head rejection followed
+by fresh recovery. Mounted Task/progress selection **47 passed, 1 skipped**, with
+paginated A/B Voice recovery, transient failures, exact progress/ACK, Native
+association, AUDIO-to-TEXT fallback, and Exit cleanup. The pre-existing skipped
+provider-starting capture/running-fallback case is not credited as evidence.
+Full frontend `tsc --noEmit` and `git diff --check` passed.
+
+Initial tests caught a missing import and continuation of a read after its sole
+consumer retired; both were fixed. Mounted fixtures were upgraded from the old
+Voice-only partial responses to complete Host status/history envelopes, preserving
+their Task names and lifecycle truth. Request-count assertions now reflect the
+removed extra status read and explicit pagination. These fixture corrections do
+not weaken current response validation. Progress-event reconciliation still
+performs its own authoritative history proof and Voice retains its leaf replica;
+the obsolete manual mutation owner is also still present. This working boundary
+is not the full Task phase and remains uncommitted with the earlier changes.
+
+### Retire the duplicate manual mutation owner (in progress)
+
+Tier 2, integrated Panel/View, stock Web activation owner, and their affected
+tests. Visible Task controls already use FormalP3TaskExperienceOwner. Remove the
+hidden legacy Task editor and its independent mutation/confirmation owner,
+prepared mutation replica, raw-ASR Task commit branch and accepted-command polling.
+Keep actual Voice progress recovery and the shared visible Task controls. Ordinary
+committed speech continues through unified input; no hidden structured-Task route
+may invent a second commit. No wire/backend/schema/audio policy change. Transfer
+unique exact-target, unknown replay and confirmation rejection checks to the
+shared Task owner before retiring old implementation-specific tests. This deletion
+is explicitly the hidden manual chain, not proof that active progress state and
+all Host admission are unified. Those remain required for phase completion.
+
+### Task control/initialization group delivery
+
+This group closes common Native admission, Host confirmation-through-dispatch,
+shared initial reads, and retirement of the duplicate hidden manual controller.
+It is one coherent local delivery, not completion of the full Task goal. Earlier
+"uncommitted" statements above record intermediate checkpoints; the delivery
+commit includes those working changes after the final checks and review.
+
+Removed production ownership: ProductWebP3MutationOwner and its private request
+fingerprint/confirmation/RPC state; Panel pending and prepared mutations, separate
+issue/execute orchestration, raw-ASR Task-origin commit recovery, manual accepted
+polling, retry-inspection state and hidden mutation editor. Visible issue/confirm
+continue through FormalP3TaskExperienceOwner. Actual Voice progress remains;
+taskRecoveryReason is a diagnostic string, never a Task/authorization owner.
+
+Test migration is contract-specific:
+
+| Retired implementation tests | Current evidence |
+|---|---|
+| Nine stock mutation-owner cases: exact targets, forged echoes, replay, unknown, definitive rejection, feature-off | Shared Task-owner exact retry wire fields, six new forged operation/command/target cases with exact retained RPC and no accepted result, existing unknown-after-Attempt-change, concurrent confirm, definitive rejection and feature-off cases |
+| Hidden form create/cancel/retry display and source-regex assumptions | Visible Task control tests and a check that Voice diagnostics expose no second mutation editor |
+| Five mounted hidden-form cases: manual create progress, historical selection, competing inspections and raw-ASR Task draft reconstruction | Current Native/unified create and A/B progress, shared Task selection/read epoch tests, durable Voice discovery and current committed-input recovery; the retired P2 task-submit reconstruction is deliberately absent |
+| Retained P2 input locking and malformed persisted-target barrier | Kept positive/zero-effect tests; recovery reason is displayed independently of the removed editor |
+
+Final frontend evidence: Task owner, stock activation and Panel units **206
+passed**; affected mounted Task/progress/recognition/confirmation/retained/draft/
+refresh selection **52 passed, 1 skipped**. The prior provider-starting capture
+case remains skipped, not passed. Full `tsc --noEmit` passed. Earlier intermediate
+failures exposed the accidentally removed terminal-status declaration and loss
+of the recovery-reason display; both are fixed and all affected mounted checks
+pass. Terminal output, queued announcements and DOM-gated ACK remain intact.
+
+Backend evidence remains the current-source **136 passed**, the five rejection
+cases including lost continuation (four overlapping), and **11 Host authority/
+confirmation cases passed** recorded above. No backend source changed afterward.
+The eleven legacy Registry failures remain documented; they do not become passes.
+Independent read-only final review checked the complete frontend replacement and
+the repaired terminal/diagnostic paths, found no remaining blocking issue, and
+accepted this group for local commit. That review did not independently run Main's
+tests. No new physical microphone/Provider or deployment acceptance is claimed.
+
+[Exact accounting and production hashes](../evidence/MANAGEMENT_TASK_CONTROL_20260915.json):
+Voice +155/-1309 = **-1154**; Host +174/-28 = **+146**; SDK unchanged. Combined
+**+329/-1337, net -1008** from Host `83dc122c` / SDK `e57563a30`. The main reduction
+is the hidden manual chain; active progress replicas still exist. Cumulative goal
+production is **+781/-3093, net -2312**, including the prior 1003 dormant frontend
+lines. Current official-baseline net additions: Voice **109867**, Host **48139**,
+SDK **34212**, total **192218**. The three architecture headers use these same
+figures; their historical bodies retain their original dated numbers.
+
+Commit scope: these Task control/initialization production changes, directly
+affected tests, corrected current phase documentation and accounting. Exclusions:
+Work unification, audio lifecycle restructuring, SDK changes, runtime deployment,
+remote updates, private configuration and user project files. Full common progress
+state/receipt/result ownership and remaining Host admission responsibilities stay
+open under the active goal.

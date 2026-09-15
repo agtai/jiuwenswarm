@@ -1143,19 +1143,6 @@ function mountedGenerationInterruptElement(i18n, sessionId, request, isConnected
   );
 }
 
-function mountedP3Controls(renderer) {
-  const root = renderer.root.findByProps({ 'data-testid': 'live-voice-integrated-p3-mutation' });
-  const select = root.findByType('select');
-  const buttons = root.findAllByType('button');
-  const button = label => {
-    const selected = buttons.find(candidate => candidate.children.some(child => child === label));
-    assert.ok(selected, `mounted P3 button ${label} must exist`);
-    return selected;
-  };
-  const hasButton = label => buttons.some(candidate => candidate.children.some(child => child === label));
-  return { root, select, button, hasButton };
-}
-
 function mountedTaskIntentControls(renderer) {
   const root = renderer.root.findByProps({ 'data-testid': 'live-voice-integrated-formal-task-intent' });
   return {
@@ -1198,6 +1185,25 @@ function mountedP3Status(
       },
     },
   };
+}
+
+// Shared Task reads use the full Host response contract, including RPC identity.
+function mountedTaskReadEnvelope(response, requestId) {
+  const result = response.result;
+  if (result.task) {
+    Object.assign(result.task, {
+      spec: result.task.spec ?? { name: result.task.task_id, instruction: 'Save the report.' },
+      revision: { number: 1, predecessor_task_id: null, create_command_id: 'create-a' },
+      queued: false, admission: null,
+    });
+    Object.assign(result.attempt, {
+      state: result.task.state === 'terminal' ? 'terminal' : result.task.state === 'accepted' ? 'accepted' : 'running',
+      outcome: result.task.outcome,
+    });
+  } else if (result.events) {
+    Object.assign(result, { has_more: result.has_more ?? false, next_after_seq: result.next_after_seq ?? null });
+  }
+  return { ...response, request_id: requestId, error: null };
 }
 
 function mountedP3Events(
@@ -2236,403 +2242,6 @@ test('mounted route panel survives session replacement and closes every effect o
     renderer.unmount();
   });
   assert.equal(renderer.toJSON(), null);
-});
-
-test('mounted P3 origin panel reconciles and ACKs authoritative completed and failed progress', async () => {
-  for (const outcome of ['completed', 'failed']) {
-    const i18n = await createI18n();
-    const browser = installP1BrowserEnvironment();
-    const calls = [];
-    const productStates = [];
-    let binding = null;
-    let p2Binding = null;
-    let publishP2Notification = null;
-    let exactProgressActivation = null;
-    let progressListener = null;
-    let mutationCount = 0;
-    let progressAckTransportFailuresRemaining = outcome === 'completed' ? 1 : 0;
-    let taskEventsTransportFailuresRemaining = outcome === 'failed' ? 4 : 0;
-    let taskEventsIncludeTerminal = outcome !== 'completed';
-    let renderer;
-    const progressSubscribe = listener => {
-      progressListener = listener;
-      return () => {
-        if (progressListener === listener) progressListener = null;
-      };
-    };
-    const taskEvents = () => {
-      const scope = {
-        subject_id: binding.subject_id,
-        session_id: binding.session_id,
-        project_id: binding.project_id,
-        assurance: 'authenticated',
-      };
-      const events = [
-        {
-          event_id: 'task-a:event:0',
-          task_id: 'task-a',
-          attempt_id: 'attempt-a',
-          scope,
-          seq: 0,
-          event_type: 'task.accepted',
-          state: 'accepted',
-          outcome: null,
-          producer: 'task_core',
-          source_event_id: null,
-          causation_id: 'create-a',
-          correlation_id: binding.correlation_id,
-          occurred_at: '2026-08-11T08:00:00Z',
-          details: {},
-        },
-      ];
-      if (taskEventsIncludeTerminal) {
-        events.push({
-          event_id: 'task-a:event:1',
-          task_id: 'task-a',
-          attempt_id: 'attempt-a',
-          scope,
-          seq: 1,
-          event_type: 'task.terminal',
-          state: 'terminal',
-          outcome,
-          producer: 'task_core.delivery',
-          source_event_id: 'executor-terminal-a',
-          causation_id: 'executor-terminal-a',
-          correlation_id: binding.correlation_id,
-          occurred_at: '2026-08-11T08:00:01Z',
-          details: {},
-        });
-      }
-      return {
-        ok: true,
-        result: {
-          task_id: 'task-a',
-          after_seq: -1,
-          head_seq: taskEventsIncludeTerminal ? 1 : 0,
-          events,
-        },
-      };
-    };
-    const request = async (method, params, options) => {
-      calls.push({ method, params: { ...params }, requestId: options?.requestId ?? null });
-      if (method === 'live_voice.composition.p2.activate') {
-        p2Binding = { ...params };
-        return { ok: true, result: { status: 'active', ...params, replayed: false } };
-      }
-      if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
-      if (method === 'live_voice.composition.p2.notification.next') {
-        return new Promise(resolve => {
-          publishP2Notification = resolve;
-        });
-      }
-      if (method === 'live_voice.composition.p2.presentation.ack') {
-        return {
-          ok: true,
-          result: {
-            status: 'presentation_acknowledged',
-            ...params,
-            accepted: true,
-            replayed: false,
-            history_records_written: 1,
-            history_pending: false,
-          },
-        };
-      }
-      if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
-      if (method === 'live_voice.composition.p3.progress.activate') {
-        exactProgressActivation = { ...params };
-        return { ok: true, result: mountedProgressActivation(params) };
-      }
-      if (method === 'live_voice.composition.p3.progress.close') {
-        return { ok: true, result: { status: 'closed', ...params } };
-      }
-      if (method === 'live_voice.composition.p3.confirmation.issue') {
-        binding = {
-          subject_id: 'mounted-terminal-subject',
-          session_id: params.session_id,
-          project_id: 'mounted-terminal-project',
-          correlation_id: params.correlation_id,
-          generation: 1,
-        };
-        return {
-          ok: true,
-          result: {
-            status: 'confirmation_issued',
-            operation: 'task.create',
-            command_id: params.command_id,
-            target_task_id: null,
-            confirmation_id: `confirmation-${params.command_id}`,
-            expires_at: '2999-08-11T08:00:00Z',
-            task_control_binding: binding,
-          },
-        };
-      }
-      if (method === 'live_voice.composition.p3.mutate') {
-        mutationCount += 1;
-        const taskId = mutationCount === 1 ? 'task-a' : 'task-b';
-        return {
-          ok: true,
-          result: {
-            status: 'mutation_processed',
-            operation: 'task.create',
-            command_id: params.command_id,
-            target_task_id: null,
-            formal_task_result: {
-              task_id: taskId,
-              attempt_id: mutationCount === 1 ? 'attempt-a' : 'attempt-b',
-              attempt_number: 1,
-              state: 'accepted',
-              outbox_id: 'outbox-create-a',
-            },
-          },
-        };
-      }
-      if (method === 'live_voice.task.events') {
-        if (taskEventsTransportFailuresRemaining > 0) {
-          taskEventsTransportFailuresRemaining -= 1;
-          throw Object.assign(new Error('mounted task.events transport timeout'), { reason: 'REQUEST_TIMEOUT' });
-        }
-        return taskEvents();
-      }
-      if (method === 'live_voice.composition.p3.progress.ack') {
-        if (progressAckTransportFailuresRemaining > 0) {
-          progressAckTransportFailuresRemaining -= 1;
-          throw Object.assign(new Error('mounted progress ACK transport unavailable'), { reason: 'REQUEST_TIMEOUT' });
-        }
-        return {
-          ok: true,
-          result: {
-            status: 'acknowledged',
-            replayed: false,
-            attempt_id: 'attempt-a',
-            ...params,
-            acknowledgement: 'web_ui_text_consumed',
-          },
-        };
-      }
-      throw new Error(`unexpected terminal-progress request: ${method}`);
-    };
-
-    try {
-      await act(async () => {
-        renderer = create(
-          mountedP3Element(i18n, `mounted-terminal-${outcome}`, request, undefined, true, progressSubscribe, {
-            onProductVoiceStateChange: state => productStates.push(state),
-            progressAckCapacity: outcome === 'completed' ? 1 : undefined,
-          }),
-        );
-        await waitForMounted(() => JSON.stringify(renderer.toJSON()).includes('Formal P3 task control'), 'terminal-progress P3 controls did not mount');
-      });
-      await act(async () => {
-        const controls = mountedP3Controls(renderer);
-        controls.root.findByType('textarea').props.onChange({ target: { value: 'Read the disposable fixture.' } });
-        controls.root.findAllByType('input')[0].props.onChange({ target: { value: 'Mounted terminal task' } });
-      });
-      await act(async () => {
-        mountedP3Controls(renderer).button('Issue confirmation').props.onClick();
-        await waitForMounted(
-          () => mountedP3Controls(renderer).hasButton('Execute confirmed mutation'),
-          'terminal-progress task.create confirmation did not settle',
-        );
-      });
-      await act(async () => {
-        mountedP3Controls(renderer).button('Execute confirmed mutation').props.onClick();
-        await waitForMounted(
-          () => exactProgressActivation !== null && mountedP3Controls(renderer).select.props.value === 'task.cancel',
-          'terminal-progress task.create did not bind its exact progress route',
-        );
-        await waitForMounted(
-          () =>
-            renderer.root
-              .findByProps({ 'data-testid': 'live-voice-integrated-p3-activation' })
-              .findAllByType('code')
-              .some(node => node.children.some(child => child === 'p3:active')),
-          'terminal-progress exact route did not become active',
-        );
-      });
-      assert.equal(typeof progressListener, 'function');
-      if (outcome === 'completed') {
-        const acceptedProgress = mountedLifecycleProgress(binding, exactProgressActivation, {
-          state: 'accepted',
-          eventType: 'task.accepted',
-          seq: 0,
-        });
-        for (const field of [
-          'presentation_class',
-          'response_ref',
-          'unit_id',
-          'expected_event_head',
-          'result_source_event_id',
-          'state',
-        ]) {
-          delete acceptedProgress[field];
-        }
-        const parsedLegacyAccepted = parseProductTextProgressEvent(acceptedProgress);
-        assert.notEqual(parsedLegacyAccepted, null);
-        assert.equal(parsedLegacyAccepted.consumption_mode, 'legacy_delivery');
-        await act(async () => {
-          progressListener(acceptedProgress);
-          await waitForMounted(
-            () => renderer.root.findAllByType('code').some(node => node.children.some(child => child === acceptedProgress.delivery_id)),
-            'mounted origin panel did not publish the retained accepted delivery',
-          );
-        });
-        // The primary product carrier receives progress through a committed
-        // effect. Flush that render before waiting for its DOM-owned ACK.
-        await act(async () => {
-          await waitForMounted(
-            () => calls.filter(call => call.method === 'live_voice.composition.p3.progress.ack').length === 1,
-            'mounted origin panel did not attempt the accepted delivery ACK',
-          );
-        });
-        const legacyAck = calls.find(call => call.method === 'live_voice.composition.p3.progress.ack');
-        assert.ok(legacyAck);
-        const legacyNode = renderer.root.findByProps({ 'data-testid': 'live-voice-integrated-product-progress' });
-        assert.equal(legacyNode.props['data-delivery-id'], acceptedProgress.delivery_id);
-        for (const attribute of [
-          'data-presentation-binding',
-          'data-presentation-class',
-          'data-response-interaction-id',
-          'data-response-id',
-          'data-response-generation',
-          'data-unit-id',
-          'data-expected-event-head',
-          'data-result-source-event-id',
-        ]) {
-          assert.equal(legacyNode.props[attribute], undefined, `feature-off legacy DOM retained ${attribute}`);
-        }
-        for (const forbidden of [
-          'presentation_class',
-          'response_ref',
-          'unit_id',
-          'expected_event_head',
-          'result_source_event_id',
-          'presentation_binding',
-        ]) {
-          assert.equal(forbidden in legacyAck.params, false, `feature-off legacy ACK acquired ${forbidden}`);
-        }
-      }
-      const terminalProgress = mountedTerminalProgress(binding, exactProgressActivation, outcome);
-      taskEventsIncludeTerminal = true;
-      const parsedTerminalProgress = parseProductTextProgressEvent(terminalProgress);
-      assert.notEqual(parsedTerminalProgress, null);
-      assert.equal(progressMatchesOwnedBinding(parsedTerminalProgress, exactProgressActivation, binding.session_id), true);
-      await act(async () => {
-        progressListener(terminalProgress);
-        await waitForMounted(
-          () => calls.some(call => call.method === 'live_voice.task.events'),
-          `mounted origin panel did not reconcile ${outcome}: ${calls.map(call => call.method).join(',')}`,
-        );
-        if (outcome === 'completed') {
-          await waitForMounted(
-            () => calls.filter(call => call.method === 'live_voice.task.events').length === 2,
-            'mounted origin panel did not reconcile the terminal delivery before ACK retention capacity recovery',
-          );
-          await waitForMounted(
-            () => renderer.root.findAllByType('code').some(node => node.children.some(child => child === terminalProgress.delivery_id)),
-            'actual DOM adoption remains truthful when ACK retention fails; durable unread must replay it',
-          );
-        }
-        if (outcome === 'failed') {
-          await waitForMounted(
-            () => calls.filter(call => call.method === 'live_voice.task.events').length === 4,
-            'transient task.events failures did not stop after the bounded reconciliation attempts',
-            3_000,
-          );
-          assert.equal(
-            renderer.root.findAllByType('code').some(node => node.children.some(child => child === terminalProgress.delivery_id)),
-            false,
-            'transient task.events exhaustion must not publish unverified progress',
-          );
-          progressListener(terminalProgress);
-          await waitForMounted(
-            () => calls.filter(call => call.method === 'live_voice.task.events').length === 5,
-            'server replay of a transiently exhausted delivery was quarantined',
-          );
-        }
-        await waitForMounted(
-          () => renderer.root.findAllByType('code').some(node => node.children.some(child => child === outcome)),
-          `mounted origin panel did not render ${outcome}`,
-        );
-        await waitForMounted(() => calls.some(call => call.method === 'live_voice.composition.p3.progress.ack'), `mounted origin panel did not ACK ${outcome}`);
-      });
-      assert.equal(calls.filter(call => call.method === 'live_voice.task.events').length, outcome === 'completed' ? 2 : 5);
-      assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.progress.ack').length, 1);
-
-      const terminalText = `Mounted ${outcome} notification for task-a.`;
-      assert.notEqual(p2Binding, null);
-      assert.equal(typeof publishP2Notification, 'function');
-      await act(async () => {
-        publishP2Notification({
-          ok: true,
-          result: {
-            status: 'notification',
-            ...p2Binding,
-            kind: 'agent.output',
-            response: {
-              interaction_id: p2Binding.interaction_id,
-              response_id: `mounted-terminal-notification-${outcome}`,
-              response_generation: 1,
-            },
-            source_event: taskNotificationSource(binding.session_id, 'task-a'),
-            agent_event: {
-              event_type: 'chat.final',
-              text: terminalText,
-              source_provenance: 'server.task_notification',
-            },
-            presentation_unit: { surface: 'text', unit_id: `mounted-terminal-unit-${outcome}`, seq: 0 },
-          },
-        });
-        await waitForMounted(
-          () => productStates.at(-1)?.terminal_notification === terminalText,
-          'the terminal notification was not associated with task-a',
-        );
-      });
-
-      await act(async () => {
-        mountedP3Controls(renderer).select.props.onChange({ target: { value: 'task.create' } });
-        await waitForMounted(() => mountedP3Controls(renderer).select.props.value === 'task.create', 'second create did not become selectable');
-        mountedP3Controls(renderer).button('Issue confirmation').props.onClick();
-        await waitForMounted(() => mountedP3Controls(renderer).hasButton('Execute confirmed mutation'), 'second task.create confirmation did not settle');
-      });
-      await act(async () => {
-        mountedP3Controls(renderer).button('Execute confirmed mutation').props.onClick();
-        await waitForMounted(
-          () => exactProgressActivation?.task_id === 'task-b' && mountedP3Controls(renderer).select.props.value === 'task.cancel',
-          'second task.create did not bind its exact progress route',
-        );
-      });
-      assert.equal(
-        renderer.root.findAllByProps({ 'data-testid': 'live-voice-integrated-product-progress' }).length,
-        0,
-        'a successor task must clear the predecessor progress projection before replay arrives',
-      );
-      assert.equal(
-        productStates.at(-1)?.terminal_notification,
-        null,
-        'a successor task must clear the predecessor terminal notification before capture can resume',
-      );
-      await act(async () => {
-        progressListener(terminalProgress);
-        await Promise.resolve();
-      });
-      assert.equal(
-        renderer.root.findAllByProps({ 'data-testid': 'live-voice-integrated-product-progress' }).length,
-        0,
-        'a late predecessor event must not repopulate the successor task projection',
-      );
-      assert.equal(calls.filter(call => call.method === 'live_voice.task.events').length, outcome === 'completed' ? 2 : 5);
-      assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.progress.ack').length, 1);
-    } finally {
-      if (renderer) {
-        await act(async () => {
-          renderer.unmount();
-          await Promise.resolve();
-        });
-      }
-      browser.restore();
-    }
-  }
 });
 
 test('mounted Task AUDIO failure retry clears its transient recovery error after exact TEXT fallback acceptance', async () => {
@@ -4395,16 +4004,16 @@ test('mounted Task AUDIO failure adopts server TEXT fallback through visible run
     if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
     if (method === 'live_voice.task.status') {
       assert.notEqual(taskBinding, null);
-      return mountedP3Status(taskBinding, {
+      return mountedTaskReadEnvelope(mountedP3Status(taskBinding, {
         taskId,
         state: taskTerminal ? 'terminal' : 'running',
         outcome: taskTerminal ? 'completed' : null,
         eventHead: taskTerminal ? 2 : 1,
-      });
+      }), options?.requestId);
     }
     if (method === 'live_voice.task.events') {
       assert.notEqual(taskBinding, null);
-      return mountedP3Events(taskBinding, { taskId, terminalA: taskTerminal, terminalAOutcome: 'completed' });
+      return mountedTaskReadEnvelope(mountedP3Events(taskBinding, { taskId, terminalA: taskTerminal, terminalAOutcome: 'completed' }), options?.requestId);
     }
     if (method === 'live_voice.composition.p3.progress.activate') {
       progressActivation = { ...params };
@@ -4908,333 +4517,6 @@ for (const { recognitionFailure, recognitionStart, recovery = 'play', arrivalDur
   });
 }
 
-test('mounted P3 recovers an eligible historical task without a browser task-target journal', async () => {
-  const i18n = await createI18n();
-  const browser = installP1BrowserEnvironment();
-  const historicalBinding = {
-    subject_id: 'mounted-historical-subject',
-    session_id: 'mounted-historical-session',
-    project_id: 'mounted-historical-project',
-    correlation_id: 'mounted-historical-correlation',
-    generation: 1,
-  };
-  const calls = [];
-  let retryApplied = false;
-  let renderer;
-  const request = async (method, params, options) => {
-    calls.push({ method, params: { ...params }, requestId: options?.requestId ?? null });
-    if (method === 'live_voice.composition.p2.activate') {
-      return { ok: true, result: { status: 'active', ...params, replayed: false } };
-    }
-    if (method === 'live_voice.composition.p2.close') {
-      return { ok: true, result: { status: 'closed', ...params } };
-    }
-    if (method === 'live_voice.composition.p2.notification.next') return new Promise(() => {});
-    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
-    if (method === 'live_voice.task.status') {
-      if (retryApplied) {
-        return mountedP3Status(historicalBinding, {
-          attemptId: 'attempt-c',
-          attemptNumber: 3,
-          state: 'terminal',
-          outcome: 'interrupted',
-          eventHead: 8,
-        });
-      }
-      return mountedP3Status(historicalBinding, {
-        attemptId: 'attempt-b',
-        attemptNumber: 2,
-        state: 'terminal',
-        outcome: 'completed',
-        eventHead: 5,
-      });
-    }
-    if (method === 'live_voice.task.events') {
-      return mountedP3Events(historicalBinding, { terminalA: true, terminalB: true, terminalC: retryApplied });
-    }
-    if (method === 'live_voice.composition.p3.confirmation.issue') {
-      assert.equal(params.operation, 'task.retry');
-      assert.equal(params.task_id, 'task-a');
-      assert.equal(params.correlation_id, historicalBinding.correlation_id);
-      return {
-        ok: true,
-        result: {
-          status: 'confirmation_issued',
-          operation: params.operation,
-          command_id: params.command_id,
-          target_task_id: params.task_id,
-          confirmation_id: `confirmation-${params.command_id}`,
-          expires_at: '2999-08-10T10:00:00Z',
-          task_control_binding: { ...historicalBinding },
-        },
-      };
-    }
-    if (method === 'live_voice.composition.p3.mutate') {
-      retryApplied = true;
-      return {
-        ok: true,
-        result: {
-          status: 'mutation_processed',
-          operation: 'task.retry',
-          command_id: params.command_id,
-          target_task_id: 'task-a',
-          formal_task_result: {
-            task_id: 'task-a',
-            previous_attempt_id: 'attempt-b',
-            attempt_id: 'attempt-c',
-            attempt_number: 3,
-            applied: true,
-            state: 'accepted',
-            outbox_id: 'outbox-retry-c',
-          },
-        },
-      };
-    }
-    throw new Error(`unexpected historical P3 request: ${method}`);
-  };
-
-  try {
-    await act(async () => {
-      renderer = create(mountedP3Element(i18n, historicalBinding.session_id, request));
-      await waitForMounted(() => JSON.stringify(renderer.toJSON()).includes('Formal P3 task control'), 'historical P3 controls did not mount');
-    });
-    await act(async () => {
-      mountedP3Controls(renderer).select.props.onChange({ target: { value: 'task.cancel' } });
-    });
-    await act(async () => {
-      mountedP3Controls(renderer)
-        .root.findByType('input')
-        .props.onChange({ target: { value: 'task-a' } });
-    });
-    await act(async () => {
-      mountedP3Controls(renderer).button('Check retry eligibility').props.onClick();
-      await waitForMounted(() => mountedP3Controls(renderer).select.props.value === 'task.retry', 'historical task inspection did not expose task.retry');
-    });
-    assert.equal(JSON.stringify(renderer.toJSON()).includes('eligible:2/3'), true);
-    assert.equal(calls.filter(call => call.method === 'live_voice.task.status').length, 2);
-    assert.equal(calls.filter(call => call.method === 'live_voice.task.events').length, 1);
-
-    await act(async () => {
-      mountedP3Controls(renderer).button('Issue confirmation').props.onClick();
-      await waitForMounted(() => mountedP3Controls(renderer).hasButton('Execute confirmed mutation'), 'historical retry confirmation did not settle');
-    });
-    assert.equal(calls.filter(call => call.method === 'live_voice.task.status').length, 3);
-    assert.equal(calls.filter(call => call.method === 'live_voice.task.events').length, 2);
-
-    await act(async () => {
-      mountedP3Controls(renderer).button('Execute confirmed mutation').props.onClick();
-      await waitForMounted(
-        () => JSON.stringify(renderer.toJSON()).includes('interrupted'),
-        'historical retry C terminal truth did not replace accepted status',
-      );
-    });
-    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length, 1);
-    assert.equal(calls.filter(call => call.method === 'live_voice.task.status').length, 4);
-    assert.equal(calls.filter(call => call.method === 'live_voice.task.events').length, 3);
-
-    const mutationsBeforeRefresh = calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length;
-    await act(async () => {
-      renderer.unmount();
-      await new Promise(resolve => setTimeout(resolve, 20));
-    });
-    renderer = null;
-    await act(async () => {
-      renderer = create(mountedP3Element(i18n, historicalBinding.session_id, request));
-      await Promise.resolve();
-    });
-    await act(async () => {
-      await waitForMounted(
-        () =>
-          mountedP3Controls(renderer).root.findByType('input').props.value === 'task-a' &&
-          JSON.stringify(renderer.toJSON()).includes('interrupted') &&
-          JSON.stringify(renderer.toJSON()).includes('ineligible'),
-        'validated historical task target did not persist and recover after refresh',
-      );
-    });
-    assert.equal(
-      calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length,
-      mutationsBeforeRefresh,
-      'historical task-target recovery must perform zero mutation effects',
-    );
-  } finally {
-    if (renderer) {
-      await act(async () => {
-        renderer.unmount();
-        await Promise.resolve();
-      });
-    }
-    browser.restore();
-  }
-});
-
-test('mounted P3 atomically switches from the current task leaf to a historical task with a different correlation', async () => {
-  const i18n = await createI18n();
-  const browser = installP1BrowserEnvironment();
-  const activateP2 = createMountedP2ActivationResponder();
-  const sessionId = 'mounted-task-switch-session';
-  const currentBinding = {
-    subject_id: 'mounted-task-switch-subject',
-    session_id: sessionId,
-    project_id: 'mounted-task-switch-project',
-    correlation_id: 'mounted-current-task-correlation',
-    generation: 7,
-  };
-  const historicalBinding = {
-    ...currentBinding,
-    correlation_id: 'mounted-historical-task-correlation',
-    generation: 1,
-  };
-  globalThis.window.sessionStorage.setItem(
-    `jiuwenswarm.live_voice.product_p3_task_target.v1:${encodeURIComponent(sessionId)}`,
-    JSON.stringify({
-      contract_version: 'live-voice.product-p3-task-target.v1',
-      session_id: sessionId,
-      correlation_id: currentBinding.correlation_id,
-      task_id: 'task-current',
-      task_control_binding: currentBinding,
-    }),
-  );
-  const calls = [];
-  let failHistoricalEvents = true;
-  let issuedCorrelation = null;
-  let renderer;
-  const request = async (method, params, options) => {
-    calls.push({ method, params: { ...params }, requestId: options?.requestId ?? null });
-    if (method === 'live_voice.composition.p2.activate') return activateP2(params);
-    if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
-    if (method === 'live_voice.composition.p2.notification.next') return new Promise(() => {});
-    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
-    if (method === 'live_voice.composition.p3.progress.activate') {
-      return { ok: true, result: mountedProgressActivation(params) };
-    }
-    if (method === 'live_voice.composition.p3.progress.close') {
-      return { ok: true, result: { status: 'closed', ...params } };
-    }
-    if (method === 'live_voice.task.status') {
-      if (params.task_id === 'task-current') {
-        return mountedP3Status(currentBinding, {
-          taskId: 'task-current',
-          state: 'terminal',
-          outcome: 'cancelled',
-          eventHead: 2,
-        });
-      }
-      assert.equal(params.task_id, 'task-a');
-      return mountedP3Status(historicalBinding, {
-        attemptId: 'attempt-b',
-        attemptNumber: 2,
-        state: 'terminal',
-        outcome: 'completed',
-        eventHead: 5,
-      });
-    }
-    if (method === 'live_voice.task.events') {
-      if (params.task_id === 'task-current') {
-        return mountedP3Events(currentBinding, { taskId: 'task-current', terminalA: true });
-      }
-      assert.equal(params.task_id, 'task-a');
-      if (failHistoricalEvents) throw new Error('injected historical events failure');
-      return mountedP3Events(historicalBinding, { terminalB: true });
-    }
-    if (method === 'live_voice.composition.p3.confirmation.issue') {
-      issuedCorrelation = params.correlation_id;
-      return {
-        ok: true,
-        result: {
-          status: 'confirmation_issued',
-          operation: params.operation,
-          command_id: params.command_id,
-          target_task_id: params.task_id,
-          confirmation_id: `confirmation-${params.command_id}`,
-          expires_at: '2999-08-10T10:00:00Z',
-          task_control_binding: historicalBinding,
-        },
-      };
-    }
-    throw new Error(`unexpected switched-task P3 request: ${method}`);
-  };
-
-  try {
-    await act(async () => {
-      renderer = create(mountedP3Element(i18n, sessionId, request));
-      await waitForMounted(() => JSON.stringify(renderer.toJSON()).includes('Formal P3 task control'), 'switched-task P3 controls did not mount');
-      await waitForMounted(
-        () => mountedP3Controls(renderer).select.props.value === 'task.retry',
-        'persisted current task did not recover its exact non-1 generation leaf',
-      );
-      await waitForMounted(
-        () =>
-          renderer.root
-            .findByProps({ 'data-testid': 'live-voice-integrated-p3-activation' })
-            .findAllByType('code')
-            .some(node => node.children.some(child => child === 'p3:active')),
-        'current task progress owner did not settle before target switch',
-      );
-    });
-    await act(async () => {
-      mountedP3Controls(renderer).select.props.onChange({ target: { value: 'task.cancel' } });
-      await waitForMounted(() => mountedP3Controls(renderer).select.props.value === 'task.cancel', 'task.cancel did not become selectable');
-    });
-
-    await act(async () => {
-      mountedP3Controls(renderer)
-        .root.findByType('input')
-        .props.onChange({ target: { value: 'task-a' } });
-      await waitForMounted(
-        () =>
-          mountedP3Controls(renderer).root.findByType('input').props.value === 'task-a' &&
-          mountedP3Controls(renderer).button('Check retry eligibility').props.disabled === false,
-        'historical task inspection did not become available',
-      );
-    });
-    await act(async () => {
-      mountedP3Controls(renderer).button('Check retry eligibility').props.onClick();
-      await waitForMounted(
-        () => JSON.stringify(renderer.toJSON()).includes('PRODUCT_P3_RETRY_INSPECTION_FAILED'),
-        'failed historical candidate did not publish its stable inspection failure',
-      );
-    });
-    const retainedTarget = JSON.parse(
-      globalThis.window.sessionStorage.getItem(`jiuwenswarm.live_voice.product_p3_task_target.v1:${encodeURIComponent(sessionId)}`),
-    );
-    assert.equal(retainedTarget.task_id, 'task-current');
-    assert.equal(retainedTarget.correlation_id, currentBinding.correlation_id);
-    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.confirmation.issue').length, 0);
-    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length, 0);
-
-    failHistoricalEvents = false;
-    await act(async () => {
-      mountedP3Controls(renderer).button('Check retry eligibility').props.onClick();
-      await waitForMounted(
-        () => mountedP3Controls(renderer).select.props.value === 'task.retry' && JSON.stringify(renderer.toJSON()).includes('eligible:2/3'),
-        'historical task with a different correlation did not replace the current leaf',
-      );
-    });
-    assert.equal(JSON.stringify(renderer.toJSON()).includes('PRODUCT_P3_RETRY_INSPECTION_FAILED'), false);
-    assert.equal(calls.filter(call => call.method === 'live_voice.task.status' && call.params.task_id === 'task-a').length, 4);
-    assert.ok(calls.some(call => call.method === 'live_voice.task.status' && call.params.task_id === 'task-current'));
-    assert.deepEqual(
-      calls.filter(call => call.method === 'live_voice.task.events').map(call => call.params.task_id),
-      ['task-current', 'task-a', 'task-a'],
-    );
-
-    await act(async () => {
-      mountedP3Controls(renderer).button('Issue confirmation').props.onClick();
-      await waitForMounted(() => mountedP3Controls(renderer).hasButton('Execute confirmed mutation'), 'historical task confirmation did not settle');
-    });
-    assert.equal(issuedCorrelation, historicalBinding.correlation_id);
-    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length, 0);
-  } finally {
-    if (renderer) {
-      await act(async () => {
-        renderer.unmount();
-        await Promise.resolve();
-      });
-    }
-    browser.restore();
-  }
-});
-
 test('mounted P3 restores the historical task correlation and advances progress generation after a full remount', async () => {
   const i18n = await createI18n();
   const browser = installP1BrowserEnvironment();
@@ -5414,127 +4696,6 @@ for (const targetFault of ['malformed', 'unavailable']) {
     }
   });
 }
-
-test('mounted P3 lets only the current historical-task inspection publish after a deferred predecessor', async () => {
-  const i18n = await createI18n();
-  const browser = installP1BrowserEnvironment();
-  const activateP2 = createMountedP2ActivationResponder();
-  const sessionId = 'mounted-task-switch-generation-session';
-  const commonBinding = {
-    subject_id: 'mounted-task-switch-generation-subject',
-    session_id: sessionId,
-    project_id: 'mounted-task-switch-generation-project',
-  };
-  const bindings = {
-    'task-b': { ...commonBinding, correlation_id: 'mounted-task-b-correlation', generation: 5 },
-    'task-c': { ...commonBinding, correlation_id: 'mounted-task-c-correlation', generation: 9 },
-  };
-  const calls = [];
-  let releaseTaskBStatus = null;
-  let renderer;
-  const request = async (method, params, options) => {
-    calls.push({ method, params: { ...params }, requestId: options?.requestId ?? null });
-    if (method === 'live_voice.composition.p2.activate') return activateP2(params);
-    if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
-    if (method === 'live_voice.composition.p2.notification.next') return new Promise(() => {});
-    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
-    if (method === 'live_voice.composition.p3.progress.activate') {
-      return { ok: true, result: mountedProgressActivation(params) };
-    }
-    if (method === 'live_voice.composition.p3.progress.close') {
-      return { ok: true, result: { status: 'closed', ...params } };
-    }
-    if (method === 'live_voice.task.status') {
-      const taskId = params.task_id;
-      assert.ok(taskId === 'task-b' || taskId === 'task-c');
-      if (taskId === 'task-b') {
-        return new Promise(resolve => {
-          releaseTaskBStatus = () =>
-            resolve(
-              mountedP3Status(bindings[taskId], {
-                taskId,
-                attemptId: 'attempt-b',
-                attemptNumber: 2,
-                state: 'terminal',
-                outcome: 'completed',
-                eventHead: 5,
-              }),
-            );
-        });
-      }
-      return mountedP3Status(bindings[taskId], {
-        taskId,
-        attemptId: 'attempt-b',
-        attemptNumber: 2,
-        state: 'terminal',
-        outcome: 'completed',
-        eventHead: 5,
-      });
-    }
-    if (method === 'live_voice.task.events') {
-      assert.equal(params.task_id, 'task-c');
-      return mountedP3Events(bindings['task-c'], { taskId: 'task-c', terminalB: true });
-    }
-    throw new Error(`unexpected overlapping switched-task request: ${method}`);
-  };
-
-  try {
-    await act(async () => {
-      renderer = create(mountedP3Element(i18n, sessionId, request));
-      await waitForMounted(() => JSON.stringify(renderer.toJSON()).includes('Formal P3 task control'), 'overlapping task-switch controls did not mount');
-    });
-    await act(async () => {
-      mountedP3Controls(renderer).select.props.onChange({ target: { value: 'task.cancel' } });
-      await waitForMounted(() => mountedP3Controls(renderer).select.props.value === 'task.cancel', 'task.cancel did not become selectable');
-      mountedP3Controls(renderer)
-        .root.findByType('input')
-        .props.onChange({ target: { value: 'task-b' } });
-      await waitForMounted(() => mountedP3Controls(renderer).root.findByType('input').props.value === 'task-b', 'task-b did not become the target');
-    });
-    await act(async () => {
-      mountedP3Controls(renderer).button('Check retry eligibility').props.onClick();
-      await waitForMounted(() => typeof releaseTaskBStatus === 'function', 'task-b inspection did not reach deferred status');
-    });
-
-    await act(async () => {
-      mountedP3Controls(renderer)
-        .root.findByType('input')
-        .props.onChange({ target: { value: 'task-c' } });
-      await waitForMounted(() => mountedP3Controls(renderer).root.findByType('input').props.value === 'task-c', 'task-c did not supersede task-b input');
-      mountedP3Controls(renderer).button('Check retry eligibility').props.onClick();
-      await waitForMounted(
-        () => mountedP3Controls(renderer).select.props.value === 'task.retry' && JSON.stringify(renderer.toJSON()).includes('eligible:2/3'),
-        'task-c did not win the overlapping inspection generation',
-      );
-    });
-    releaseTaskBStatus();
-    await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-
-    assert.deepEqual(
-      calls.filter(call => call.method === 'live_voice.task.events').map(call => call.params.task_id),
-      ['task-c'],
-    );
-    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.confirmation.issue').length, 0);
-    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length, 0);
-    const retainedTarget = JSON.parse(
-      globalThis.window.sessionStorage.getItem(`jiuwenswarm.live_voice.product_p3_task_target.v1:${encodeURIComponent(sessionId)}`),
-    );
-    assert.equal(retainedTarget.task_id, 'task-c');
-    assert.equal(retainedTarget.correlation_id, bindings['task-c'].correlation_id);
-    assert.equal(retainedTarget.task_control_binding.generation, 1);
-  } finally {
-    if (renderer) {
-      await act(async () => {
-        renderer.unmount();
-        await Promise.resolve();
-      });
-    }
-    browser.restore();
-  }
-});
 
 test('mounted P1 applies opaque UI device choices to exact local browser routes without sending IDs to the backend', async () => {
   const i18n = await createI18n();
@@ -6952,139 +6113,6 @@ test('mounted teardown performs zero close after a newer recovery CAS owns the j
     assert.equal(JSON.parse(values.get(key)).recovery_token, 'newer-page-token');
   } finally {
     if (renderer) renderer.unmount();
-    restore();
-  }
-});
-
-test('mounted task submit recovery restores the exact voice origin for P3 create', async () => {
-  const i18n = await createI18n();
-  const values = new Map();
-  const storage = {
-    getItem: key => values.get(key) ?? null,
-    setItem: (key, value) => values.set(key, value),
-  };
-  const binding = {
-    session_id: 'mounted-task-recovery-session',
-    correlation_id: 'mounted-task-recovery-correlation',
-    interaction_id: 'mounted-task-recovery-interaction',
-    activation_id: 'mounted-task-recovery-activation',
-    activation_generation: 1,
-  };
-  const operation = {
-    method: 'live_voice.composition.p2.submit',
-    request_id: 'mounted-task-recovery-request',
-    params: {
-      ...binding,
-      commit_id: 'mounted-task-recovery-commit',
-      turn_id: 'mounted-task-recovery-turn',
-      committed_at: '2026-08-10T12:00:00.000Z',
-      text: 'Create the recovered voice task.',
-      dispatch_target: 'task',
-      voice_commit_receipt: 'r'.repeat(32),
-      critical_confirmation: true,
-    },
-  };
-  const key = `jiuwenswarm.liveVoice.productP2ActivationJournal.v1:${encodeURIComponent(binding.session_id)}`;
-  values.set(key, JSON.stringify(pendingP2Journal(binding, operation)));
-  const restore = installP2RecoveryBrowser(storage);
-  const calls = [];
-  let renderer;
-  try {
-    const request = async (method, params, options) => {
-      calls.push({ method, params, options });
-      if (method === operation.method) {
-        assert.deepEqual(params, operation.params);
-        assert.equal(options.requestId, operation.request_id);
-        return {
-          request_id: operation.request_id,
-          ok: true,
-          result: {
-            status: 'task_origin_accepted',
-            ...binding,
-            turn_id: operation.params.turn_id,
-            commit_id: operation.params.commit_id,
-            response: {
-              interaction_id: binding.interaction_id,
-              response_id: 'mounted-server-owned-response',
-              response_generation: 0,
-            },
-          },
-          error: null,
-        };
-      }
-      if (method === 'live_voice.composition.p2.activate') {
-        return { ok: true, result: { status: 'active', ...params, replayed: params.activation_generation === 1 } };
-      }
-      if (method === 'live_voice.composition.p2.close') {
-        return { ok: true, result: { status: 'closed', ...params } };
-      }
-      if (method === 'live_voice.composition.p2.notification.next' || method === 'live_voice.task.list') {
-        return new Promise(() => {});
-      }
-      if (method === 'live_voice.composition.p3.confirmation.issue') {
-        return {
-          ok: true,
-          result: {
-            status: 'confirmation_issued',
-            operation: params.operation,
-            command_id: params.command_id,
-            target_task_id: null,
-            confirmation_id: 'mounted-task-recovery-confirmation',
-            expires_at: '2999-08-10T12:00:00.000Z',
-            task_control_binding: {
-              subject_id: 'mounted-task-recovery-subject',
-              session_id: binding.session_id,
-              project_id: 'mounted-task-recovery-project',
-              correlation_id: params.correlation_id,
-              generation: 1,
-            },
-          },
-        };
-      }
-      throw new Error(`unexpected mounted task recovery request: ${method}`);
-    };
-    await act(async () => {
-      renderer = create(mountedP3Element(i18n, binding.session_id, request));
-    });
-    await act(async () => {
-      await waitForMounted(
-        () => mountedP3Controls(renderer).root.findByType('textarea').props.value === operation.params.text,
-        'recovered task instruction was not restored',
-      );
-    });
-    assert.equal(mountedP3Controls(renderer).root.findAllByType('input')[0].props.value, 'Voice task');
-    await act(async () => {
-      mountedP3Controls(renderer).button('Issue confirmation').props.onClick();
-      await waitForMounted(() => mountedP3Controls(renderer).hasButton('Execute confirmed mutation'), 'recovered voice origin did not issue P3 confirmation');
-    });
-
-    const confirmations = calls.filter(call => call.method === 'live_voice.composition.p3.confirmation.issue');
-    assert.equal(confirmations.length, 1);
-    assert.deepEqual(
-      {
-        source: confirmations[0].params.source,
-        interaction_id: confirmations[0].params.interaction_id,
-        turn_id: confirmations[0].params.turn_id,
-        commit_id: confirmations[0].params.commit_id,
-        instruction: confirmations[0].params.instruction,
-      },
-      {
-        source: 'voice',
-        interaction_id: binding.interaction_id,
-        turn_id: operation.params.turn_id,
-        commit_id: operation.params.commit_id,
-        instruction: operation.params.text,
-      },
-    );
-    assert.equal(calls.filter(call => call.method === operation.method).length, 1);
-    assert.equal(JSON.parse(values.get(key)).pending_operation, null);
-  } finally {
-    if (renderer) {
-      await act(async () => {
-        renderer.unmount();
-        await new Promise(resolve => setTimeout(resolve, 20));
-      });
-    }
     restore();
   }
 });
@@ -11081,10 +10109,10 @@ test('mounted unified hands-free itinerary journey auto-submits and keeps one cu
   }
 });
 
-for (const [delayedMediaClose, transientRead, selectedTask, discoveryFailure, voiceFlagOff] of [
+for (const [delayedMediaClose, transientRead, selectedTask, discoveryFailure, voiceFlagOff, pagedHistory] of [
   [false, false, false], [true, false, false], [false, true, false], [false, false, true],
-  [false, false, true, true], [false, false, true, false, true],
-]) test(`mounted recovered voice Tasks acquire independent fresh owners only after Live Voice starts and Exit closes both${delayedMediaClose ? ' before microphone cleanup settles' : ''}${transientRead ? ' after transient status failure and adjusted completion' : ''}${selectedTask ? ' with a restored selected Task' : ''}${discoveryFailure ? ' after discovery failure' : ''}${voiceFlagOff ? ' with P1 disabled preserving TEXT fallback' : ''}`, async () => {
+  [false, false, true, true], [false, false, true, false, true], [false, false, false, false, false, true],
+]) test(`mounted recovered voice Tasks acquire independent fresh owners only after Live Voice starts and Exit closes both${delayedMediaClose ? ' before microphone cleanup settles' : ''}${transientRead ? ' after transient status failure and adjusted completion' : ''}${selectedTask ? ' with a restored selected Task' : ''}${discoveryFailure ? ' after discovery failure' : ''}${voiceFlagOff ? ' with P1 disabled preserving TEXT fallback' : ''}${pagedHistory ? ' with paginated Task history' : ''}`, async () => {
   const i18n = await createI18n();
   const sessionId = 'mounted-recovered-voice-tasks';
   const taskIds = ['recovered-a', 'recovered-b'];
@@ -11150,7 +10178,7 @@ for (const [delayedMediaClose, transientRead, selectedTask, discoveryFailure, vo
         Object.assign(response.result.attempt, { state: taskCompleted && params.task_id === taskIds[0] ? 'terminal' : 'running',
           outcome: taskCompleted && params.task_id === taskIds[0] ? 'completed' : null });
       }
-      return response;
+      return mountedTaskReadEnvelope(response, options?.requestId);
     }
     if (method === 'live_voice.task.events') {
       const response = mountedP3Events(taskBinding, { taskId: params.task_id, terminalA: transientRead || taskCompleted && params.task_id === taskIds[0], terminalAOutcome: 'completed' });
@@ -11168,7 +10196,13 @@ for (const [delayedMediaClose, transientRead, selectedTask, discoveryFailure, vo
         events.push({ ...terminal, seq: 4, event_id: `${params.task_id}:event:4` });
         response.result.head_seq = 4;
       }
-      return response;
+      if (pagedHistory && params.limit === 500) {
+        response.result.after_seq = params.after_seq;
+        response.result.events = response.result.events.filter(event => event.seq > params.after_seq).slice(0, 1);
+        response.result.has_more = response.result.events.at(-1).seq < response.result.head_seq;
+        response.result.next_after_seq = response.result.has_more ? response.result.events.at(-1).seq : null;
+      }
+      return mountedTaskReadEnvelope(response, options?.requestId);
     }
     if (method === 'live_voice.composition.p3.progress.activate') {
       if (voiceFlagOff) return { ok: true, result: mountedProgressActivation(params) };
@@ -11241,8 +10275,8 @@ for (const [delayedMediaClose, transientRead, selectedTask, discoveryFailure, vo
     await waitForMountedEffects(() => calls.filter(call => call.method === 'live_voice.composition.p3.progress.activate').length === 2,
       'restored A/B did not acquire separate authenticated progress owners');
     for (const taskId of taskIds) {
-      assert.equal(calls.filter(call => call.method === 'live_voice.task.status' && call.params.task_id === taskId).length, 2 + ((transientRead || selectedTask) && taskId === taskIds[0] ? 1 : 0));
-      assert.equal(calls.filter(call => call.method === 'live_voice.task.events' && call.params.task_id === taskId).length, 1 + (selectedTask && taskId === taskIds[0] ? 1 : 0));
+      assert.equal(calls.filter(call => call.method === 'live_voice.task.status' && call.params.task_id === taskId).length, 1 + ((transientRead || selectedTask) && taskId === taskIds[0] ? 1 : 0));
+      assert.equal(calls.filter(call => call.method === 'live_voice.task.events' && call.params.task_id === taskId).length, (pagedHistory ? 2 : 1) + (selectedTask && taskId === taskIds[0] ? 1 : 0));
     }
     assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.activate').length, recoveryActivationCount);
     assert.ok(calls.filter(call => call.method === 'live_voice.composition.p3.progress.activate').every(call => call.params.origin_kind === 'voice'));
@@ -11430,11 +10464,11 @@ for (const [multipleVoiceTasks, exhaustNewTaskReads] of [[false, false], [true, 
           reason: 'REQUEST_TIMEOUT',
         });
       }
-      return mountedP3Status(taskControlBinding, { taskId: params.task_id });
+      return mountedTaskReadEnvelope(mountedP3Status(taskControlBinding, { taskId: params.task_id }), options?.requestId);
     }
     if (method === 'live_voice.task.events') {
       assert.ok(taskControlBinding);
-      return mountedP3Events(taskControlBinding, { taskId: params.task_id, terminalA: params.task_id === taskId && taskTerminal, terminalAOutcome: 'completed' });
+      return mountedTaskReadEnvelope(mountedP3Events(taskControlBinding, { taskId: params.task_id, terminalA: params.task_id === taskId && taskTerminal, terminalAOutcome: 'completed' }), options?.requestId);
     }
     if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
     if (method === 'live_voice.composition.p3.progress.activate') {
@@ -11639,7 +10673,7 @@ for (const [multipleVoiceTasks, exhaustNewTaskReads] of [[false, false], [true, 
         'a failed Task collection refresh must remain a fail-closed UI read',
       );
       assert.equal(calls.filter(call => call.method === 'live_voice.composition.unified.submit').length, 1);
-      assert.equal(calls.filter(call => call.method === 'live_voice.task.status').length, 3,
+      assert.equal(calls.filter(call => call.method === 'live_voice.task.status').length, 2,
         'one failed read is followed by fresh status and event inspection without retrying create');
       await browser.emitSpeechEndOfTurn();
       await waitForMounted(
@@ -15000,6 +14034,14 @@ for (const verify of ['work', 'work_cascade', 'model_before_start', 'model_while
       `Native Task absent from recent tasks: ${JSON.stringify({ calls, task: states.at(-1)?.task_experience, state: states.at(-1)?.text_status })}`);
     assert.equal(states.at(-1).task_experience.selected_task_id, facts.task.task_id);
     assert.ok(calls.filter(method => method === 'live_voice.task.list').length >= 2);
+    if (verify === 'task') {
+      await waitForMountedEffects(() => calls.includes('live_voice.composition.p3.progress.activate'),
+        'accepted Native Task did not initialize its progress owner');
+      assert.equal(calls.filter(method => method === 'live_voice.task.status').length, 2,
+        'one UI projection plus one progress initialization must not create another Task replica');
+      assert.equal(calls.filter(method => method === 'live_voice.task.events').length, 2,
+        'UI and progress each validate history once, without a separate retry-inspection bootstrap');
+    }
     if (verify === 'task_keep_selection') {
       otherFacts.visible = true;
       await act(async () => { await controlRef.current.refreshTasks(); await controlRef.current.selectTask(otherFacts.task.task_id); });

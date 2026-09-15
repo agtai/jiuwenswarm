@@ -312,52 +312,27 @@ class NativeBusinessRouter:
 
     @profiled("native.task_intent", "route.binding", "delegate", require_context=True)
     async def _task(self, route, delegate, request_id, *, native_source=None):
-        from jiuwenswarm.server.runtime.formal_tasks.production_task_intent import (ProductionTaskIntentRequest, ProductionIntentOrigin,
-            build_production_origin_binding, ProductionTaskPolicyOutcome)
-        from jiuwenswarm.server.runtime.formal_tasks.p3_production_intent_composition import CallLocalProductionOriginAuthority
-        from jiuwenswarm.channels.live_voice.product_composition_registry import _RejectingProductionConfirmationConsumer
-        registry = self.registry
+        from jiuwenswarm.server.runtime.formal_tasks.production_task_intent import ProductionTaskIntentRequest, ProductionIntentOrigin
         action = delegate.business
-        authority = await asyncio.to_thread(registry._p3_composition.prepare_production_intent_authority,
-            bearer_token=None, operation=action.operation, session_id=route.binding.session_id,
-            native_authority=route.native_p3_authority)
-        request = ProductionTaskIntentRequest(origin=ProductionIntentOrigin.STRUCTURED, scope=authority.scope,
+        request = ProductionTaskIntentRequest(origin=ProductionIntentOrigin.STRUCTURED, scope=route.binding.scope,
             command_id="native-command." + hashlib.sha256(delegate.source_identity.encode()).hexdigest(),
             proposal=action.task_proposal(), commit=None, source_id=delegate.source_identity,
             native_source=native_source)
-        origin = CallLocalProductionOriginAuthority(expected_binding=build_production_origin_binding(request), commit_ledger=None)
-        resolution = await asyncio.to_thread(registry._task_intent_bridge.resolve_production,
-            request, authority.reader, origin, _RejectingProductionConfirmationConsumer(), registry._production_clarification_owner)
-        if resolution.outcome is not ProductionTaskPolicyOutcome.PROPOSED:
-            return {"status": "rejected", "reason": resolution.reason, "operation": action.operation}
-        clean = {"source": "structured", "source_id": delegate.source_identity, "session_id": route.binding.session_id,
-                 "correlation_id": route.binding.correlation_id}
-        if action.mutates:
-            if not registry._p3_control_ready():
-                raise NativeBusinessViolation("P3_CONFIRMATION_ISSUER_UNAVAILABLE", code=ErrorCode.UNAVAILABLE)
-            if action.operation in {"task.create", "task.create_successor"}:
-                registry._p3_composition.require_local_artifact_delegation_capability(resolution)
-            else:
-                registry._p3_composition.require_local_task_control_capability(resolution)
-            token = await registry._issue_production_confirmation_continuation(clean=clean, request_id=request_id,
-                proposal=request.proposal, resolution=resolution, commit=None, authority=authority,
-                replacing_token=None, clarification_answer_fingerprint=None)
-            async with registry._lock:
-                pending = registry._pending_production_task_intents[token]
-            # Use the existing durable confirmation claim and final exact scope,
-            # model, revision and capability reread; no invented second utterance.
-            _, formal = await registry._confirm_production_intent(clean=clean, request_id=request_id, pending=pending,
-                request=request, authority=authority, origin_authority=origin, preliminary=resolution,
-                native_authority=route.native_p3_authority)
-        else:
-            formal = await registry._invoke_production_resolution(clean=clean, request_id=request_id,
-                resolution=resolution, origin_authority=origin, confirmation_consumer=None,
-                native_authority=route.native_p3_authority)
+        formal = await self.registry._run_p3_production_intent(
+            clean={"source": "structured", "source_id": delegate.source_identity,
+                "session_id": route.binding.session_id, "correlation_id": route.binding.correlation_id},
+            request_id=request_id, native_request=request, native_authority=route.native_p3_authority)
+        body = formal.payload.get("result", {})
         if not formal.ok:
-            return {"status": "rejected", "operation": action.operation, "error": formal.payload.get("error")}
+            original = body.get("formal_task_result")
+            error = original.get("error") if isinstance(original, dict) else formal.payload.get("error")
+            return {"status": "rejected", "operation": action.operation, "error": error}
+        if body.get("status") != "dispatched":
+            return {"status": "rejected", "reason": body.get("reason"), "operation": action.operation}
+        receipt = body.get("formal_task_result")
         result = {"status": "dispatched", "operation": action.operation,
-                "task_id": formal.payload.get("result", {}).get("task_id", action.target_id),
-                "receipt": formal.payload.get("result")}
+                "task_id": receipt.get("task_id", action.target_id) if isinstance(receipt, dict) else action.target_id,
+                "receipt": receipt}
         if action.operation in {"task.status", "task.result"}:
             await self._task_result_facts(route, result)
         return result

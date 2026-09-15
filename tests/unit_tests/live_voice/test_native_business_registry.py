@@ -247,6 +247,13 @@ async def test_structured_task_create_and_read_use_real_receipts_without_semanti
     def forbidden(*args, **kwargs): raise AssertionError("semantic/Agent path must not execute")
     monkeypatch.setattr(env.registry,"_resolve_task_semantics",forbidden,raising=False)
     monkeypatch.setattr(env.registry,"_run_unified_submit",forbidden)
+    monkeypatch.setattr(env.registry,"_resolve_semantic_input",forbidden)
+    admitted = []
+    admission = env.registry._run_p3_production_intent
+    async def observe_admission(**kwargs):
+        admitted.append(kwargs["native_request"])
+        return await admission(**kwargs)
+    monkeypatch.setattr(env.registry, "_run_p3_production_intent", observe_admission)
     try:
         receipt, params = await call(env,"task.create", name="Project report", instruction="Read project notes and save a report")
         assert receipt["status"] == "dispatched", receipt
@@ -258,6 +265,11 @@ async def test_structured_task_create_and_read_use_real_receipts_without_semanti
         assert status["status"] == "dispatched", status
         assert env.manager.agent.executions == []
         assert env.registry._native_business.task_origins(env.binding.scope) == (task_id,)
+        assert [request.proposal.operation for request in admitted] == ["task.create", "task.status"]
+        task = env.harness.composition._core.store.get_task(task_id, env.binding.scope)
+        assert task.create_command_id == admitted[0].command_id
+        assert admitted[0].command_id.startswith("native-command.")
+        assert task.spec.native_source == admitted[0].native_source
     finally:
         await env.registry.stop()
         await env.registry._runtime.close()
@@ -475,6 +487,57 @@ async def test_queried_results_retire_notifications_only_at_canonical_played_his
         assert len(history.native_assistants) == 1
         assert router.work_events(env.binding.scope)[0]["event_id"] == ids[2]
         assert not env.manager.agent.executions
+    finally:
+        await env.registry.stop()
+        await env.registry._runtime.close()
+        await env.harness.composition.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["capability", "confirmation", "ordinary", "store", "continuation"])
+async def test_common_task_admission_preserves_native_rejection_receipt(tmp_path, monkeypatch, failure_stage):
+    from jiuwenswarm.common.schema.live_voice_contract_v2 import ErrorCode
+    from openjiuwen.core.application.tasks.formal_task_models import FormalTaskViolation
+    env = await make_registry(tmp_path, monkeypatch)
+    attempts = []
+    def reject(*args, **kwargs):
+        attempts.append(failure_stage)
+        if failure_stage == "ordinary":
+            raise RuntimeError("private backend diagnostic must not enter the receipt")
+        raise FormalTaskViolation("TEST_TASK_ADMISSION_REJECTED", "rejected", ErrorCode.PERMISSION_DENIED)
+    if failure_stage in {"capability", "ordinary"}:
+        monkeypatch.setattr(env.harness.composition, "require_local_artifact_delegation_capability", reject)
+    elif failure_stage == "confirmation":
+        monkeypatch.setattr(env.registry._p3_confirmation_owner, "validate_for_forwarding", reject)
+    elif failure_stage == "continuation":
+        confirm = env.harness.composition.confirm_and_handle_production_request
+        async def close_before_final_claim(**kwargs):
+            claim = kwargs["claim_continuation"]
+            async def lose_continuation():
+                attempts.append(failure_stage)
+                async with env.registry._lock:
+                    env.registry._pending_production_task_intents.clear()
+                await claim()
+            return await confirm(**{**kwargs, "claim_continuation": lose_continuation})
+        monkeypatch.setattr(env.harness.composition, "confirm_and_handle_production_request", close_before_final_claim)
+    else:
+        monkeypatch.setattr(env.harness.composition._core, "execute", reject)
+    try:
+        receipt, params = await call(env, "task.create", name="Rejected report", instruction="Save a report")
+        assert receipt["status"] == "rejected", receipt
+        if failure_stage == "store":
+            assert receipt["error"]["reason"] == "TEST_TASK_ADMISSION_REJECTED"
+            assert "reason" not in receipt
+        else:
+            assert receipt["reason"] == ("NATIVE_BUSINESS_EXECUTION_FAILED" if failure_stage == "ordinary"
+                                          else "TASK_INTENT_CONTINUATION_UNAVAILABLE" if failure_stage == "continuation"
+                                          else "TEST_TASK_ADMISSION_REJECTED")
+            assert "error" not in receipt
+        replay = await env.registry.handle_native_propose(params=params, request_id="call", session_id="session-1")
+        assert json.loads(replay.payload["result"]["canonical_text"]) == receipt
+        assert attempts == [failure_stage]
+        assert env.manager.agent.executions == []
+        assert env.harness.composition._core.store.list_tasks(env.binding.scope) == ()
     finally:
         await env.registry.stop()
         await env.registry._runtime.close()
