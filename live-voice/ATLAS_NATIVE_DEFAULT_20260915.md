@@ -44,3 +44,40 @@ text composer still uses its configured bridge. This restores execution access;
 it does not certify arbitrary task correctness, every external website, or
 perfect Realtime wording. The provider still sometimes adds acknowledgments or
 Demo disclaimers despite existing concise-speech instructions.
+
+## Chinese expense and spoken decision follow-up
+
+The expense selector now maps to the existing expense entrypoint without relying
+on the model repeating its English phrase; original request/constraints and the
+visible user text remain intact. Coffee text is not prefixed with an invented
+month or purchase action. Returned Demo kind and mandate identity must match,
+otherwise acceptance is unknown, not dispatched.
+
+Task facts, detail responses and approval notifications carry an explicit
+`pending_decision_scope`: directory listing, expense form submission or purchase.
+This uses the existing two expense gates' identity rules and changes no approval
+authority. Future expense gate types must extend this classification explicitly.
+Prompt instructions distinguish deferral from rejection and remove conflicting
+Atlas acceptance/approval preambles. Atlas opens material pages in background
+tabs while voice is active.
+
+Verification: local-host/approval/wording tests (31 passed), Chinese original
+request through Bridge mandate creation, approval and reporting, tab tests,
+TypeScript checking, lint and production frontend build. Real voice QA uses
+synthetic English microphone input; it does not establish a human Chinese audio
+acceptance result. Regression checks cover the Chinese text after transcription.
+
+The provider tool descriptions now advertise expense directory and form approvals,
+not just purchase approval. Native task adjustment is explicitly separate from
+Atlas submission. Unsupported adapter operations return an operation error with
+supported-tool guidance, rather than incorrectly stating that an Atlas UI is
+required. Host, approval and tool-carrier checks: 109 passed.
+
+Real voice QA also exposed same-turn approval reuse after a directory gate
+revealed the form gate. The host now pins each authenticated voice turn to its
+first decision's task, interaction and prepared-action hash before dispatch.
+Another gate needs a new user turn; context refresh and tool retries cannot reuse
+the first answer. Unknown outcomes retain the pin and capacity is fail-closed.
+Host/approval regressions including this two-gate scenario: 22 passed. This is
+an additional execution guard, not a claim that arbitrary new-turn consent can
+be semantically verified without the voice model.

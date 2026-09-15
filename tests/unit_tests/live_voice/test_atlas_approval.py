@@ -185,6 +185,11 @@ async def test_expense_directory_and_form_have_separate_spoken_decisions(tmp_pat
     assert operation in snapshot["tasks"][0]["supported_operations"]
     details = await host.execute(binding, SimpleNamespace(business=SimpleNamespace(operation="task.details", target_id="atlas:task:c")))
     assert details["expense"]["state"]["lines"][0]["amount"] == 86.5
+    scope = "expense_form_submission" if form_submit else "directory_listing"
+    assert snapshot["tasks"][0]["pending_decision_scope"] == scope
+    assert details["pending_decision_scope"] == scope
+    import json
+    assert json.loads(snapshot["events"][0]["result_text"])["pending_decision_scope"] == scope
     delegate = SimpleNamespace(business=SimpleNamespace(operation=operation, target_id="atlas:task:c", expected_revision=5))
     await host.execute(binding, delegate, snapshot=snapshot)
     decisions = [params for method, params in effects if method == "decide"]
@@ -200,3 +205,27 @@ def test_form_confirmation_requires_matching_expense_snapshot():
     assert AtlasLocalHost._pending(call) is not None
     call["expense"]["snapshot_hash"] = "b" * 64
     assert AtlasLocalHost._pending(call) is None
+
+
+@pytest.mark.asyncio
+async def test_one_spoken_answer_cannot_approve_directory_then_submit_form(tmp_path):
+    host, call, effects = fixture(tmp_path)
+    digest = "a" * 64
+    call.update(demoKind="expense", expense={"snapshot_hash": digest, "state": {"status": "draft"}})
+    binding = SimpleNamespace(session_id="s", interaction_id="voice")
+    action = SimpleNamespace(operation="task.approve", target_id="atlas:task:c", expected_revision=5)
+    delegate = SimpleNamespace(business=action, turn_id="directory-answer")
+    first = await host.execute(binding, delegate, snapshot=await host.context(binding))
+    assert first["decision_scope"] == "directory_listing"
+    call.update(status="waiting_for_user", revision=6, pending={"interactionId": "expense-submit:" + digest,
+        "kind": "confirm", "message": "Submit?", "preparedActionHash": digest})
+    action.expected_revision = 6
+    observed = await host.context(binding)
+    blocked = await host.execute(binding, delegate, snapshot=observed)
+    assert blocked["reason"] == "ATLAS_APPROVAL_REQUIRES_NEW_USER_TURN"
+    assert len([1 for method, _ in effects if method == "decide"]) == 1
+    assert call["status"] == "waiting_for_user"
+    delegate.turn_id = "explicit-submit-answer"
+    second = await host.execute(binding, delegate, snapshot=observed)
+    assert second["decision_scope"] == "expense_form_submission"
+    assert len([1 for method, _ in effects if method == "decide"]) == 2

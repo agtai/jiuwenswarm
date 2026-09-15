@@ -15,8 +15,17 @@ from urllib.parse import urlsplit
 import aiohttp
 
 from .native_business_contract import NativeBusinessViolation
+from .atlas_demo_routing import DEMO_TASK_NAMES
 
 VERSION = "atlas.live-voice.local.v1"
+
+
+def _decision_scope(kind, pending):
+    if not pending:
+        return None
+    if kind == "expense":
+        return "expense_form_submission" if pending["interactionId"].startswith("expense-submit:") else "directory_listing"
+    return "purchase" if kind == "repurchase" else None
 
 
 class AtlasLocalHost:
@@ -24,6 +33,7 @@ class AtlasLocalHost:
         self._path = Path(pairing_file)
         self._pins = {}
         self._approval_events = {}
+        self._decision_turns = {}
 
     @staticmethod
     def _pending(call):
@@ -119,6 +129,7 @@ class AtlasLocalHost:
             target = "atlas:" + call_id
             final = call.get("answer") or call["text"]
             pending = self._pending(call) if phase == "waiting_for_user" else None
+            decision_scope = _decision_scope(kind, pending)
             if terminal and kind == "repurchase" and call.get("decision") is not None:
                 final = json.dumps({"executor_result": final,
                     "purchase_decision": call["decision"], "pending_purchase_approval": pending,
@@ -136,6 +147,7 @@ class AtlasLocalHost:
                       **({"approval_channel": "voice_and_ui" if expense_snapshot is not None else "atlas_ui", "expense_form": expense_summary} if expense else {}),
                       "phase": phase, "result_text": final if terminal else None, "files": call["files"],
                       **({"pending": pending} if pending else {}),
+                      **({"pending_decision_scope": decision_scope} if decision_scope else {}),
                       "result_truncated": call["textTruncated"]}
             if call_id.startswith("task:"):
                 tasks.append({**common, "task_id": target, "name": call["requestText"][:80], "revision_number": revision,
@@ -159,6 +171,7 @@ class AtlasLocalHost:
                         "event_id": "atlas-approval-" + hashlib.sha256(json.dumps(key).encode()).hexdigest(),
                         "revision": revision, "state": "awaiting_approval",
                         "result_text": json.dumps({"request": call["requestText"],
+                            "pending_decision_scope": decision_scope,
                             "expense_form": expense_summary,
                             "approval": {key: pending[key] for key in ("message", "money", "merchant") if key in pending}}, ensure_ascii=False),
                         "reason": "ATLAS_EXPENSE_APPROVAL_REQUIRED" if expense else "ATLAS_APPROVAL_REQUIRED"}
@@ -185,6 +198,7 @@ class AtlasLocalHost:
             current = await self._call(binding, "observe", {"callId": call_id})
             if action.operation == "task.details":
                 return {"status": "observed", "task_id": action.target_id, "phase": current["status"],
+                        "pending_decision_scope": _decision_scope(current.get("demoKind"), self._pending(current)),
                         "pending": self._pending(current), "decision": current.get("decision"),
                         "operations": current.get("operations", []),
                         "operations_truncated": current.get("operationsTruncated", False),
@@ -202,6 +216,19 @@ class AtlasLocalHost:
                     or current["status"] != "waiting_for_user" or observed.get("pending") != pending
                     or observed.get("revision_number") != action.expected_revision):
                 return {"status": "rejected", "reason": "ATLAS_APPROVAL_STALE"}
+            # One spoken answer cannot authorize a new gate exposed by the
+            # first decision (directory access is not form submission).
+            turn_id = getattr(delegate, "turn_id", None)
+            if turn_id is not None:
+                turn_key = (binding.session_id, getattr(binding, "interaction_id", None), turn_id)
+                decision_key = (action.target_id, pending["interactionId"], pending["preparedActionHash"])
+                prior = self._decision_turns.get(turn_key)
+                if prior is not None and prior != decision_key:
+                    return {"status": "rejected", "reason": "ATLAS_APPROVAL_REQUIRES_NEW_USER_TURN",
+                            "hint": "The previous spoken answer applied to another approval. Ask the new pending question and wait for a new explicit user answer. Do not retry now."}
+                if prior is None and len(self._decision_turns) >= 512:
+                    return {"status": "rejected", "reason": "ATLAS_APPROVAL_TURN_CAPACITY"}
+                self._decision_turns[turn_key] = decision_key
             # The exact snapshot's question/hash must still be held. The callback
             # rechecks interaction identity and the gate owns prepared-action validation.
             try:
@@ -221,6 +248,11 @@ class AtlasLocalHost:
             text = delegate.request_text
             if action.instruction and action.instruction != text:
                 text += "\n\n执行说明：\n" + action.instruction
+            demo_kind = DEMO_TASK_NAMES.get(getattr(action, "name", None))
+            # Translate the explicit selector to the existing Demo entrypoint.
+            # Do not depend on the model repeating an English trigger phrase.
+            if demo_kind == "expense":
+                text = "Expense the Paris trip.\n\n用户请求及约束：\n" + text
             try:
                 accepted = await self._call(binding, "submit", {"callId": call_id, "text": text,
                     "nativeTurnKey": json.dumps([binding.interaction_id, delegate.turn_id], separators=(",", ":")),
@@ -231,6 +263,8 @@ class AtlasLocalHost:
                 # The Atlas request may already have run. Never label a lost
                 # acceptance as rejection or retry with a different request ID.
                 return {"status": "unknown", "reason": "ATLAS_ACCEPTANCE_UNKNOWN", "host_call_id": call_id}
+            if demo_kind and (accepted.get("demoKind") != demo_kind or not accepted.get("mandateId")):
+                return {"status": "unknown", "reason": "ATLAS_DEMO_ROUTE_MISMATCH", "host_call_id": call_id}
             identity = "atlas:" + call_id
             if action.operation == "task.create":
                 return {"status": "dispatched", "task_id": identity,
@@ -250,4 +284,5 @@ class AtlasLocalHost:
             events = [event for event in context["events"] if event.get("work_id") == action.target_id]
             return {"status": "observed", "task" if id_key == "task_id" else "work": fact,
                     "host_notifications": events}
-        return {"status": "rejected", "reason": "ATLAS_OPERATION_REQUIRES_EXISTING_ATLAS_UI"}
+        return {"status": "rejected", "reason": "ATLAS_OPERATION_NOT_SUPPORTED",
+                "hint": "Read the task's supported_operations. Pending purchase, directory, and expense submission decisions use task.approve or task.reject, not task.adjust."}

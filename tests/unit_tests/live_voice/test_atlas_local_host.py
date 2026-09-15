@@ -9,6 +9,31 @@ from jiuwenswarm.server.live_voice.native_business_contract import NativeBusines
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("name,kind,user_text,entry", [
+    ("atlas:expense", "expense", "好了，可以了，帮我处理一下巴黎的报销。", "Expense the Paris trip."),
+    ("atlas:repurchase", "repurchase", "帮我再买一下三月买过的咖啡，先不要付款。", None),
+])
+async def test_explicit_demo_selector_survives_chinese_request(tmp_path, name, kind, user_text, entry):
+    host = AtlasLocalHost(tmp_path / "unused")
+    sent = []
+    receipt = {"turnId": "t", "mandateId": "m", "demoKind": kind}
+    async def callback(binding, method, params):
+        sent.append(params)
+        return receipt
+    host._call = callback
+    delegate = SimpleNamespace(business=SimpleNamespace(operation="task.create", name=name, instruction="保留原始要求"),
+        source_identity="i", request_text=user_text, turn_id="turn")
+    result = await host.execute(SimpleNamespace(interaction_id="i"), delegate)
+    assert result["status"] == "dispatched"
+    assert sent[0]["text"].startswith(entry + "\n" if entry else user_text)
+    assert user_text in sent[0]["text"] and "保留原始要求" in sent[0]["text"]
+    assert sent[0]["userText"] == user_text
+    receipt = {"turnId": "fallback", "mandateId": None, "demoKind": "repurchase"}
+    result = await host.execute(SimpleNamespace(interaction_id="i"), delegate)
+    assert result["status"] == "unknown" and result["reason"] == "ATLAS_DEMO_ROUTE_MISMATCH"
+
+
+@pytest.mark.asyncio
 async def test_capabilities_are_validated_and_preserved(tmp_path):
     host = AtlasLocalHost(tmp_path / "unused")
     result = {"history": [], "calls": [], "capabilities": ["repurchase"]}
@@ -82,7 +107,9 @@ async def test_terminal_facts_and_explicit_ui_only_operations(tmp_path):
     assert result["events"][0]["result_text"] == "actual result"
     assert result["events"][0]["state"] == "completed"
     delegate = SimpleNamespace(business=SimpleNamespace(operation="task.cancel"))
-    assert (await host.execute(binding, delegate))["reason"] == "ATLAS_OPERATION_REQUIRES_EXISTING_ATLAS_UI"
+    rejected = await host.execute(binding, delegate)
+    assert rejected["reason"] == "ATLAS_OPERATION_NOT_SUPPORTED"
+    assert "task.approve" in rejected["hint"]
 
 
 @pytest.mark.asyncio
