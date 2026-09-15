@@ -463,3 +463,69 @@ Host boundary. Prior installed evidence does not certify these new source bytes.
 The Host submission entry also validates committed scope and context before
 executor acquisition/admission; this preserves the existing input binding when
 called without Voice. Wrong scope leaves journal/Agent effects at zero.
+
+## Native Task origin source replacement
+
+Tier 3 read/persistence boundary; no migration or table deletion. Existing
+Task.spec.native_source proves new native creates at durable Task acceptance,
+and unified_committed_inputs owns completed call receipts. Stop writing the
+duplicate native_business_task_origin projection and delete its recovery-write
+lifecycle. Read historical origin rows for compatibility, plus validated existing
+receipts; intersect with freshly authorized Task records. New Task native source
+also supports discovery when receipt completion failed after Task acceptance.
+No Task mutation/replay, grant restoration or speech ACK is inferred from origin.
+
+Owned: Host Work journal origin reader, Native Router discovery/receipt path and
+Registry activation discovery. Preserve receipt integrity checks, source/scope
+identity, bounded origin set, old-table integrity, route replacement fencing,
+missing receipt discovery and actual presentation receipts. Existing tables and
+rows stay untouched; no irreversible migration. Verify SQLite reopen, corrupt
+receipts/legacy rows, capacity and cross-scope isolation, source-backed recovery
+after final receipt write failure, zero duplicate Task/Agent effects and truthful
+activation projection. This replaces redundant durable management, not files.
+
+Implementation deletes `record_task_origin`, its replay caller and recovery-write
+loop. New creation persists only the already-required Task and unified call
+receipt; legacy schema/rows remain readable and unchanged. Receipt reads retain
+exact identity/fingerprint validation and reject conflicting bindings before
+returning any projection. Task native sources are accepted only for the exact
+scope and create/create_successor operation. Neither source nor receipt grants
+current authority: discovery remains authenticated and intersects current facts.
+
+The old global legacy-row integrity bound remains; new receipts have a bounded
+scoped read/union, rather than growing a second global ledger. Existing admission
+and Task limits still apply. Context refresh now reuses the Host authenticated
+creation-origin read (existing bound 128, above the visible-fact bound 32), then
+rechecks current authority and route under the Registry lock. This adds a read;
+no latency/performance improvement is claimed. No SDK API or data migration is
+needed. The read-only legacy verifier stays until historical consumers are retired.
+
+Verification: journal + serialized Native registry: **44 passed**. Broader
+registry/authority/observation/source regression: **69 passed, 1 failed** on a
+stale test double accepting only the old single-argument `task_origins` signature.
+The test double now accepts the authenticated records argument; the expiry fence
+and all zero-effect assertions are unchanged. The affected expiry-lock cases are
+rerun separately: **2 passed, 24 deselected**. Scoped journal Ruff and
+`git diff --check` pass. New real SQLite tests cover both successful and failed final
+receipt writes, clear process-local origins, recover through context and activation,
+assert no secondary table rows, no duplicate Task changes, no Agent invocation,
+and no inferred presentation ACK. Journal tests reopen storage, preserve exact
+legacy/input rows and reject corruption, conflicting sources and capacity overflow.
+
+D-032: P/R cover both receipt outcomes and restart reads; N/B/I cover invalid
+source/fingerprint, foreign scope, legacy integrity, conflict and bounds; S/T/C
+reuse actual source persistence, current activation retirement and expiry while
+waiting for the Registry lock. Work/audio state machines, VAD/buffer/barge fence,
+15-second preparation and file effects are outside this source-read boundary.
+Cold complete-diff review found no new write/replay path. Independent review
+remains unavailable and PARTIAL under the existing TESTING substitute; this is
+not independent-review or product-candidate acceptance. Source-only Host change:
+prior installed-wheel evidence is not attributed to these changed bytes.
+
+Accounting against Host 98c0c049: Voice +17/-27; Host +15/-67; SDK unchanged.
+Batch +32/-94 = **-62** production lines. From frozen session baselines:
+Voice +54/-170, Host +142/-176, SDK +152/-166; total +348/-512 = **-164**.
+Current official-compatible net additions: 112024/48024/34318 = **194366**.
+Compact evidence: `../evidence/MANAGEMENT_ORIGIN_20260915.json`.
+This removes one duplicate durable management lifecycle; the larger Task/Work
+management gaps in the decision table remain open.

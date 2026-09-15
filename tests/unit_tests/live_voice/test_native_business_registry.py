@@ -160,28 +160,44 @@ async def test_long_work_detail_keeps_complete_tail_and_refreshes_context_separa
 
 
 @pytest.mark.asyncio
-async def test_creation_projection_write_failure_recovers_from_durable_receipt_without_reexecution(tmp_path,monkeypatch):
+@pytest.mark.parametrize("receipt_failure", [False, True])
+async def test_creation_origin_uses_accepted_task_without_secondary_writes(tmp_path,monkeypatch,receipt_failure):
+    import sqlite3
     from jiuwenswarm.server.runtime.work.native_work_journal import SqliteNativeWorkJournal
     env = await make_registry(tmp_path,monkeypatch)
     router = env.registry._native_business
     router.works()
-    original = router._work_journal.record_task_origin
-    def failed(*args): raise OSError("temporary persistence failure")
-    monkeypatch.setattr(router._work_journal,"record_task_origin",failed)
+    original = env.registry._unified_journal.complete
+    def complete(**kwargs):
+        if receipt_failure and kwargs["result"].get("operation") == "task.create":
+            raise OSError("receipt persistence unavailable")
+        return original(**kwargs)
+    monkeypatch.setattr(env.registry._unified_journal,"complete",complete)
     try:
-        created,_ = await call(env,"task.create",name="Recovery report",instruction="Create report")
-        assert created["status"] == "dispatched" and created["task_origin_reason"] == "NATIVE_TASK_ORIGIN_UNAVAILABLE"
-        task_id = created["task_id"]
-        assert router._work_journal.task_origins(env.binding.scope) == ()
+        if receipt_failure:
+            with pytest.raises(NativeRuntimeClientError):
+                await call(env,"task.create",name="Recovery report",instruction="Create report")
+        else:
+            created,_ = await call(env,"task.create",name="Recovery report",instruction="Create report")
+            assert created["status"] == "dispatched" and "task_origin_reason" not in created
+        scope, tasks = await env.harness.composition.read_task_creation_origins(
+            bearer_token=TOKEN,session_id="session-1")
+        assert len(tasks) == 1
+        task_id = tasks[0].task_id
         before = env.harness.composition._core.store.counts()
-        # A new journal owner represents loss of the process-local retry state.
         restored = SqliteNativeWorkJournal(router._work_journal.database_path)
-        restored.recover_task_origins(env.binding.scope)
-        assert restored.task_origins(env.binding.scope) == (task_id,)
-        monkeypatch.setattr(router._work_journal,"record_task_origin",original)
+        assert restored.task_origins(scope) == (() if receipt_failure else (task_id,))
         env.registry._voice_task_origins.clear()
         await context(env)
         assert task_id in env.registry._voice_task_origins
+        env.registry._voice_task_origins.clear()
+        route = env.registry._p2_routes[("session-1", "interaction-1")]
+        async with env.registry._lock:
+            activation = await env.registry._restore_voice_task_origins(route, TOKEN)
+        assert activation == {"voice_task_ids": [task_id]}
+        assert env.registry._voice_task_origins[task_id].response_ref is None
+        with sqlite3.connect(restored.database_path) as connection:
+            assert connection.execute("SELECT COUNT(*) FROM native_business_task_origin").fetchone()[0] == 0
         assert env.harness.composition._core.store.counts() == before
         assert env.manager.agent.executions == []
     finally:

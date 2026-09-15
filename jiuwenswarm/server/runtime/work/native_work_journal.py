@@ -381,13 +381,8 @@ class SqliteNativeWorkJournal(SqliteWorkStore):
                 ErrorCode.UNAVAILABLE,
             ) from error
 
-    def recover_task_origins(self, scope: ScopeRef) -> None:
-        """Repair a missing projection write from the exact durable call receipt.
-
-        A journal commit may succeed after the separate origin write failed.
-        This recovers only the association, including after process restart;
-        callers must still intersect it with current authorized Task facts.
-        """
+    def _receipt_task_origins(self, scope: ScopeRef) -> tuple[str, ...]:
+        """Read existing durable call receipts without repairing a second ledger."""
         scope_sha = _scope_digest(scope)
         with self._connection() as connection:
             rows = connection.execute(
@@ -412,6 +407,7 @@ class SqliteNativeWorkJournal(SqliteWorkStore):
                 "Recovery exceeds origin capacity",
                 ErrorCode.UNAVAILABLE,
             )
+        origins: dict[str, tuple[str, str]] = {}
         for row in rows:
             if (
                 type(row["origin_json"]) is not str
@@ -438,65 +434,12 @@ class SqliteNativeWorkJournal(SqliteWorkStore):
                     "Creation receipt identity changed",
                     ErrorCode.UNAVAILABLE,
                 )
-            self.record_task_origin(scope, row["task_id"], source, origin["commit_id"])
-
-    def record_task_origin(
-        self, scope: ScopeRef, task_id: str, source_identity: str, commit_id: str
-    ) -> None:
-        """Remember a real creation receipt; this grants no Task read authority."""
-        scope_sha = _scope_digest(scope)
-        _origin_identity(task_id, source_identity, commit_id)
-        with self._connection(write=True) as connection:
-            row = connection.execute(
-                "SELECT * FROM native_business_task_origin WHERE scope_sha256=? AND task_id=?",
-                (scope_sha, task_id),
-            ).fetchone()
-            if row is not None:
-                self._verify_task_origin(row)
-                if (
-                    row["source_identity"] != source_identity
-                    or row["commit_id"] != commit_id
-                ):
-                    raise NativeWorkViolation(
-                        "NATIVE_TASK_ORIGIN_CONFLICT",
-                        "task creation origin cannot change",
-                        ErrorCode.CONFLICT,
-                    )
-                return
-            count = connection.execute(
-                "SELECT COUNT(*) FROM native_business_task_origin"
-            ).fetchone()[0]
-            if count >= self._max_task_origins:
-                raise NativeWorkViolation(
-                    "NATIVE_TASK_ORIGIN_LEDGER_FULL",
-                    "bounded task creation origin journal is full",
-                    ErrorCode.UNAVAILABLE,
-                )
-            now = (
-                datetime.now(UTC)
-                .isoformat(timespec="microseconds")
-                .replace("+00:00", "Z")
-            )
-            payload = {
-                "schema_version": _SCHEMA_VERSION,
-                "scope_sha256": scope_sha,
-                "task_id": task_id,
-                "source_identity": source_identity,
-                "commit_id": commit_id,
-                "recorded_at": now,
-            }
-            connection.execute(
-                "INSERT INTO native_business_task_origin VALUES(?,?,?,?,?,?,?)",
-                (
-                    _SCHEMA_VERSION,
-                    scope_sha,
-                    task_id,
-                    source_identity,
-                    commit_id,
-                    now,
-                    _digest(canonical_json_bytes(payload)),
-                ),
-            )
+            _origin_identity(row["task_id"], source, origin["commit_id"])
+            binding = (source, origin["commit_id"])
+            if row["task_id"] in origins and origins[row["task_id"]] != binding:
+                raise NativeWorkViolation("NATIVE_TASK_ORIGIN_CONFLICT", "task creation receipts conflict", ErrorCode.CONFLICT)
+            origins[row["task_id"]] = binding
+        return tuple(origins)
 
     def task_origins(self, scope: ScopeRef) -> tuple[str, ...]:
         """IDs to intersect with authorized Task reads; no Task state is restored."""
@@ -517,4 +460,9 @@ class SqliteNativeWorkJournal(SqliteWorkStore):
             ).fetchall()
             for row in rows:
                 self._verify_task_origin(row)
-            return tuple(row["task_id"] for row in rows)
+            legacy = {row["task_id"] for row in rows}
+        origins = legacy.union(self._receipt_task_origins(scope))
+        if len(origins) > self._max_task_origins:
+            raise NativeWorkViolation("NATIVE_TASK_ORIGIN_LEDGER_FULL", "retained task origins exceed configured capacity",
+                                      ErrorCode.UNAVAILABLE)
+        return tuple(sorted(origins))

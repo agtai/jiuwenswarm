@@ -185,7 +185,12 @@ class NativeBusinessRouter:
         # Recovery scans the durable input journal. It must not block the
         # audio/RPC event loop while another Task is writing that same store.
         self.works()
-        origins = set(await asyncio.to_thread(self.task_origins, scope))
+        discovered_scope, records = await self.registry._p3_composition.read_task_creation_origins(
+            bearer_token=None, session_id=route.binding.session_id, native_authority=route.native_p3_authority,
+        )
+        if discovered_scope != scope:
+            raise NativeBusinessViolation("EXECUTION_CONTEXT_SCOPE_MISMATCH", code=ErrorCode.PERMISSION_DENIED)
+        origins = set(await asyncio.to_thread(self.task_origins, scope, records))
         restored = [task.task_id for task in tasks if task.task_id in origins]
         current = await self._require_context_authority(route)
         async with self.registry._lock:
@@ -207,18 +212,6 @@ class NativeBusinessRouter:
                     session_id=scope.session_id, interaction_id=route.binding.interaction_id,
                     activation_id=route.binding.activation_id, activation_generation=route.binding.activation_generation,
                     correlation_id=route.binding.correlation_id, response_ref=None)
-
-    def _record_task_origin(self, route, delegate, admission, result):
-        if (result.get("status") != "dispatched" or not result.get("task_id")
-            or delegate.business.operation not in {"task.create", "task.create_successor"}):
-            return None
-        try:
-            self.works()
-            self._work_journal.record_task_origin(route.binding.scope, result["task_id"],
-                delegate.source_identity, admission.turn_commit.commit_id)
-        except Exception as error:
-            return getattr(error, "reason", "NATIVE_TASK_ORIGIN_UNAVAILABLE")
-        return None
 
     @staticmethod
     def _work_event_id(snapshot):
@@ -495,17 +488,13 @@ class NativeBusinessRouter:
                         provider_call_id=delegate.provider_call_id, **error_fields(error))
                     result = {"contract_version": NATIVE_BUSINESS_CONTRACT_VERSION, "operation": delegate.business.operation,
                         "status": "rejected", "reason": getattr(error, "reason", "NATIVE_BUSINESS_EXECUTION_FAILED")}
-                # Save the creation association before any optional await. A
-                # reconnect can discover the true receipt even while refresh is
-                # pending. Recording is idempotent and also retried on replay.
+                # The call receipt retains its origin; Task native_source already
+                # owns discovery if this separate receipt cannot be completed.
                 if (result.get("status") == "dispatched" and result.get("task_id")
                     and delegate.business.operation in {"task.create", "task.create_successor"}):
                     result["native_origin"] = {
                         "scope_sha256": hashlib.sha256(canonical_json_bytes(route.binding.scope.to_dict())).hexdigest(),
                         "source_identity": delegate.source_identity, "commit_id": admission.turn_commit.commit_id}
-                origin_reason = self._record_task_origin(route, delegate, admission, result)
-                if origin_reason is not None:
-                    result["task_origin_reason"] = origin_reason
                 # A failed optional context refresh cannot rewrite a committed
                 # Task receipt as a rejected operation or invite a new mutation.
                 if is_task_acceptance_receipt(result) or is_task_feedback_receipt(result):
@@ -530,10 +519,6 @@ class NativeBusinessRouter:
                     result["context_refresh_reason"] = "NATIVE_BUSINESS_CONTEXT_REQUIRES_REFRESH"
                 result = await asyncio.to_thread(journal.complete, voice_identity_sha256=identity, fingerprint=fingerprint,
                     result=result, completed_at=_now())
-            else:
-                # Repair projection persistence from the same durable receipt;
-                # the original Task effect and replay payload remain unchanged.
-                self._record_task_origin(route, delegate, admission, result)
             text = canonical_native_receipt(result)
             profile_event("native_business", milestone="receipt_ready", request_id=request_id,
                 provider_call_id=delegate.provider_call_id, turn_commit_id=admission.turn_commit.commit_id,
@@ -567,10 +552,15 @@ class NativeBusinessRouter:
             if delegate is not None:
                 await owner.release_failed_delegate(delegate.provider_call_id)
 
-    def task_origins(self, scope):
+    def task_origins(self, scope, tasks=()):
+        from jiuwenswarm.common.schema.native_task_source import NativeTaskSource
         self.works()
-        self._work_journal.recover_task_origins(scope)
-        return self._work_journal.task_origins(scope)
+        origins = set(self._work_journal.task_origins(scope))
+        origins.update(task.task_id for task in tasks
+            if task.scope == scope and isinstance(task.spec.native_source, NativeTaskSource)
+            and task.spec.native_source.scope == scope
+            and task.spec.native_source.operation in {"task.create", "task.create_successor"})
+        return tuple(sorted(origins))
 
     async def admit_work_response(self, route, *, event_id, provider_response_id, turn_id):
         if not route.activation_lease.task_notification_foreground_safe(route.binding):

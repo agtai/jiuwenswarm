@@ -1,0 +1,135 @@
+{
+  "previous_manifest": "MANAGEMENT_WORK_ADMISSION_20260915.json",
+  "host_batch_baseline": "98c0c049d11f78f126bee7f5ddf8263d01bf11a5",
+  "sdk_unchanged": "b292d2eb5663bdc6d3181a0c840d5ac8933be129",
+  "batch_totals": {
+    "voice": {
+      "added_lines": 17,
+      "removed_lines": 27,
+      "net_lines": -10
+    },
+    "jiuwenswarm": {
+      "added_lines": 15,
+      "removed_lines": 67,
+      "net_lines": -52
+    }
+  },
+  "cumulative_totals": {
+    "voice": {
+      "added_lines": 54,
+      "removed_lines": 170,
+      "net_lines": -116
+    },
+    "jiuwenswarm": {
+      "added_lines": 142,
+      "removed_lines": 176,
+      "net_lines": -34
+    },
+    "agentcore": {
+      "added_lines": 152,
+      "removed_lines": 166,
+      "net_lines": -14
+    }
+  },
+  "current_official_totals": {
+    "voice": {
+      "current_lines": 112024,
+      "baseline_lines": 0,
+      "added_lines": 112024,
+      "removed_lines": 0,
+      "net_lines": 112024,
+      "new_file_lines": 112024,
+      "current_files": 103
+    },
+    "jiuwenswarm": {
+      "current_lines": 150539,
+      "baseline_lines": 102515,
+      "added_lines": 48945,
+      "removed_lines": 921,
+      "net_lines": 48024,
+      "new_file_lines": 39849,
+      "current_files": 119
+    },
+    "agentcore": {
+      "current_lines": 36624,
+      "baseline_lines": 2306,
+      "added_lines": 34334,
+      "removed_lines": 16,
+      "net_lines": 34318,
+      "new_file_lines": 34188,
+      "current_files": 30
+    }
+  },
+  "current_module_totals": {
+    "M7+M9": {
+      "current_lines": 51056,
+      "new_file_lines": 12974,
+      "net_lines": 17036
+    },
+    "M4+M5": {
+      "current_lines": 37992,
+      "new_file_lines": 37992,
+      "net_lines": 37992
+    },
+    "M3": {
+      "current_lines": 14427,
+      "new_file_lines": 14427,
+      "net_lines": 14427
+    },
+    "shared": {
+      "current_lines": 47114,
+      "new_file_lines": 19469,
+      "net_lines": 21345
+    },
+    "M1+M2": {
+      "current_lines": 70839,
+      "new_file_lines": 45137,
+      "net_lines": 45995
+    },
+    "G": {
+      "current_lines": 38391,
+      "new_file_lines": 18173,
+      "net_lines": 19556
+    },
+    "M6+M8": {
+      "current_lines": 39368,
+      "new_file_lines": 37889,
+      "net_lines": 38015
+    }
+  },
+  "changed_files": [
+    {
+      "path": "jiuwenswarm/channels/live_voice/native_business_router.py",
+      "owner": "voice",
+      "new_file": false,
+      "current_lines": 655,
+      "baseline_lines": 665,
+      "added_lines": 16,
+      "removed_lines": 26,
+      "net_lines": -10,
+      "sha256": "d21c6cbc36b87c4c779f476618f6ce093985d782baa413ee223fe15ea8a6f2a3"
+    },
+    {
+      "path": "jiuwenswarm/channels/live_voice/product_composition_registry.py",
+      "owner": "voice",
+      "new_file": false,
+      "current_lines": 14958,
+      "baseline_lines": 14958,
+      "added_lines": 1,
+      "removed_lines": 1,
+      "net_lines": 0,
+      "sha256": "8581f6fe715db13b61665c0ee5387c4c06d6857d98d8acef45c1e1598cf33b70"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/work/native_work_journal.py",
+      "owner": "jiuwenswarm",
+      "new_file": false,
+      "current_lines": 468,
+      "baseline_lines": 520,
+      "added_lines": 15,
+      "removed_lines": 67,
+      "net_lines": -52,
+      "sha256": "060a40616514c0223ad12d4a5ac79c55696438b3c7d64fbd7e8f8f0fa8149a95"
+    }
+  ]
+}

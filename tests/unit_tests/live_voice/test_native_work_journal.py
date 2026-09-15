@@ -76,10 +76,11 @@ def test_creation_receipt_recovery_requires_exact_completed_scoped_identity(tmp_
             connection.execute("UPDATE unified_committed_inputs SET fingerprint=?",(bytes.fromhex("b"*64),))
     if fault in {"source", "fingerprint", "extra_origin_field"}:
         with pytest.raises(NativeWorkViolation, match="Creation receipt"):
-            store.recover_task_origins(scope())
+            store.task_origins(scope())
     else:
-        store.recover_task_origins(scope())
-    assert store.task_origins(scope()) == (("actual-task",) if fault is None else ())
+        store.task_origins(scope())
+    if fault not in {"source", "fingerprint", "extra_origin_field"}:
+        assert store.task_origins(scope()) == (("actual-task",) if fault is None else ())
     assert store.restore() == () and protected(store) == [("unchanged",)]
 
 
@@ -392,56 +393,65 @@ def test_suppression_reason_replay_bounds_and_concurrent_writes_fail_closed(tmp_
     assert protected(store) == [("unchanged",)]
 
 
-def test_task_origins_are_exact_scoped_recoverable_data_without_task_mutation(tmp_path):
+def _legacy_origin(store, current_scope, task_id, source, commit):
+    # Frozen old-table fixture: production no longer has an origin writer.
+    from openjiuwen.core.application.tasks.contracts import canonical_json_bytes
+    payload = dict(schema_version=1, scope_sha256=hashlib.sha256(canonical_json_bytes(current_scope.to_dict())).hexdigest(),
+                   task_id=task_id, source_identity=source, commit_id=commit, recorded_at="2026-09-06T10:00:00Z")
+    with sqlite3.connect(store.database_path) as connection:
+        connection.execute("INSERT INTO native_business_task_origin VALUES (?,?,?,?,?,?,?)",
+            (*payload.values(), hashlib.sha256(canonical_json_bytes(payload)).hexdigest()))
+
+
+def _creation_receipt(store, task_id, identity="a" * 64, current_scope=None):
+    from openjiuwen.core.application.tasks.contracts import canonical_json_bytes
+    current_scope = current_scope or scope()
+    source = "native-business:" + identity
+    binding = dict(voice_identity_sha256=identity, fingerprint=bytes.fromhex(identity))
+    unified = SqliteUnifiedCommittedInputJournal(store.database_path)
+    assert unified.admit(request_id=source, created_at="2026-09-06T10:00:00Z", **binding).execute
+    result = dict(contract_version="live-voice.native-business.v1", status="dispatched", operation="task.create",
+                  task_id=task_id, native_origin=dict(scope_sha256=hashlib.sha256(canonical_json_bytes(current_scope.to_dict())).hexdigest(),
+                  source_identity=source, commit_id="commit-" + identity[0]))
+    unified.complete(**binding, result=result, completed_at="2026-09-06T10:00:01Z")
+
+
+def test_task_origins_read_legacy_and_receipts_without_repair_writes(tmp_path):
     store = journal(tmp_path)
-    source = "native-business:" + "a" * 64
-    assert store.task_origins(scope()) == ()
-    assert store.record_task_origin(scope(), "task-1", source, "commit-1") is None
-    assert store.record_task_origin(scope(), "task-1", source, "commit-1") is None
+    _legacy_origin(store, scope(), "task-old", "native-business:" + "b" * 64, "old-commit")
+    _creation_receipt(store, "task-new")
     other = scope(session_id="other-session")
-    assert store.task_origins(other) == ()
-    store.record_task_origin(other, "task-other", source, "commit-1")
-    for changed_source, changed_commit in (
-        ("native-business:" + "b" * 64, "commit-1"),
-        (source, "commit-changed"),
-    ):
-        with pytest.raises(NativeWorkViolation) as changed:
-            store.record_task_origin(scope(), "task-1", changed_source, changed_commit)
-        assert changed.value.reason == "NATIVE_TASK_ORIGIN_CONFLICT"
+    _creation_receipt(store, "task-other", "c" * 64, other)
+    with sqlite3.connect(store.database_path) as connection:
+        before = connection.execute("SELECT * FROM unified_committed_inputs ORDER BY request_id").fetchall()
+        legacy = connection.execute("SELECT * FROM native_business_task_origin").fetchall()
     reconstructed = SqliteNativeWorkJournal(store.database_path)
-    assert reconstructed.task_origins(scope()) == ("task-1",)
+    assert reconstructed.task_origins(scope()) == ("task-new", "task-old")
     assert reconstructed.task_origins(other) == ("task-other",)
-    assert not reconstructed.presented("task-1", scope())
+    with sqlite3.connect(store.database_path) as connection:
+        assert connection.execute("SELECT * FROM unified_committed_inputs ORDER BY request_id").fetchall() == before
+        assert connection.execute("SELECT * FROM native_business_task_origin").fetchall() == legacy
+    assert not reconstructed.presented("task-new", scope())
     assert reconstructed.restore() == () and protected(store) == [("unchanged",)]
 
 
-def test_task_origin_validation_capacity_and_concurrent_replay_are_closed(tmp_path):
-    store = journal(tmp_path, max_task_origins=1)
-    source = "native-business:" + "a" * 64
-    for values in (
-        ("", source, "commit"),
-        ("x" * 257, source, "commit"),
-        ("task", source, ""),
-        ("task", "committed_turn:abc", "commit"),
-        ("task", "native-business:" + "A" * 64, "commit"),
-        ("task", source + "0", "commit"),
-    ):
-        with pytest.raises(NativeWorkViolation) as invalid:
-            store.record_task_origin(scope(), *values)
-        assert invalid.value.reason == "NATIVE_TASK_ORIGIN_INVALID"
-        assert store.task_origins(scope()) == ()
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        assert list(
-            pool.map(
-                lambda _: store.record_task_origin(scope(), "task-1", source, "commit"),
-                range(2),
-            )
-        ) == [None, None]
-    with pytest.raises(NativeWorkViolation) as full:
-        store.record_task_origin(scope(), "task-2", source, "commit")
-    assert full.value.reason == "NATIVE_TASK_ORIGIN_LEDGER_FULL"
-    store.record_task_origin(scope(), "task-1", source, "commit")
-    assert store.task_origins(scope()) == ("task-1",)
+@pytest.mark.parametrize("corrupt", ["fingerprint", "source", "capacity", "conflict"])
+def test_receipt_origin_reads_fail_closed_without_persisting_projection(tmp_path, corrupt):
+    store = journal(tmp_path, max_task_origins=1 if corrupt == "capacity" else 4096)
+    _creation_receipt(store, "task-one")
+    if corrupt in {"capacity", "conflict"}:
+        _creation_receipt(store, "task-two" if corrupt == "capacity" else "task-one", "b" * 64)
+    else:
+        with sqlite3.connect(store.database_path) as connection:
+            if corrupt == "fingerprint":
+                connection.execute("UPDATE unified_committed_inputs SET fingerprint=?", (b"x" * 32,))
+            else:
+                connection.execute("UPDATE unified_committed_inputs SET result_json=json_set(result_json,'$.native_origin.source_identity','native-business:invalid')")
+    with pytest.raises(NativeWorkViolation) as error:
+        store.task_origins(scope())
+    assert error.value.reason == {"capacity": "NATIVE_TASK_ORIGIN_LEDGER_FULL", "conflict": "NATIVE_TASK_ORIGIN_CONFLICT"}.get(corrupt, "NATIVE_TASK_ORIGIN_CORRUPT")
+    with sqlite3.connect(store.database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM native_business_task_origin").fetchone()[0] == 0
     assert protected(store) == [("unchanged",)]
 
 
@@ -449,7 +459,7 @@ def test_task_origin_validation_capacity_and_concurrent_replay_are_closed(tmp_pa
 def test_corrupt_recovery_facts_never_claim_ack_or_task_state(tmp_path, kind):
     store = journal(tmp_path)
     store.mark_suppressed("event", scope(), "speech_interrupted")
-    store.record_task_origin(scope(), "task", "native-business:" + "a" * 64, "commit")
+    _legacy_origin(store, scope(), "task", "native-business:" + "a" * 64, "commit")
     with sqlite3.connect(store.database_path) as connection:
         if kind == "suppression":
             connection.execute("UPDATE native_work_suppression SET reason='superseded'")
@@ -499,9 +509,7 @@ def test_native_recovery_facts_leave_actual_unified_admission_and_result_unchang
             )
         }
     store.save(accepted())
-    store.record_task_origin(
-        scope(), "actual-task", "native-business:" + identity, "commit"
-    )
+    _legacy_origin(store, scope(), "actual-task", "native-business:" + identity, "commit")
     store.mark_suppressed("event", scope(), "speech_interrupted")
     store.mark_presented("actually-heard", scope())
     with unified._connect() as connection:

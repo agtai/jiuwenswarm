@@ -229,7 +229,7 @@ async def test_context_expiring_while_waiting_for_registry_lock_has_zero_effects
             await resume.wait()
             return current
         monkeypatch.setattr(router, "_require_context_authority", resolved_then_wait)
-        monkeypatch.setattr(router, "task_origins", lambda scope: ("retained-task",))
+        monkeypatch.setattr(router, "task_origins", lambda scope, tasks=(): ("retained-task",))
         before = env.harness.composition._core.store.counts()
         origins = dict(env.registry._voice_task_origins)
         operation = (env.client.observe_business_context(activation(env), request_id="expiry-lock")

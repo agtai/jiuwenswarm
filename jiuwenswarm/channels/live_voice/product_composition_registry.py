@@ -4371,7 +4371,7 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
             if scope != route.binding.scope:
                 raise FormalTaskViolation("VOICE_TASK_DISCOVERY_SCOPE_MISMATCH", "voice Task discovery changed scope", ErrorCode.PERMISSION_DENIED)
             restored: list[str] = []
-            native_task_ids = set(self._native_business.task_origins(scope)) if route.native_business_enabled else set()
+            native_task_ids = set(self._native_business.task_origins(scope, tasks)) if route.native_business_enabled else set()
             for task in tasks:
                 if task.scope == scope and task.task_id in native_task_ids:
                     restored.append(task.task_id)
