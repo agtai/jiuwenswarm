@@ -1261,3 +1261,87 @@ update is included. Remaining Host admission and application receipt/result
 service convergence stay open under the active goal. The legacy control leaf's
 unused mutation API is not credited as deleted; this group removes its duplicate
 live owners and historical inspection flow, not every dormant helper.
+
+### Host Task result observations
+
+Tier 2, existing Host P3AuthenticatedComposition, Task control/result projection,
+Native result/context and Registry result-to-Agent consumers. Replace Native's
+direct Store read orchestration and Registry's background-task/artifact-read
+chain with one authenticated Host observation service. Keep the SDK's existing
+TaskResultReader artifact proof and the existing untrusted-context codec. Return
+the exact Task/Attempt plus control facts and result observation; an unavailable
+earlier query must remain unavailable even if execution finishes before the
+control read. Preserve Native zero-result-byte mode, notification IDs/filtering,
+and optional-read failure not rewriting an accepted receipt. Historical
+presentation authority remains a distinct authenticated read contract. No new
+wire/schema/policy, Work, audio or runtime deployment. Verification includes real
+SQLite saved results and project artifacts, changed Attempt/scope, unavailable
+result timing, Native budgets and current semantic/Native consumers. Independent
+design review confirms these are two actual orchestration chains; pending intent
+metadata is not a duplicate confirmation ledger and is not deleted by this group.
+
+Resume state audit: the saved Goal remains `active` and agrees with STATUS's
+formal Task phase; no new user authorization is pending. Host HEAD is
+`79428f88bc47196436de6b14c73356612cf4c8c4` (ahead 62, behind 0), with this
+result-observation batch uncommitted. SDK HEAD is
+`e57563a308c8b55f27673e7e04e33de3f9254471`, clean, without an upstream.
+The first affected backend run finished with **162 passed, 1 failed**:
+`test_task_answers_use_current_facts_and_complete_results_without_tools[unavailable-result-advanced]`.
+Its completion injection still patches `read_task_control_snapshot`, while this
+result consumer now calls `read_task_result_observations`; the injection must
+follow the real consumer and retain the original timing assertions. This is not
+passing evidence. Public Host service scope/Attempt/artifact checks and final
+independent implementation review remain outstanding. Continue this batch's
+implementation and verification before committing; do not treat its design
+review, earlier committed checks or the active Goal as current-batch acceptance.
+
+Implementation replaces Native's direct Store presentation reads and Registry's
+background-task/artifact-read sequence with the existing Host composition's
+authenticated result-observation service. The presentation formatter now consumes
+observations and has no Store access. Host reuses one Task snapshot for Task and
+control identity, preserves an earlier supplied result observation, rejects
+cross-Attempt results and uses the existing SDK artifact reader for disclosure.
+Controls and saved results remain independently observed facts, not a claim of
+one transaction across all projections. Historical presentation authority and
+untrusted Agent-context encoding remain separate necessary consumers.
+
+Independent review found two integration errors, both repaired: fixed status
+authorization had added a requirement to Native list-only context; passing the
+adjustment mutation name to a query-only reader had suppressed optional facts.
+Native context now uses its existing list purpose, Native query receipts retain
+their query purpose, and adjustment observations use their existing status read.
+Native-purpose overrides require Native authority and cannot accept supplied
+result payloads or artifact disclosure. Artifact disclosure also explicitly
+requires result permission. Read-only follow-up review confirmed the fixes;
+the reviewer did not run Main's tests.
+
+The semantic timing test now injects completion at the actual Host result reader
+instead of its removed caller path, retaining every original assertion. New real
+SQLite/temporary-file evidence proves current saved truth, prior unavailable
+truth after completion, invalid token/scope/Attempt rejection, no Native override
+for bearer callers, no artifact disclosure with status-only permission, changed
+file bytes withheld, zero query mutations, and the zero-result-byte projection.
+Native empty/nonempty list-only contexts and optional-read failure preserve their
+original success contracts. Native completed-adjust tests also assert pending
+control facts and matching final applied facts/notifications. Existing project
+file, adjustment/recovery and semantic/Native consumers remain in the affected
+four-file regression group, which passed **166 tests**. The final adjustment
+adapter/test follow-up is additionally rerun below because it changed after that
+process imported source. No frontend, SDK, wire/schema, Work policy or audio
+change requires a new physical Provider/browser acceptance for this read boundary.
+
+[Physical production accounting](../evidence/MANAGEMENT_TASK_RESULTS_20260915.json):
+Voice **+22/-20 = +2**, Host **+94/-28 = +66**, SDK unchanged; combined
+**+116/-48 = +68** against `79428f88`. This is an actual read-orchestration
+ownership replacement, with all added service/validation cost counted, not net
+code removal. Cumulative Goal **+1077/-3379 = -2302**; official-baseline net
+additions are Voice **109675**, Host **48341**, SDK **34212**, total **192228**.
+Production hashes, per-file deltas and merged module totals are recorded. The
+remaining Host admission/application receipt boundary stays open; pending intent
+metadata and the historical result-presentation service are not credited deleted.
+
+Final affected Native registry rerun: **17 passed**, including the strengthened
+completed-adjust receipt/notification test on the final source. These tests overlap
+the 166-test group and are not added to it as unique coverage. Scoped diff and
+production evidence hashes verified; no deployment, service restart, private
+configuration, user-project write, SDK change or remote update is included.

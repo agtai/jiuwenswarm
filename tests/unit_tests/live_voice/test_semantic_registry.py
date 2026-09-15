@@ -919,6 +919,92 @@ async def present_next(s, sequence):
 
 
 @pytest.mark.asyncio
+async def test_host_result_observations_preserve_saved_truth_scope_and_artifacts(
+    semantic_runtime, monkeypatch, tmp_path,
+):
+    from openjiuwen.core.application.tasks.formal_task_models import (
+        FormalTaskViolation, TerminalOutcome, TaskResultArtifact,
+    )
+    from jiuwenswarm.server.runtime.formal_tasks.task_control_presentation import native_task_presentation
+
+    s = semantic_runtime
+    composition = s.harness.composition
+    core = composition._core
+    task_id = (await control_with_confirmation(s, "host-result", "task.create", {
+        "name": "Equipment report", "instruction": "Write the equipment report.",
+    }))["task_id"]
+    read_args = dict(bearer_token=TOKEN, session_id="session-1",
+                     task_ids=(task_id,), expected_scope=_scope())
+    earlier, = await composition.read_task_result_observations(**read_args)
+    assert earlier.result_payload["availability"] == "not_ready"
+    content = "Saved equipment facts."
+    artifact = tmp_path / "equipment.md"
+    artifact.write_text(content, encoding="utf-8")
+    s.harness.executor.dispatch_outcome = TerminalOutcome.COMPLETED
+    dispatch = s.harness.executor.dispatch
+
+    async def complete(item):
+        delivery = await dispatch(item)
+        return replace(delivery, observations=tuple(
+            replace(observation, result_text=content, result_artifacts=(
+                TaskResultArtifact("equipment.md", hashlib.sha256(content.encode()).hexdigest()),
+            )) if observation.attempt_outcome is TerminalOutcome.COMPLETED else observation
+            for observation in delivery.observations
+        ))
+
+    monkeypatch.setattr(s.harness.executor, "dispatch", complete)
+    await core.drain_outbox()
+    counts = core.store.counts()
+    saved_task = core.store.get_task(task_id, _scope())
+    dispatches = len(s.harness.executor.dispatches)
+    agent_calls = s.manager.agent.calls
+    current, = await composition.read_task_result_observations(
+        **read_args, include_history=True, include_artifacts=True)
+    assert current.task == saved_task
+    assert current.control["state"] == "terminal"
+    assert current.result_payload["task_result"]["result_text"] == content
+    assert current.artifact_snapshots[0]["content"] == content
+    old, = await composition.read_task_result_observations(
+        **read_args, observed_result=earlier.result_payload)
+    assert old.control["state"] == "terminal"
+    assert old.result_payload == earlier.result_payload
+    facts, events = native_task_presentation((current,), maximum_result_bytes=0)
+    assert facts[task_id]["result_available"] is True
+    assert "result_text" not in facts[task_id]
+    assert events == native_task_presentation((current,))[1]
+
+    for changes in (
+        {"bearer_token": "invalid-token"},
+        {"native_operation": "task.list"},
+        {"expected_scope": _scope(project_id="project-2", session_id="session-2")},
+        {"session_id": "session-2", "expected_scope": _scope(project_id="project-2", session_id="session-2")},
+        {"observed_result": {**current.result_payload, "task_result": {
+            **current.result_payload["task_result"], "attempt_id": "different-attempt"}}},
+    ):
+        with pytest.raises(FormalTaskViolation):
+            await composition.read_task_result_observations(**{**read_args, **changes})
+
+    principal = composition._authenticator._principal
+    composition._authenticator._principal = replace(principal, allowed_operations=frozenset({"task.status"}))
+    try:
+        with pytest.raises(FormalTaskViolation):
+            await composition.read_task_result_observations(**read_args, include_artifacts=True)
+    finally:
+        composition._authenticator._principal = principal
+
+    artifact.write_text("Changed after settlement.", encoding="utf-8")
+    changed, = await composition.read_task_result_observations(**read_args, include_artifacts=True)
+    assert "content" not in changed.artifact_snapshots[0]
+    assert changed.result_payload == current.result_payload
+    assert artifact.read_text(encoding="utf-8") == "Changed after settlement."
+    assert core.store.counts() == counts
+    assert core.store.get_task(task_id, _scope()) == saved_task
+    assert len(s.harness.executor.dispatches) == dispatches
+    assert s.manager.agent.calls == agent_calls
+    assert not s.harness.executor.adjustments and not s.harness.executor.cancels
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("query", ["status", "status-advanced", "unavailable-result", "unavailable-result-advanced", "complete-result"])
 async def test_task_answers_use_current_facts_and_complete_results_without_tools(semantic_runtime, monkeypatch, query):
     s = semantic_runtime
@@ -945,11 +1031,13 @@ async def test_task_answers_use_current_facts_and_complete_results_without_tools
         if query == "complete-result":
             await core.drain_outbox()
         else:
-            read = s.harness.composition.read_task_control_snapshot
+            read_method = ("read_task_control_snapshot" if query.startswith("status")
+                           else "read_task_result_observations")
+            read = getattr(s.harness.composition, read_method)
             async def advance_then_read(**kwargs):
                 await core.drain_outbox()
                 return await read(**kwargs)
-            monkeypatch.setattr(s.harness.composition, "read_task_control_snapshot", advance_then_read)
+            monkeypatch.setattr(s.harness.composition, read_method, advance_then_read)
     if query == "unavailable-result":
         now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         item = core.store.claim_outbox("answer-facts-defer", observed_at=now)

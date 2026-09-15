@@ -7552,10 +7552,12 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
                 if not native_result_only and availability != "available":
                     if business_task_id is None:
                         raise FormalTaskViolation("TASK_RESULT_CONTEXT_INVALID", "exact result target unavailable", ErrorCode.RESULT_UNKNOWN)
-                    receipt["task_control_snapshot"] = await self._p3_composition.read_task_control_snapshot(
+                    observation, = await self._p3_composition.read_task_result_observations(
                         bearer_token=auth_token, session_id=retained.binding.session_id,
-                        task_id=business_task_id,
+                        task_ids=(business_task_id,), expected_scope=commit.scope,
+                        observed_result=task_result_payload,
                     )
+                    receipt["task_control_snapshot"] = observation.control
                     # Unavailable result replies carry no attempt identity. A
                     # later completion/retry must not inherit that old absence.
                     receipt["result_observation"] = {
@@ -7583,18 +7585,14 @@ class AgentServerProductCompositionRegistry(TaskResultContext, ProductDiagnostic
                         "exact result unavailable",
                         ErrorCode.RESULT_UNKNOWN,
                     )
-                current = await self._p3_composition.read_background_task(
+                observation, = await self._p3_composition.read_task_result_observations(
                     bearer_token=auth_token,
                     session_id=retained.binding.session_id,
-                    task_id=business_task_id,
+                    task_ids=(business_task_id,), expected_scope=commit.scope,
                     native_authority=native_p3_authority,
+                    observed_result=task_result_payload, include_artifacts=True,
                 )
-                artifacts = await asyncio.to_thread(
-                    self._verified_result_artifact_snapshots,
-                    scope=commit.scope,
-                    task=current,
-                    task_result=task_result,
-                )
+                artifacts = observation.artifact_snapshots
                 if native_result_only:
                     _, entry = self._bounded_untrusted_result_context(
                         scope=commit.scope, task_result=task_result, artifact_snapshots=artifacts,

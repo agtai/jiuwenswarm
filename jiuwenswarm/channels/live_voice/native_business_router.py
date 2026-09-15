@@ -121,12 +121,8 @@ class NativeBusinessRouter:
         snapshots = self.works().list(scope=authority.scope)
         with ProfileSpan("native.context_projection_restore"):
             await self._restore_task_projection(route, authority.scope, read.tasks)
-        from jiuwenswarm.server.runtime.formal_tasks.task_control_presentation import native_task_presentation
-        task_facts, task_events = await asyncio.to_thread(
-            native_task_presentation, self.registry._p3_composition._core.store,
-            authority.scope, [task["task_id"] for task in tasks],
-            presented=self._work_journal.presented,
-        )
+        task_facts, task_events = await self._task_presentation(
+            route, tuple(task["task_id"] for task in tasks), operation="task.list")
         for task in tasks:
             task.update(task_facts[task["task_id"]])
         self._task_events[authority.scope] = task_events
@@ -337,12 +333,20 @@ class NativeBusinessRouter:
             await self._task_result_facts(route, result)
         return result
 
-    async def _task_result_facts(self, route, result):
+    async def _task_presentation(self, route, task_ids, *, operation, maximum_result_bytes=65536):
         from jiuwenswarm.server.runtime.formal_tasks.task_control_presentation import native_task_presentation
+        observations = await self.registry._p3_composition.read_task_result_observations(
+            bearer_token=None, session_id=route.binding.session_id, task_ids=task_ids,
+            expected_scope=route.binding.scope, native_authority=route.native_p3_authority,
+            native_operation=operation, include_history=True)
+        return native_task_presentation(observations, maximum_result_bytes=maximum_result_bytes,
+                                        presented=self._work_journal.presented)
+
+    async def _task_result_facts(self, route, result):
         try:
-            facts, events = await asyncio.to_thread(native_task_presentation,
-                self.registry._p3_composition._core.store, route.binding.scope, [result["task_id"]], maximum_result_bytes=0,
-                presented=self._work_journal.presented)
+            operation = "task.status" if result["operation"] == "task.adjust" else result["operation"]
+            facts, events = await self._task_presentation(
+                route, (result["task_id"],), operation=operation, maximum_result_bytes=0)
             result["task_control"] = facts[result["task_id"]]
             result["task_notifications"] = events
             self._task_events[route.binding.scope] = [event for event in self._task_events.get(route.binding.scope, ())

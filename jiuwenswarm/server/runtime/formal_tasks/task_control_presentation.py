@@ -2,11 +2,55 @@
 
 """Presentation of canonical control facts; never a language/target classifier."""
 
+from __future__ import annotations
+
 from collections.abc import Mapping
+from dataclasses import dataclass
 import hashlib
 import json
 
-from jiuwenswarm.common.schema.live_voice_contract_v2 import canonical_json_bytes
+from jiuwenswarm.common.schema.live_voice_contract_v2 import ErrorCode, canonical_json_bytes
+from openjiuwen.core.application.tasks.formal_task_models import FormalTaskViolation, PersistentTaskRecord
+from openjiuwen.core.application.tasks.task_result_reader import TaskResultReader
+
+
+@dataclass(frozen=True, slots=True)
+class TaskResultObservation:
+    """A saved-result observation and independently observed current controls."""
+
+    task: PersistentTaskRecord
+    control: Mapping[str, object]
+    result_payload: Mapping[str, object]
+    artifact_snapshots: tuple[Mapping[str, object], ...] = ()
+
+
+def read_task_result_observation(store, scope, task_id, *, observed_result=None,
+                                 include_history=False, include_artifacts=False):
+    snapshot = store.task_read_snapshot(task_id, scope)
+    task = snapshot[0]
+    control = read_task_control_facts(store, task_id, scope,
+                                      include_history=include_history, task_snapshot=snapshot)
+    if observed_result is None:
+        availability, result, reason = store.task_result(task_id, scope)
+        payload = {"task_id": task_id, "availability": availability.value,
+                   "reason": reason, "task_result": None if result is None else result.to_dict()}
+    else:
+        # An earlier unavailable query is not permission to read a later result.
+        payload = dict(observed_result)
+    result = payload.get("task_result")
+    if (payload.get("task_id") != task_id
+        or payload.get("availability") not in {"available", "not_ready", "unavailable"}
+        or (payload.get("availability") == "available") != isinstance(result, Mapping)
+        or (result is not None and not isinstance(result, Mapping))
+        or (isinstance(result, Mapping) and (
+            result.get("task_id") != task_id or result.get("attempt_id") != task.attempt_id))):
+        raise FormalTaskViolation("TASK_RESULT_CONTEXT_INVALID",
+                                  "result observation does not bind the exact Task/Attempt", ErrorCode.PERMISSION_DENIED)
+    artifacts = ()
+    if include_artifacts and result is not None:
+        artifacts = TaskResultReader._verified_result_artifact_snapshots(
+            scope=scope, task=task, task_result=result)
+    return TaskResultObservation(task, control, payload, artifacts)
 
 
 def task_subject(facts: Mapping[str, object], *, chinese: bool) -> str:
@@ -66,9 +110,9 @@ def task_status_text(facts: Mapping[str, object], *, chinese: bool) -> str:
     return text + adjustment_status_text(facts.get("adjustment_state"), chinese=chinese)
 
 
-def read_task_control_facts(store, task_id, scope, *, adjustment_id=None, include_history=False):
+def read_task_control_facts(store, task_id, scope, *, adjustment_id=None, include_history=False, task_snapshot=None):
     """One shared projection for authenticated queries and Native context."""
-    task, attempt, admission = store.task_read_snapshot(task_id, scope)
+    task, attempt, admission = task_snapshot if task_snapshot is not None else store.task_read_snapshot(task_id, scope)
     after_seq = max(-1, task.event_head - 64)
     events = store.events(task_id, scope, after_seq=after_seq,
                                     attempt_id=task.attempt_id)
@@ -147,12 +191,12 @@ def read_task_control_facts(store, task_id, scope, *, adjustment_id=None, includ
     return facts
 
 
-def native_task_presentation(store, scope, task_ids, *, maximum_result_bytes=65536, presented=None):
+def native_task_presentation(observations, *, maximum_result_bytes=65536, presented=None):
     """Bound complete saved results, never synthesize them from requested intent."""
     facts, events = {}, []
-    for task_id in task_ids:
-        control = read_task_control_facts(store, task_id, scope, include_history=True)
-        task = store.get_task(task_id, scope)
+    for observation in observations:
+        control, task = observation.control, observation.task
+        task_id, scope = task.task_id, task.scope
         fact = {key: control[key] for key in (
             "adjustment_accepting", "adjustment_state", "adjustment_reason",
         )}
@@ -164,11 +208,10 @@ def native_task_presentation(store, scope, task_ids, *, maximum_result_bytes=655
         fact["adjustments"] = changes[-8:]
         if "followup_adjustment" in control:
             fact["followup_adjustment"] = control["followup_adjustment"]
-        availability, result, _ = store.task_result(task_id, scope)
+        result = observation.result_payload.get("task_result")
         fact["result_available"] = result is not None
         if result is not None:
-            payload = {"result_text": result.result_text,
-                       "artifacts": [artifact.to_dict() for artifact in result.artifacts]}
+            payload = {"result_text": result["result_text"], "artifacts": result["artifacts"]}
             size = len(canonical_json_bytes(payload))
             if size <= maximum_result_bytes:
                 fact.update(payload)

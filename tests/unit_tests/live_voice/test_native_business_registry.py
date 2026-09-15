@@ -400,6 +400,8 @@ async def test_native_completed_adjust_preserves_speech_and_exposes_final_saved_
         assert adjusted["status"] == "dispatched", adjusted
         assert adjusted["adjustment_observation"]["state"] == "pending"
         assert adjusted["adjustment_observation"]["execution_mode"] == "followup"
+        assert adjusted["task_control"]["adjustment_state"] == "pending"
+        assert "task_control_reason" not in adjusted
         assert await core.drain_outbox_once()
         await core.drain_outbox_once()
         latest = await context(env)
@@ -415,6 +417,11 @@ async def test_native_completed_adjust_preserves_speech_and_exposes_final_saved_
         queried, _ = await call(env, "task.result", stem="result", target_id=task.task_id)
         assert queried["task_control"]["adjustment_state"] == "applied"
         assert len(queried["task_notifications"]) == 1
+        route = env.registry._p2_routes[(env.binding.scope.session_id, env.binding.interaction_id)]
+        final_adjustment = dict(adjusted)
+        await env.registry._native_business._task_result_facts(route, final_adjustment)
+        assert final_adjustment["task_control"]["adjustment_state"] == "applied"
+        assert final_adjustment["task_notifications"] == queried["task_notifications"]
         activation = env.client.activation_for(session_id="session-1", interaction_id="interaction-1", connection_id="business-wire")
         observation = await env.client.business_context(activation, request_id="final-adjustment-observation")
         assert observation["work_events"] == queried["task_notifications"]

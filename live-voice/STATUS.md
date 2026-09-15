@@ -161,8 +161,14 @@ and result-version fences. Panel-owned historical/per-Voice leaves and the old
 retry inspector are deleted. Voice retirement closes presentation consumers only.
 Independent review found and verified fixes for cross-Task stale-list/result
 overwrites, same-Task late-result clearing and partial progress receipt commits.
-Remaining Host admission and application receipt/result-service responsibilities
-still require work before the Task phase ends; this is not full goal closure.
+Host now also owns the authenticated saved-result/current-control observation
+used by Native context/receipts and Registry result-to-Agent input. The existing
+SDK artifact reader and context codec retain their separate proof/encoding jobs;
+Native list/query purposes and earlier unavailable-result timing are preserved.
+This removes two caller-owned read orchestration chains, with a net production
+increase for the common service and checks. Remaining Host admission and broader
+application receipt ownership still require work before the Task phase ends;
+this is not full goal closure.
 The audit records focused checks, failed-test repairs, independent review and
 same-basis accounting, including the hidden-chain contribution to the reduction.
 

@@ -2853,43 +2853,66 @@ class P3AuthenticatedComposition:
             if entered:
                 await self._leave_operation()
 
-    async def read_background_task(
+    async def read_task_result_observations(
         self,
         *,
         bearer_token: object,
         session_id: str,
-        task_id: str,
+        task_ids: tuple[str, ...],
+        expected_scope: ScopeRef,
         native_authority: NativeP3ActivationAuthority | None = None,
-    ) -> PersistentTaskRecord:
-        """Read one immutable semantic target under its authenticated scope."""
+        native_operation: str | None = None,
+        observed_result: Mapping[str, object] | None = None,
+        include_history: bool = False,
+        include_artifacts: bool = False,
+    ):
+        """Own current controls and exact saved-result reads for all callers.
+
+        A supplied query result keeps its original observation time. In
+        particular, an earlier unavailable result is never replaced by a later
+        successful result while preparing context or reading current controls.
+        """
 
         entered = False
         try:
             await self._enter_operation()
             entered = True
             now = self._clock()
+            operation = native_operation or "task.status"
+            if native_operation is not None and (
+                native_authority is None or native_operation not in {"task.list", "task.status", "task.result"}
+                or observed_result is not None or include_artifacts
+            ):
+                raise FormalTaskViolation("TASK_RESULT_CONTEXT_INVALID",
+                                          "invalid Native observation purpose", ErrorCode.PERMISSION_DENIED)
             _principal, authority = await self._run_blocking(
                 self._resolve_production_input_authority,
                 bearer_token=bearer_token,
-                operation="task.status",
+                operation=operation,
                 session_id=session_id,
                 now=now,
                 require_clean=False,
                 native_authority=native_authority,
             )
-            task = await self._run_blocking(
-                self._core.store.get_task,
-                task_id,
-                authority.scope,
-            )
-            await self._run_blocking(
-                self._require_exact_task_context,
-                authority=authority,
-                operation="task.status",
-                task_id=task.task_id,
-                now=now,
-            )
-            return task
+            if authority.scope != expected_scope or (observed_result is not None and len(task_ids) != 1):
+                raise FormalTaskViolation("TASK_RESULT_CONTEXT_INVALID",
+                                          "result observation changed its exact query scope", ErrorCode.PERMISSION_DENIED)
+            if include_artifacts:
+                _principal.require_usable(operation="task.result", now=now)
+
+            def read():
+                from jiuwenswarm.server.runtime.formal_tasks.task_control_presentation import read_task_result_observation
+                observations = []
+                for task_id in task_ids:
+                    self._require_exact_task_context(
+                        authority=authority, operation=operation, task_id=task_id, now=now)
+                    observations.append(read_task_result_observation(
+                        self._core.store, authority.scope, task_id,
+                        observed_result=observed_result, include_history=include_history,
+                        include_artifacts=include_artifacts))
+                return tuple(observations)
+
+            return await self._run_blocking(read)
         finally:
             if entered:
                 await self._leave_operation()

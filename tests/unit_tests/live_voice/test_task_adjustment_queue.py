@@ -143,10 +143,10 @@ def test_queue_full_rejects_new_change_but_preserves_replay_and_original(tmp_pat
     _finish_child(store)
     assert store.adjustment_queue.advance(policy=core._admission_policy)
     assert core.execute(extra, extra_grant, now=NOW).ok
-    from jiuwenswarm.server.runtime.formal_tasks.task_control_presentation import native_task_presentation
-    _, events = native_task_presentation(store, _scope(), [original.task_id])
+    from jiuwenswarm.server.runtime.formal_tasks.task_control_presentation import native_task_presentation, read_task_result_observation
+    _, events = native_task_presentation([read_task_result_observation(store, _scope(), original.task_id, include_history=True)])
     assert len(events) == 1 and events[0]["adjustment_id"] == "change-0"
-    _, already_heard = native_task_presentation(store, _scope(), [original.task_id], presented=lambda *_: True)
+    _, already_heard = native_task_presentation([read_task_result_observation(store, _scope(), original.task_id, include_history=True)], presented=lambda *_: True)
     assert already_heard == []
 
 
@@ -354,22 +354,22 @@ async def test_invalid_derived_command_settles_once_and_unrelated_dispatch_runs(
 
 
 def test_native_projection_contains_saved_truth_and_independent_final_failure(tmp_path):
-    from jiuwenswarm.server.runtime.formal_tasks.task_control_presentation import native_task_presentation
+    from jiuwenswarm.server.runtime.formal_tasks.task_control_presentation import native_task_presentation, read_task_result_observation
     _, store, _, core, original, _, _ = _completed(tmp_path)
     command, grant = _adjust(original.task_id, "牛肉火锅和烧烤")
     core.execute(command, grant, now=NOW)
-    facts, events = native_task_presentation(store, _scope(), [original.task_id])
+    facts, events = native_task_presentation([read_task_result_observation(store, _scope(), original.task_id, include_history=True)])
     assert facts[original.task_id]["result_text"] == "immutable result"
     assert facts[original.task_id]["adjustment_state"] == "pending" and events == []
     store.adjustment_queue.advance(policy=core._admission_policy)
     _finish_child(store, outcome=TerminalOutcome.FAILED)
     store.adjustment_queue.advance(policy=core._admission_policy)
-    facts, events = native_task_presentation(store, _scope(), [original.task_id])
+    facts, events = native_task_presentation([read_task_result_observation(store, _scope(), original.task_id, include_history=True)])
     assert facts[original.task_id]["result_text"] == "immutable result"
     assert facts[original.task_id]["adjustment_state"] == "rejected"
     assert len(events) == 1 and events[0]["state"] == "rejected"
     assert json.loads(events[0]["result_text"])["application_stage"] == "saved_result"
-    bounded, _ = native_task_presentation(store, _scope(), [original.task_id], maximum_result_bytes=1)
+    bounded, _ = native_task_presentation([read_task_result_observation(store, _scope(), original.task_id, include_history=True)], maximum_result_bytes=1)
     assert "result_text" not in bounded[original.task_id]
     assert bounded[original.task_id]["result_available"]
 

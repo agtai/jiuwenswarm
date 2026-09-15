@@ -16,6 +16,43 @@ from tests.unit_tests.live_voice.test_native_interaction_runtime import active_o
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("with_task", [False, True])
+async def test_native_context_retains_list_only_authority(tmp_path, monkeypatch, with_task):
+    env = await make_registry(tmp_path, monkeypatch)
+    try:
+        if with_task:
+            created, _ = await call(env, "task.create", stem="list-only-task",
+                                    name="Report", instruction="Write the report")
+            assert created["status"] == "dispatched", created
+        route = env.registry._p2_routes[(env.binding.scope.session_id, env.binding.interaction_id)]
+        route.native_p3_authority = replace(route.native_p3_authority, principal=replace(
+            route.native_p3_authority.principal, allowed_operations=frozenset({"task.list"})))
+        store = env.harness.composition._core.store
+        counts = store.counts()
+        facts = await context(env)
+        assert len(facts["tasks"]) == int(with_task)
+        assert store.counts() == counts
+        assert env.manager.agent.executions == []
+        assert not env.harness.executor.adjustments and not env.harness.executor.cancels
+
+        async def unavailable(**kwargs):
+            raise RuntimeError("optional observation failed")
+
+        monkeypatch.setattr(env.harness.composition, "read_task_result_observations", unavailable)
+        receipt = {"status": "dispatched", "operation": "task.result", "task_id": "saved-task",
+                   "receipt": {"availability": "available"}}
+        await env.registry._native_business._task_result_facts(route, receipt)
+        assert receipt["status"] == "dispatched"
+        assert receipt["receipt"] == {"availability": "available"}
+        assert receipt["task_control_reason"] == "NATIVE_TASK_CONTROL_UNAVAILABLE"
+        assert store.counts() == counts
+    finally:
+        await env.registry.stop()
+        await env.registry._runtime.close()
+        await env.harness.composition.stop()
+
+
+@pytest.mark.asyncio
 async def test_context_revalidates_project_after_history_await_before_disclosure(tmp_path, monkeypatch):
     env = await make_registry(tmp_path, monkeypatch)
     entered, release = threading.Event(), threading.Event()
