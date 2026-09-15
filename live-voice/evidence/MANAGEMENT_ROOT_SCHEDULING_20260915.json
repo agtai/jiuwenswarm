@@ -1,0 +1,130 @@
+{
+  "previous_manifest": "MANAGEMENT_ORIGIN_20260915.json",
+  "host_unchanged": "bd33b2defd9dfcb53d18f21eab68bb3e79eecf51",
+  "sdk_batch_baseline": "b292d2eb5663bdc6d3181a0c840d5ac8933be129",
+  "batch_totals": {
+    "agentcore": {
+      "added_lines": 21,
+      "removed_lines": 19,
+      "net_lines": 2
+    }
+  },
+  "cumulative_totals": {
+    "voice": {
+      "added_lines": 54,
+      "removed_lines": 170,
+      "net_lines": -116
+    },
+    "jiuwenswarm": {
+      "added_lines": 142,
+      "removed_lines": 176,
+      "net_lines": -34
+    },
+    "agentcore": {
+      "added_lines": 173,
+      "removed_lines": 185,
+      "net_lines": -12
+    }
+  },
+  "current_official_totals": {
+    "voice": {
+      "current_lines": 112024,
+      "baseline_lines": 0,
+      "added_lines": 112024,
+      "removed_lines": 0,
+      "net_lines": 112024,
+      "new_file_lines": 112024,
+      "current_files": 103
+    },
+    "jiuwenswarm": {
+      "current_lines": 150539,
+      "baseline_lines": 102515,
+      "added_lines": 48945,
+      "removed_lines": 921,
+      "net_lines": 48024,
+      "new_file_lines": 39849,
+      "current_files": 119
+    },
+    "agentcore": {
+      "current_lines": 36626,
+      "baseline_lines": 2306,
+      "added_lines": 34336,
+      "removed_lines": 16,
+      "net_lines": 34320,
+      "new_file_lines": 34173,
+      "current_files": 30
+    }
+  },
+  "current_module_totals": {
+    "M7+M9": {
+      "current_lines": 51050,
+      "new_file_lines": 12968,
+      "net_lines": 17030
+    },
+    "M4+M5": {
+      "current_lines": 37992,
+      "new_file_lines": 37992,
+      "net_lines": 37992
+    },
+    "M3": {
+      "current_lines": 14427,
+      "new_file_lines": 14427,
+      "net_lines": 14427
+    },
+    "shared": {
+      "current_lines": 47114,
+      "new_file_lines": 19469,
+      "net_lines": 21345
+    },
+    "M1+M2": {
+      "current_lines": 70839,
+      "new_file_lines": 45137,
+      "net_lines": 45995
+    },
+    "G": {
+      "current_lines": 38391,
+      "new_file_lines": 18173,
+      "net_lines": 19556
+    },
+    "M6+M8": {
+      "current_lines": 39376,
+      "new_file_lines": 37880,
+      "net_lines": 38023
+    }
+  },
+  "changed_files": [
+    {
+      "path": "openjiuwen/core/application/tasks/project_executor.py",
+      "owner": "agentcore",
+      "new_file": false,
+      "current_lines": 6334,
+      "baseline_lines": 6340,
+      "added_lines": 2,
+      "removed_lines": 8,
+      "net_lines": -6,
+      "sha256": "7246560867dda89291f79c390040eaaa776765ed70e703be394a879be8e30ff4"
+    },
+    {
+      "path": "openjiuwen/core/application/tasks/work_runtime.py",
+      "owner": "agentcore",
+      "new_file": false,
+      "current_lines": 945,
+      "baseline_lines": 954,
+      "added_lines": 2,
+      "removed_lines": 11,
+      "net_lines": -9,
+      "sha256": "49a64438a3baa359fa625423050f83213dba7cfce88eced5e2841368f6a6de8f"
+    },
+    {
+      "path": "openjiuwen/core/common/task_manager/manager.py",
+      "owner": "agentcore",
+      "new_file": false,
+      "current_lines": 873,
+      "baseline_lines": 856,
+      "added_lines": 17,
+      "removed_lines": 0,
+      "net_lines": 17,
+      "sha256": "5ca39e3671dc28160fb94d1dd232620c6e06fb3cf7025302722cc952955309b2"
+    }
+  ]
+}

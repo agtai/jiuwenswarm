@@ -529,3 +529,55 @@ Current official-compatible net additions: 112024/48024/34318 = **194366**.
 Compact evidence: `../evidence/MANAGEMENT_ORIGIN_20260915.json`.
 This removes one duplicate durable management lifecycle; the larger Task/Work
 management gaps in the decision table remain open.
+
+## Native root scheduling ownership
+
+Tier 3 native lifecycle API enhancement, with unchanged existing consumers.
+Task project dispatch and Work admission both manually set/reset TaskManager's
+private task-group and parent-id context around native scheduling. Add one
+TaskManager.create_root_task entry delegating to existing create_task under the
+explicit service task group and no request parent. Delete both application
+context lifecycles; preserve caller handling of pre-schedule failure versus
+post-schedule observer failure, finalizers and physical cleanup. Child tasks and
+creation observers must inherit the service group, while the calling request's
+context is restored on success, cancellation and error. Default create_task
+keeps normal parent inheritance. No durable schema, product policy or authority
+change, and no second scheduler. Verify real AnyIO group, nested native child,
+parent cancellation isolation, context restoration, existing TaskManager suite,
+Work ownership and SQLite/Git Task execution. No Provider/device claim.
+
+Implemented: TaskManager gains a 17-line explicit root entry over its existing
+scheduler. Both application owners delete private ContextVar imports and their
+set/reset/exception-finally lifecycle; 4 changed call lines supply the service
+group. Total SDK production +21/-19 = +2; this is a native ownership enhancement,
+not a second scheduler or directory move. The original manager file is not all
+counted as new. Existing default create_task behavior is untouched.
+
+Verification: existing native manager + Work ownership + real Git/SQLite project
+execution: 83 passed and one new fixture failed because it incorrectly expected
+async observer exceptions to propagate (native callback framework contains them).
+The fixture now injects a synchronous scheduling-receipt exception, the actual
+post-schedule failure boundary, and both new cases pass (2 passed/58 deselected).
+The successful case also verifies actual creation-observer context. Both cases
+prove nested child ownership and that request-group/cascade cancellation leaves
+service work alive while caller ContextVars are restored. Host Work/project
+regression: 26 passed/149 deselected. No further production change followed tests.
+Existing manager suite covers default parent trees, cancel and finalizer behavior;
+application regressions cover startup failure, native cancellation and physical
+settlement. Cold complete-diff review retained pre/post-scheduling ownership and
+cleanup ordering. Independent-review evidence remains PARTIAL, as above.
+
+WorkRuntime Ruff passes. Manager Ruff reports six pre-existing ASYNC109 timeout
+API findings on unchanged methods; no new lint finding. Both diffs pass whitespace
+checks. No package exports or Host-to-SDK API calls changed: this new method is
+consumed within SDK production. Existing installed-wheel evidence is historical;
+this batch claims source integration only, not a rebuilt/redeployed pair.
+
+Accounting: Voice/Host unchanged; SDK session cumulative +173/-185 = -12.
+Combined session +369/-531 = -162; official-compatible net 194368.
+Evidence: `../evidence/MANAGEMENT_ROOT_SCHEDULING_20260915.json`.
+Native TaskManager owns coroutine root parent/group setup; TaskStore/WorkStore
+still own durable business state and executor cleanup still owns physical effects.
+Those distinctions remain the concrete retention gaps documented above.
+
+SDK implementation commit: `3ae204781` (refactor(tasks): centralize native root scheduling ownership).
