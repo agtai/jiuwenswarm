@@ -69,6 +69,14 @@ interface DocWorkbenchState {
   reopen: () => void;
   setRailTab: (tab: RailTab) => void;
   toggleRail: () => void;
+  /**
+   * Bring the chat history into view: rail open, history tab up, and a bump the
+   * rail scrolls to the bottom on. Sending from the strip's composer calls it,
+   * so the reply lands somewhere the person can see it.
+   */
+  showHistory: () => void;
+  /** Counts showHistory calls; the rail scrolls the history to its end when it changes. */
+  historyRevealNonce: number;
   toggleChat: () => void;
   setAlwaysNewTab: (provider: string, value: boolean) => void;
   /** 记录一份文档最新的回执 id 列表；返回本次新增的数量。 */
@@ -142,6 +150,7 @@ export const useDocWorkbenchStore = create<DocWorkbenchState>((set, get) => ({
   sessionId: null,
   bySession: {},
   railTab: 'receipts',
+  historyRevealNonce: 0,
   locate: null,
   ...loadPrefs(),
 
@@ -189,6 +198,10 @@ export const useDocWorkbenchStore = create<DocWorkbenchState>((set, get) => ({
     const next = { railVisible: !s.railVisible };
     savePrefs({ ...s, ...next });
     return next;
+  }),
+  showHistory: () => set((s) => {
+    if (!s.railVisible) savePrefs({ ...s, railVisible: true });
+    return { railVisible: true, railTab: 'history', historyRevealNonce: s.historyRevealNonce + 1 };
   }),
   toggleChat: () => set((s) => {
     const next = { chatVisible: !s.chatVisible };

@@ -51,6 +51,22 @@ test('switching from the placeholder to an existing session still starts it empt
   assert.deepEqual(after.tabs, []);
 });
 
+test('showHistory opens the rail on the history tab and bumps the reveal counter', () => {
+  reset();
+  useDocWorkbenchStore.setState({ railVisible: false, railTab: 'receipts', historyRevealNonce: 0 });
+  const s = useDocWorkbenchStore.getState();
+  s.showHistory();
+  let after = useDocWorkbenchStore.getState();
+  assert.equal(after.railVisible, true);
+  assert.equal(after.railTab, 'history');
+  assert.equal(after.historyRevealNonce, 1);
+  // Already showing: still a bump, so a second send scrolls again.
+  s.showHistory();
+  after = useDocWorkbenchStore.getState();
+  assert.equal(after.railVisible, true);
+  assert.equal(after.historyRevealNonce, 2);
+});
+
 test('parked sessions come back untouched around a promotion', () => {
   reset();
   const s = useDocWorkbenchStore.getState();

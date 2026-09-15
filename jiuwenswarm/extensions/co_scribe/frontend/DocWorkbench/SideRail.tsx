@@ -5,7 +5,7 @@
  * differently. (A threads tab waits on a panel API for comment threads; see the
  * release notes' backlog.)
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { PanelRightClose } from 'lucide-react';
 import { webRequest } from '../../../../channels/web/frontend/src/services/webClient';
@@ -26,11 +26,13 @@ const NO_LINEAGE: LineageRow[] = [];
 export type WatchInfo = { mode: string; expires_at?: number | null; expired?: boolean } | undefined;
 
 export function SideRail({
-  tab, tabs, railTab, receipts, watch, onTab, onRefresh, onLocate, onJump, onWatch, onHide,
+  tab, tabs, railTab, revealNonce = 0, receipts, watch, onTab, onRefresh, onLocate, onJump, onWatch, onHide,
 }: {
   tab: WorkbenchTab | null;
   tabs: WorkbenchTab[];
   railTab: RailTab;
+  /** Changes when the history was asked for; the list scrolls to its end. */
+  revealNonce?: number;
   receipts: ReceiptRow[];
   watch: WatchInfo;
   onTab: (t: RailTab) => void;
@@ -65,6 +67,19 @@ export function SideRail({
   }, [onRefresh, t]);
 
   useEffect(() => { setNote(null); setArmOn(false); }, [tab?.docId]);
+
+  // The history scrolls to its end when it is asked for and when the person's
+  // own message lands (which follows the ask by a render or two, once the
+  // session exists). A streaming reply does not drag the view: someone who
+  // scrolled up to read is left where they are.
+  const historyRef = useRef<HTMLDivElement>(null);
+  const lastRole = messages.length ? messages[messages.length - 1].role : '';
+  const userTurns = lastRole === 'user' ? messages.length : 0;
+  useEffect(() => {
+    if (railTab !== 'history') return;
+    const el = historyRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [railTab, revealNonce, userTurns]);
 
   const elsewhere = tabs.filter((x) => x.docId !== tab?.docId && x.unread > 0);
   const watchOn = !!watch && !watch.expired && watch.mode === 'apply_scoped';
@@ -122,7 +137,7 @@ export function SideRail({
       )}
 
       {railTab === 'history' && (
-        <div className="doc-workbench__rail-body" data-testid="doc-workbench-history">
+        <div ref={historyRef} className="doc-workbench__rail-body" data-testid="doc-workbench-history">
           <div className="px-0.5 pb-1 text-[11px] text-text-muted">{t('docs.workbench.historyNote')}</div>
           <ChatTimelineList messages={messages} executions={executions ? Array.from(executions.values()) : []} mode={mode} disableA2UIInteraction />
         </div>

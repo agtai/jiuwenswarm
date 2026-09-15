@@ -133,6 +133,18 @@ export function DocWorkbench({ composer, onUserAnswer }: {
     void refresh();
   }, [tab, refresh]);
 
+  // Sending from the docked strip reveals the history so the exchange is visible;
+  // otherwise the strip shows one line of the reply and the rest goes nowhere the
+  // person can see. Every path that produces a message is wrapped; the queue path
+  // is not, since it produces none until the queue drains.
+  const showHistory = wb.showHistory;
+  const revealingComposer = useMemo<ComposerProps>(() => ({
+    ...composer,
+    onSubmit: (content, media) => { showHistory(); composer.onSubmit(content, media); },
+    onInterrupt: (newInput) => { if (newInput) showHistory(); composer.onInterrupt(newInput); },
+    onSetGoal: composer.onSetGoal ? (sid, objective) => { showHistory(); composer.onSetGoal?.(sid, objective); } : undefined,
+  }), [composer, showHistory]);
+
   const [frameNonce, setFrameNonce] = useState(0);
   // The frame reloads only on request: the reload button, or a locate that must
   // land on a new anchor. A receipt never reloads it; the platform renders live.
@@ -168,7 +180,7 @@ export function DocWorkbench({ composer, onUserAnswer }: {
           onReload={() => setFrameNonce((n) => n + 1)}
         />
         <ChatStrip
-          composer={composer}
+          composer={revealingComposer}
           onUserAnswer={onUserAnswer}
           visible={wb.chatVisible}
           titleOf={titleOf}
@@ -177,7 +189,7 @@ export function DocWorkbench({ composer, onUserAnswer }: {
           unreadReceipts={unreadTotal}
           onLocate={locateById}
           canLocate={canLocateById}
-          onHistory={() => { if (!wb.railVisible) wb.toggleRail(); wb.setRailTab('history'); }}
+          onHistory={showHistory}
         />
       </div>
       {wb.railVisible && (
@@ -185,6 +197,7 @@ export function DocWorkbench({ composer, onUserAnswer }: {
           tab={tab}
           tabs={wb.tabs}
           railTab={wb.railTab}
+          revealNonce={wb.historyRevealNonce}
           receipts={receipts[tab.docId] ?? []}
           watch={watches[tab.docId]}
           onTab={wb.setRailTab}
