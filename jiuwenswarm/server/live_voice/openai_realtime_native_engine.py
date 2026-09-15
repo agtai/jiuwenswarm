@@ -53,6 +53,7 @@ from jiuwenswarm.server.live_voice.native_business_tools import (
     native_business_proposal_from_function_call, native_business_tools,
 )
 from jiuwenswarm.server.live_voice.native_business_encoding import compact_native_business_output
+from jiuwenswarm.server.live_voice.atlas_voice_style import language_instruction
 from jiuwenswarm.server.live_voice.native_business_instructions import (
     BUSINESS_SESSION_INSTRUCTIONS as _BUSINESS_INSTRUCTIONS,
     WORK_PENDING_INSTRUCTIONS as _WORK_PENDING_INSTRUCTIONS,
@@ -1243,7 +1244,14 @@ class OpenAIRealtimeNativeInteractionEngine:
             self._profile_business("context_bound", request=request,
                 observed_context_id=self._sent_business_context_id,
                 context_id=self._business_context.get("context_id"))
-        return await self._session.send_event("response.create", request.payload)
+        payload = request.payload
+        if self._business_context is not None and self._business_context.get("capabilities"):
+            language = language_instruction(item.transcript for item in self._input_transcripts_by_item.values())
+            if language:
+                response = dict(payload["response"])
+                response["instructions"] = response.get("instructions", _BUSINESS_INSTRUCTIONS) + language
+                payload = {**payload, "response": response}
+        return await self._session.send_event("response.create", payload)
 
     def _work_feedback_obsolete(self, refs: tuple[tuple[str, int], ...], *, receipt_context=None) -> bool:
         facts = list(self._work_events.values())
