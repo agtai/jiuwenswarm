@@ -34,6 +34,58 @@ class AtlasLocalHost:
         self._pins = {}
         self._approval_events = {}
         self._decision_turns = {}
+        self._card_origins = {}
+        self._card_versions = {}
+
+    async def weather(self, binding, delegate):
+        return await self._call(binding, "weather", {
+            "callId": delegate.source_identity.split(":", 1)[1],
+            "query": json.loads(delegate.business.instruction),
+            "userText": delegate.request_text,
+            "nativeTurnKey": json.dumps([binding.interaction_id, delegate.turn_id], separators=(",", ":")),
+        })
+
+    def remember_result_origin(self, binding, delegate, result):
+        target = result.get("task_id") or result.get("work", {}).get("work_id")
+        if not isinstance(target, str) or target.startswith("atlas:"):
+            return
+        key = (binding.session_id, target)
+        if key not in self._card_origins and len(self._card_origins) < 256:
+            self._card_origins[key] = {"requestText": delegate.request_text,
+                "nativeTurnKey": json.dumps([binding.interaction_id, delegate.turn_id], separators=(",", ":"))}
+
+    async def publish_native_results(self, binding, tasks, works, events):
+        for fact in [*tasks, *works]:
+            target = fact.get("task_id") or fact.get("work_id")
+            key = (binding.session_id, target)
+            origin = self._card_origins.get(key)
+            if origin is None:
+                continue
+            related = [event for event in events if event.get("task_id", event.get("work_id")) == target]
+            result_text = fact.get("result_text") or ""
+            if not isinstance(result_text, str):
+                result_text = json.dumps(result_text, ensure_ascii=False)
+            artifacts = fact.get("artifacts") or []
+            detail_parts = [result_text, fact.get("reason") or ""]
+            detail_parts += [str(item.get("result_text") or "") for item in related]
+            artifact_names = [str(item.get("name") or item.get("path") or item.get("uri") or "")
+                              for item in artifacts if isinstance(item, dict)]
+            details = "\n\n".join(part for part in [*detail_parts, *artifact_names] if part)
+            if len(details) > 8000:
+                details = details[:8000] + "\n… Details truncated"
+            status = fact.get("outcome") if fact.get("state") == "terminal" else fact.get("state")
+            status = {"succeeded": "completed", "done": "completed"}.get(status, status) or "unknown"
+            digest = hashlib.sha256(json.dumps([status, details], ensure_ascii=False).encode()).hexdigest()
+            previous = self._card_versions.get(key)
+            if previous and previous[0] == digest:
+                continue
+            revision = previous[1] + 1 if previous else 1
+            event = {**origin, "card": {"id": "native:" + target, "revision": revision,
+                "kind": "task", "status": status, "title": fact.get("name") or origin["requestText"][:100],
+                "summary": result_text[:200] if status == "completed" else "",
+                "fields": [{"label": "文件 / File", "value": name} for name in artifact_names[:32]], "details": details, "files": []}}
+            await self._call(binding, "result", {"resultEvent": event})
+            self._card_versions[key] = (digest, revision)
 
     @staticmethod
     def _pending(call):
@@ -90,7 +142,8 @@ class AtlasLocalHost:
     async def _call(self, binding, method, params):
         registration = self._registration(binding)
         timeout = aiohttp.ClientTimeout(total=25)
-        async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as client:
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=False,
+                json_serialize=lambda value: json.dumps(value, ensure_ascii=False, allow_nan=False)) as client:
             async with client.post(registration["endpoint"], allow_redirects=False,
                     headers={"Authorization": "Bearer " + registration["token"]},
                     json={"version": VERSION, "binding": registration["binding"], "method": method, "params": params}) as response:

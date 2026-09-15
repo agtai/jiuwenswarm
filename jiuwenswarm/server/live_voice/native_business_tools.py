@@ -19,6 +19,7 @@ from .native_business_contract import (
 
 
 _OPERATIONS = {
+    "weather.get": ("context_id", "instruction"),
     "context.get": ("context_id",),
     "task.list": ("context_id",),
     "task.status": ("context_id", "target_id"),
@@ -44,6 +45,7 @@ _SERVER_CONTEXT_ABSENT = object()
 _ACTION_FIELDS = ("context_id", "target_id", "expected_revision", "name", "instruction", "adjustment")
 _MAX_ARGUMENT_UTF8_BYTES = 16_384
 _DESCRIPTIONS = {
+    "weather.get": "Look up real weather directly through Open-Meteo, without the Agent Model. Prefer this for weather queries. The same receipt updates the Atlas weather card. Speak one short sentence in the user's language after the result; details only when asked. Never invent weather or claim a failed lookup succeeded.",
     "task.details": "Atlas only: read the exact task's pending approval, full retained operation history and final answer when the user asks for details, steps, price changes or how the result was obtained. Do not poll or automatically narrate operations. State when history is truncated; never invent missing details.",
     "task.approve": "Atlas: execute the user's explicit approval of the exact pending_decision_scope: purchase, directory_listing, or expense_form_submission. Use THIS tool to submit a prepared Paris expense claim when the user confirms submission; do not use task.adjust. Copy the latest target ID and revision from context and match the pending action. Directory approval does not authorize form submission. A question, silence or a requested modification is not approval. Never repeat a successful decision. If no pending approval remains, report the returned current facts without retrying or calling it expired. Report only the actual scope-specific receipt; purchase approval alone is not purchase completion.",
     "task.reject": "Atlas: reject the exact pending purchase, directory listing, or expense form submission only when the user explicitly declines THAT action. Use the latest target ID and revision. Deferring form submission does not reject directory access. This does not undo a submitted claim or placed order.",
@@ -109,6 +111,17 @@ def native_business_tools(*, bound_context: bool = False) -> list[dict[str, obje
     if bound_context:
         result = []
         for name, operation in _BOUND_FUNCTION_OPERATIONS.items():
+            if operation == "weather.get":
+                result.append({"type": "function", "name": name, "description": _DESCRIPTIONS[operation],
+                    "parameters": {"type": "object", "additionalProperties": False,
+                        "required": ["request_text", "location", "date", "language"], "properties": {
+                            "request_text": _property("request_text", operation),
+                            "location": {"type": "string", "minLength": 1, "maxLength": 200,
+                                "description": "City/place explicitly requested or established in this conversation. Ask if missing; never default to a city."},
+                            "date": {"type": "string", "maxLength": 20,
+                                "description": "today, tomorrow, day_after_tomorrow, or YYYY-MM-DD. Relative dates are resolved by the server in the destination timezone. Seven-day forecast only."},
+                            "language": {"type": "string", "enum": ["zh", "en"]}}}})
+                continue
             fields = ["request_text", *(field for field in _OPERATIONS[operation]
                                        if field not in {"context_id", "instruction", "adjustment"})]
             properties = {field: _property(field, operation) for field in fields}
@@ -182,6 +195,19 @@ def native_business_proposal_from_function_call(
             raise
         except (ValueError, TypeError, RecursionError):
             raise NativeBusinessViolation("NATIVE_BUSINESS_JSON_INVALID") from None
+        if bound and operation == "weather.get":
+            if type(value) is not dict or set(value) != {"request_text", "location", "date", "language"}:
+                raise NativeBusinessViolation("NATIVE_BUSINESS_FIELDS_NOT_CLOSED")
+            if (type(value["location"]) is not str or not value["location"].strip() or len(value["location"]) > 200
+                    or type(value["date"]) is not str or not value["date"] or len(value["date"]) > 20
+                    or value["language"] not in ("zh", "en")):
+                raise NativeBusinessViolation("WEATHER_INVALID_QUERY")
+            if server_context_id is _SERVER_CONTEXT_ABSENT:
+                raise NativeBusinessViolation("NATIVE_BUSINESS_CONTEXT_BINDING_MISSING")
+            action = NativeBusinessAction(operation=operation, context_id=server_context_id,
+                target_id=None, expected_revision=None, name=None, adjustment=None,
+                instruction=json.dumps({k: value[k] for k in ("location", "date", "language")}, ensure_ascii=False))
+            return NativeBusinessProposal(**binding, request_text=value["request_text"], business=action)
         expected_fields = {"request_text", *_OPERATIONS[operation]}
         if bound:
             expected_fields -= {"context_id", "instruction", "adjustment"}

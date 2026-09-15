@@ -21,15 +21,17 @@ from .production_task_intent import ProductionTaskIntentProposal
 NATIVE_BUSINESS_CONTRACT_VERSION = "live-voice.native-business.v1"
 NATIVE_BUSINESS_TOOL_NAME = "jiuwen_business"
 NATIVE_BUSINESS_OPERATIONS = frozenset({
+    "weather.get",
     "context.get", "task.list", "task.status", "task.result", "task.create",
     "task.create_successor", "task.adjust", "task.cancel", "work.start",
     "work.list", "work.get", "work.update", "work.cancel", "task.details", "task.approve", "task.reject",
 })
 _FIELDS = frozenset({"operation", "context_id", "target_id", "expected_revision",
                      "name", "instruction", "adjustment"})
-_COLLECTION = frozenset({"context.get", "task.list", "task.create", "work.list", "work.start"})
+_COLLECTION = frozenset({"context.get", "task.list", "task.create", "work.list", "work.start", "weather.get"})
 _REVISION_REQUIRED = frozenset({"task.adjust", "task.cancel", "task.create_successor", "work.update", "work.cancel", "task.approve", "task.reject"})
 _TEXT_ARGUMENTS = {
+    "weather.get": frozenset({"instruction"}),
     "task.create": frozenset({"name", "instruction"}),
     "task.create_successor": frozenset({"name", "instruction"}),
     "task.adjust": frozenset({"adjustment"}),

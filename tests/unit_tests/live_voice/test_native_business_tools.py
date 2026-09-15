@@ -26,6 +26,7 @@ from jiuwenswarm.server.live_voice.production_task_intent import _validate_argum
 
 # Expected business inputs are written independently of the adapter's table.
 SCENARIOS = {
+    "weather.get": {"instruction": '{"location":"Paris","date":"tomorrow","language":"en"}'},
     "context.get": {"context_id": None},
     "task.list": {},
     "task.status": {"target_id": "task-a"},
@@ -104,7 +105,7 @@ def test_every_operation_retains_authoritative_proposal_carrier_and_source(opera
 def test_tool_catalog_covers_existing_operations_without_legacy_or_unused_arguments():
     tools = native_business_tools()
     assert set(SCENARIOS) == NATIVE_BUSINESS_OPERATIONS
-    assert len(tools) == len(SCENARIOS) == 16
+    assert len(tools) == len(SCENARIOS) == 17
     assert {tool["name"] for tool in tools} | {"jiuwen_business"} | NATIVE_BOUND_BUSINESS_FUNCTION_NAMES == NATIVE_BUSINESS_FUNCTION_NAMES
     for tool in tools:
         operation = tool["name"].removeprefix("jiuwen_").replace("_", ".", 1)

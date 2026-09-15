@@ -140,6 +140,11 @@ class NativeBusinessRouter:
         if self._atlas_host is not None:
             # A missing local Demo must not take the native Agent offline.
             try:
+                await asyncio.wait_for(self._atlas_host.publish_native_results(route.binding, tasks,
+                    [snapshot.to_dict() for snapshot in ordered[:32]], task_events), timeout=2)
+            except Exception:
+                pass  # Optional cards must not break native execution/observation.
+            try:
                 observed = await asyncio.wait_for(self._atlas_host.context(route.binding), timeout=2)
             except Exception:
                 observed = {"history": [], "tasks": [], "works": [], "events": [], "capabilities": []}
@@ -554,6 +559,11 @@ class NativeBusinessRouter:
                         facts = {"status": "rejected", "reason": invalid}
                     elif delegate.business.operation == "context.get":
                         facts = {"status": "observed"}
+                    elif delegate.business.operation == "weather.get":
+                        if self._atlas_host is None:
+                            raise NativeBusinessViolation("ATLAS_HOST_REQUIRED")
+                        await self._require_context_authority(route)
+                        facts = await self._atlas_host.weather(route.binding, delegate)
                     elif self._atlas_host is not None and delegate.business.operation in {"task.list", "work.list"}:
                         fresh = (await self.context(route)).payload()
                         key = "tasks" if delegate.business.operation == "task.list" else "works"
@@ -587,6 +597,11 @@ class NativeBusinessRouter:
                     else:
                         facts = await self._work(route, delegate, admission, selection)
                     result = {"contract_version": NATIVE_BUSINESS_CONTRACT_VERSION, "operation": delegate.business.operation, **facts}
+                    if self._atlas_host is not None:
+                        try:
+                            self._atlas_host.remember_result_origin(route.binding, delegate, result)
+                        except Exception:
+                            pass  # UI association cannot rewrite execution acceptance.
                 except Exception as error:
                     profile_event("native_business", milestone="failed", request_id=request_id,
                         provider_call_id=delegate.provider_call_id, **error_fields(error))
