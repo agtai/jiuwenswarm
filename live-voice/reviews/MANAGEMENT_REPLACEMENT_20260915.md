@@ -394,3 +394,72 @@ Remaining: ordinary Work admission/context assembly in Voice, status operation
 projection ownership, retained Task/Work management and the wider incomplete
 objective. Existing barge fence, protected project artifacts, no-effective-change
 failure, Work physical cleanup and deferred audio policy remain untouched.
+
+## Work admission ownership boundary (in progress)
+
+Tier 2; baseline Host d18acbad, SDK b292d2eb5. NativeBusinessRouter currently
+creates the long-lived runner closure, capturing Router, mutable route and
+delegate after Host WorkRuntime acceptance. Replace this with HostWorkService
+submission using existing immutable commit/context/native authority inputs and
+existing WorkRuntime.start/update. Delete the Voice executor acquisition, runner
+closure, scheduling arguments and execution-authority checker. Voice keeps its
+pre-admission route fence, speech context adaptation and result presentation.
+
+Host performs the same pre-schedule and producer-time authority checks through
+the existing P3 resolver. It retains neither Voice route nor delegate. Preserve
+work revision/idempotency, foreground capacity, read-only tools, authority expiry,
+project remap rejection, physical settlement and accepted Work surviving Voice
+close. No new models, Store, schemas, permissions, mode or audio policy.
+Verify real Host WorkRuntime/journal/Harness integration, stopped Voice with live
+Host authority, expired/remapped authority and cancelled/update/recovery paths.
+Specifically prove the accepted runner does not retain Voice objects and still
+uses the captured immutable authorization when route fields disappear.
+
+### Work ownership result
+
+| Old implementation and consumer | Actual replacement | Deleted responsibility / retained authority |
+|---|---|---|
+| NativeBusinessRouter._work obtains executor, creates producer closure and calls WorkRuntime.start/update | HostWorkService.submit uses existing get_executor, WorkRuntime and HostWorkAgentExecutor | Delete Voice scheduler argument assembly and route-capturing closure; SDK WorkRuntime/WorkStore still exclusively own lifecycle/revision/durable facts |
+| Router._require_work_authority called before schedule and from producer | HostWorkService.require_execution_authority calls existing P3 native authority resolver | Delete Voice execution-time checker; Host still checks accepting state, permissions and exact project. Voice request-time route fence remains |
+
+The existing methods were not only relocated: the retained producer no longer
+references Router, mutable route or delegate, and Host accepts a submission without
+a Voice registry. No new executor, model, journal or background watcher was added.
+Speech context construction and list/get/cancel projection remain Voice adaptations
+and are not claimed removed. WorkRuntime admission and Harness settlement remain
+unchanged.
+
+Production: Voice +7/-34=-27; Host +55/-0=+55; SDK unchanged; total +62/-34=+28.
+Cumulative +316/-418=-102.
+[Current accounting overlay](../evidence/MANAGEMENT_WORK_ADMISSION_20260915.json)
+references the last full manifest and records both changed files and all current
+category/module totals. M4+M5 and M7+M9 stay merged.
+
+Verification on final source: Host service, native WorkRuntime, Native business
+registry and authority selection: **50 passed, 7 deselected**. This covers real
+Runner ownership, SQLite persistence/recovery, Harness execution/cleanup,
+serialized update/cancel and project rebind with zero forbidden Work/Agent
+side effects. The new positive ownership fixture initially omitted its generated
+specification from committed context_refs; fixing the fixture kept the production
+FORMAL_CONTEXT_NOT_COMMITTED protection. A test-only import replacement mistake
+was also corrected. Final scoped service Ruff and whitespace checks pass.
+
+New ownership tests pause the accepted producer before its second authority check,
+release Router/route/delegate, collect garbage and prove all three weakrefs clear.
+The actual Host WorkRuntime/journal/Harness then completes with the exact result,
+or Host authority revocation fails before any Agent call. The journal matches
+the final settled snapshot. This verifies the ownership change; mock authority
+support is not credited as external authentication/product acceptance. Existing
+real P3 authority/remap integration covers the authorization seam.
+
+Cold scoped review preserves initial route fencing, post-acquisition authority
+revalidation, producer-time cancellation checks and read-only Harness tools.
+The accepted closure captures the immutable native authority and committed inputs;
+Voice close cannot revoke it by discarding a mutable route. Independent review
+remains an unavailable-tool substitute/PARTIAL. No new package/export or SDK API
+changed, so no additional wheel build is claimed or needed for this source-only
+Host boundary. Prior installed evidence does not certify these new source bytes.
+
+The Host submission entry also validates committed scope and context before
+executor acquisition/admission; this preserves the existing input binding when
+called without Voice. Wrong scope leaves journal/Agent effects at zero.

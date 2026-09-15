@@ -292,7 +292,6 @@ class NativeBusinessRouter:
                 code=getattr(error, "code", ErrorCode.UNAVAILABLE))
 
     async def _work(self, route, delegate, admission, selection):
-        from openjiuwen.core.application.tasks.work_runtime import (context_identity)
         action = delegate.business
         # Admission/journal I/O can yield after context selection. Query and
         # cancellation, as well as execution, need authority at their effect.
@@ -309,40 +308,14 @@ class NativeBusinessRouter:
             "current_request": delegate.request_text, "source_identity": delegate.source_identity},
             source="live_voice.native_work_specification")
         context = FormalContextSnapshot(scope, selection.formal.entries + specification.entries)
-        commit = admission.turn_commit
-        executor = await self._work_service.get_executor(
-            scope=scope, project_dir=route.native_p3_authority.context.file_path)
-        await self._require_work_authority(route)
-        async def run(control):
-            control.check()
-            await self._require_work_authority(route)
-            control.check()
-            return await executor.execute_work(control=control, commit=commit, context=context, instruction=action.instruction,
-                correlation_id=route.binding.correlation_id, channel_id="web")
-        arguments = dict(scope=scope, request_id=delegate.source_identity, input_id=commit.commit_id,
-            instruction=action.instruction, model_identity=route.native_p3_authority.model_identity,
-            model_config_version=route.native_p3_authority.model_config_version,
-            context_id=context_identity(context), runner=run)
-        if action.operation == "work.start":
-            # These are explicit conversational analyses; background artifact
-            # Tasks have their own P3 execution owner and do not consume this slot.
-            snapshot = await owner.start(**arguments, foreground=True)
-        else:
-            snapshot = await owner.update(**arguments, work_id=action.target_id, revision=action.expected_revision)
+        snapshot = await self._work_service.submit(
+            operation=action.operation, scope=scope, request_id=delegate.source_identity,
+            commit=admission.turn_commit, context=context, instruction=action.instruction,
+            authority=route.native_p3_authority, composition=self.registry._p3_composition,
+            correlation_id=route.binding.correlation_id, work_id=action.target_id,
+            revision=action.expected_revision, channel_id="web",
+        )
         return {"work": self._work_fact(snapshot)}
-
-    async def _require_work_authority(self, route):
-        composition = self.registry._p3_composition
-        if (self._work_service is None and self.registry._stopped) or not composition._accepting:
-            raise NativeBusinessViolation("NATIVE_WORK_AUTHORITY_UNAVAILABLE", code=ErrorCode.UNAVAILABLE)
-        now = composition._clock()
-        current = await asyncio.to_thread(composition._resolve_native_activation_authority,
-            route.native_p3_authority, operation="agent.chat", session_id=route.binding.session_id,
-            now=now, require_clean=False)
-        current.context.require_usable(scope=route.binding.scope,
-            required_permissions=frozenset({"task.execute", "project.write"}), destructive=False, now=now)
-        if current.context.file_path != route.native_p3_authority.context.file_path:
-            raise NativeBusinessViolation("EXECUTION_CONTEXT_SCOPE_MISMATCH", code=ErrorCode.PERMISSION_DENIED)
 
     @profiled("native.task_intent", "route.binding", "delegate", require_context=True)
     async def _task(self, route, delegate, request_id, *, native_source=None):

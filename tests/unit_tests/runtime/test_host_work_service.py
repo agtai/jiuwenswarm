@@ -222,7 +222,7 @@ async def test_incomplete_producer_cleanup_is_retained_for_host_close_retry(tmp_
 @pytest.mark.asyncio
 async def test_borrowed_work_retains_authority_checks_after_voice_registry_stops(tmp_path):
     from jiuwenswarm.channels.live_voice.native_business_router import NativeBusinessRouter
-    from jiuwenswarm.channels.live_voice.native_business_contract import NativeBusinessViolation
+    from openjiuwen.core.application.tasks.work_runtime import WorkViolation
 
     journal = SqliteUnifiedCommittedInputJournal(tmp_path / "work.sqlite3")
     runtime = host()
@@ -234,11 +234,13 @@ async def test_borrowed_work_retains_authority_checks_after_voice_registry_stops
     router.works()
     route = SimpleNamespace(binding=SimpleNamespace(scope=SCOPE, session_id=SCOPE.session_id),
         native_p3_authority=SimpleNamespace(context=context))
-    await router._require_work_authority(route)
+    await router._work_service.require_execution_authority(
+        composition=composition, authority=route.native_p3_authority, scope=route.binding.scope)
     context.require_usable.assert_called_once()
     composition._accepting = False
-    with pytest.raises(NativeBusinessViolation, match="NATIVE_WORK_AUTHORITY_UNAVAILABLE"):
-        await router._require_work_authority(route)
+    with pytest.raises(WorkViolation, match="NATIVE_WORK_AUTHORITY_UNAVAILABLE"):
+        await router._work_service.require_execution_authority(
+            composition=composition, authority=route.native_p3_authority, scope=route.binding.scope)
     assert context.require_usable.call_count == 1
     await runtime.close()
 
@@ -374,6 +376,74 @@ async def test_host_close_waits_for_blocked_start_and_retains_late_failed_cleanu
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("revoke", [False, True])
+async def test_submitted_work_releases_voice_objects_and_rechecks_host_authority(tmp_path, revoke):
+    import gc
+    import weakref
+
+    class Carrier:
+        def __init__(self, **values):
+            self.__dict__.update(values)
+
+    value, agent, _manager, runtime, router, _old_route = await executor_router(tmp_path)
+    service = router._work_service
+    authority_context = SimpleNamespace(file_path="project-path", require_usable=Mock())
+    authority = SimpleNamespace(context=authority_context, model_identity="model#0", model_config_version="version-1")
+    composition = SimpleNamespace(_accepting=True, _clock=lambda: "now",
+        _resolve_native_activation_authority=Mock(return_value=SimpleNamespace(context=authority_context)))
+    router.registry._p3_composition = composition
+    router._require_context_authority = AsyncMock()
+    route = Carrier(binding=SimpleNamespace(scope=value.commit.scope, correlation_id="released-voice"),
+                    native_p3_authority=authority)
+    delegate = Carrier(business=SimpleNamespace(operation="work.start", instruction="host-owned analysis",
+                        target_id=None, expected_revision=None), request_text="Analyze this", source_identity="voice-submit")
+    from jiuwenswarm.server.runtime.work.native_business_context import formal_context
+    specification = formal_context(value.commit.scope, {
+        "instruction": delegate.business.instruction, "current_request": delegate.request_text,
+        "source_identity": delegate.source_identity,
+    }, source="live_voice.native_work_specification")
+    commit = replace(value.commit, context_refs=value.commit.context_refs + tuple(entry.ref for entry in specification.entries))
+    original_check = service.require_execution_authority
+    waiting, release = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def check(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            waiting.set()
+            await release.wait()
+        await original_check(**kwargs)
+
+    service.require_execution_authority = check
+    try:
+        result = await router._work(route, delegate, SimpleNamespace(turn_commit=commit),
+                                    SimpleNamespace(formal=value.context))
+        await asyncio.wait_for(waiting.wait(), 2)
+        references = [weakref.ref(item) for item in (router, route, delegate)]
+        del router, route, delegate
+        gc.collect()
+        assert all(reference() is None for reference in references)
+        composition._accepting = not revoke
+        release.set()
+        work_id = result["work"]["work_id"]
+        record = service.work_runtime._records[(value.commit.scope, work_id, 1)]
+        await asyncio.wait_for(record.operation, 2)
+        snapshot = service.work_runtime.query(scope=value.commit.scope, work_id=work_id)
+        assert snapshot.execution_settled
+        if revoke:
+            assert snapshot.state is NativeWorkState.FAILED
+            assert snapshot.reason == "NATIVE_WORK_AUTHORITY_UNAVAILABLE" and agent.seen == []
+        else:
+            assert snapshot.state is NativeWorkState.COMPLETED and snapshot.result_text == "Exact answer"
+            assert len(agent.seen) == 1
+        assert service.journal.restore() == (snapshot,)
+    finally:
+        release.set()
+        await runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_more_than_pool_capacity_session_reopens_reclaim_idle_generations(tmp_path):
     value, agent, manager, runtime, router, route = await executor_router(tmp_path)
     for index in range(35):
@@ -447,12 +517,22 @@ async def test_work_producer_allocation_uses_host_without_voice_registry(tmp_pat
     assert first is second
     manager.get_agent.assert_awaited_once_with("live_voice_native_work", "agent", "project-path", None)
     manager.pin_agent.assert_called_once_with(agent)
-    work = await service.work_runtime.start(
-        **{**inputs(), "scope": value.commit.scope, "input_id": value.commit.commit_id,
-           "instruction": "host-owned analysis", "context_id": context_identity(value.context)},
-        runner=lambda control: first.execute_work(
-            control=control, commit=value.commit, context=value.context,
-            instruction="host-owned analysis", correlation_id="host-work"),
+    authority_context = SimpleNamespace(file_path="project-path", require_usable=Mock())
+    authority = SimpleNamespace(context=authority_context, model_identity="model#0", model_config_version="version-1")
+    composition = SimpleNamespace(_accepting=True, _clock=lambda: "now",
+        _resolve_native_activation_authority=Mock(return_value=SimpleNamespace(context=authority_context)))
+    from openjiuwen.core.application.tasks.work_runtime import WorkViolation
+    with pytest.raises(WorkViolation, match="exact committed scope"):
+        await service.submit(
+            operation="work.start", scope=replace(value.commit.scope, project_id="foreign"),
+            request_id="wrong-scope", commit=value.commit, context=value.context,
+            instruction="host-owned analysis", authority=authority, composition=composition, correlation_id="host-work",
+        )
+    assert service.journal.restore() == () and agent.seen == []
+    work = await service.submit(
+        operation="work.start", scope=value.commit.scope, request_id="host-only-submit",
+        commit=value.commit, context=value.context, instruction="host-owned analysis",
+        authority=authority, composition=composition, correlation_id="host-work",
     )
     await asyncio.wait_for(service.work_runtime._records[(work.scope, work.work_id, work.revision)].operation, 2)
     result = service.work_runtime.query(scope=work.scope, work_id=work.work_id)

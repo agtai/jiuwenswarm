@@ -125,6 +125,61 @@ class HostWorkService:
         self.closed = False
         self.closing = False
 
+    @staticmethod
+    async def require_execution_authority(*, composition, authority, scope):
+        """Revalidate admitted Work through the existing Host authority owner."""
+        from openjiuwen.core.application.tasks.work_runtime import WorkViolation
+        from openjiuwen.core.application.tasks.contracts import ErrorCode
+
+        if not composition._accepting:
+            raise WorkViolation("NATIVE_WORK_AUTHORITY_UNAVAILABLE", "NATIVE_WORK_AUTHORITY_UNAVAILABLE",
+                                code=ErrorCode.UNAVAILABLE)
+        now = composition._clock()
+        current = await asyncio.to_thread(
+            composition._resolve_native_activation_authority, authority,
+            operation="agent.chat", session_id=scope.session_id, now=now, require_clean=False,
+        )
+        current.context.require_usable(scope=scope,
+            required_permissions=frozenset({"task.execute", "project.write"}), destructive=False, now=now)
+        if current.context.file_path != authority.context.file_path:
+            raise WorkViolation("EXECUTION_CONTEXT_SCOPE_MISMATCH", "EXECUTION_CONTEXT_SCOPE_MISMATCH",
+                                code=ErrorCode.PERMISSION_DENIED)
+
+    async def submit(
+        self, *, operation, scope, request_id, commit, context, instruction,
+        authority, composition, correlation_id, work_id=None, revision=None, channel_id="web",
+    ):
+        """Admit and own a Work producer without retaining its channel route."""
+        from openjiuwen.core.application.tasks.work_runtime import WorkViolation, context_identity
+        from openjiuwen.core.application.tasks.contracts import ErrorCode
+
+        if operation not in {"work.start", "work.update"}:
+            raise WorkViolation("NATIVE_BUSINESS_OPERATION_UNSUPPORTED", "Work submission requires start or update")
+        if commit.scope != scope or context.scope != scope:
+            raise WorkViolation("NATIVE_WORK_BINDING_MISMATCH", "Work requires its exact committed scope",
+                                code=ErrorCode.PERMISSION_DENIED)
+        context.validate_for(commit)
+        executor = await self.get_executor(scope=scope, project_dir=authority.context.file_path)
+        await self.require_execution_authority(composition=composition, authority=authority, scope=scope)
+
+        async def run(control):
+            control.check()
+            await self.require_execution_authority(composition=composition, authority=authority, scope=scope)
+            control.check()
+            return await executor.execute_work(
+                control=control, commit=commit, context=context, instruction=instruction,
+                correlation_id=correlation_id, channel_id=channel_id,
+            )
+
+        arguments = dict(
+            scope=scope, request_id=request_id, input_id=commit.commit_id, instruction=instruction,
+            model_identity=authority.model_identity, model_config_version=authority.model_config_version,
+            context_id=context_identity(context), runner=run,
+        )
+        if operation == "work.start":
+            return await self.work_runtime.start(**arguments, foreground=True)
+        return await self.work_runtime.update(**arguments, work_id=work_id, revision=revision)
+
     async def get_executor(self, *, scope, project_dir):
         """Borrow the Host-owned producer for this existing session generation."""
         from openjiuwen.core.application.tasks.work_runtime import WorkViolation

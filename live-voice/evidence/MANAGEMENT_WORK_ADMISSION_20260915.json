@@ -1,0 +1,124 @@
+{
+  "previous_manifest": "MANAGEMENT_STATUS_COUNTS_20260915.json",
+  "host_batch_baseline": "d18acbad55165fc8756c6d82678ac4643c4276e1",
+  "sdk_unchanged": "b292d2eb5663bdc6d3181a0c840d5ac8933be129",
+  "batch_totals": {
+    "voice": {
+      "added_lines": 7,
+      "removed_lines": 34,
+      "net_lines": -27
+    },
+    "jiuwenswarm": {
+      "added_lines": 55,
+      "removed_lines": 0,
+      "net_lines": 55
+    }
+  },
+  "cumulative_totals": {
+    "voice": {
+      "added_lines": 37,
+      "removed_lines": 143,
+      "net_lines": -106
+    },
+    "jiuwenswarm": {
+      "added_lines": 127,
+      "removed_lines": 109,
+      "net_lines": 18
+    },
+    "agentcore": {
+      "added_lines": 152,
+      "removed_lines": 166,
+      "net_lines": -14
+    }
+  },
+  "current_official_totals": {
+    "voice": {
+      "current_lines": 112034,
+      "baseline_lines": 0,
+      "added_lines": 112034,
+      "removed_lines": 0,
+      "net_lines": 112034,
+      "new_file_lines": 112034,
+      "current_files": 103
+    },
+    "jiuwenswarm": {
+      "current_lines": 150591,
+      "baseline_lines": 102515,
+      "added_lines": 48997,
+      "removed_lines": 921,
+      "net_lines": 48076,
+      "new_file_lines": 39901,
+      "current_files": 119
+    },
+    "agentcore": {
+      "current_lines": 36624,
+      "baseline_lines": 2306,
+      "added_lines": 34334,
+      "removed_lines": 16,
+      "net_lines": 34318,
+      "new_file_lines": 34188,
+      "current_files": 30
+    }
+  },
+  "current_module_totals": {
+    "M7+M9": {
+      "current_lines": 51056,
+      "new_file_lines": 12974,
+      "net_lines": 17036
+    },
+    "M4+M5": {
+      "current_lines": 38002,
+      "new_file_lines": 38002,
+      "net_lines": 38002
+    },
+    "M3": {
+      "current_lines": 14427,
+      "new_file_lines": 14427,
+      "net_lines": 14427
+    },
+    "shared": {
+      "current_lines": 47114,
+      "new_file_lines": 19469,
+      "net_lines": 21345
+    },
+    "M1+M2": {
+      "current_lines": 70839,
+      "new_file_lines": 45137,
+      "net_lines": 45995
+    },
+    "G": {
+      "current_lines": 38391,
+      "new_file_lines": 18173,
+      "net_lines": 19556
+    },
+    "M6+M8": {
+      "current_lines": 39420,
+      "new_file_lines": 37941,
+      "net_lines": 38067
+    }
+  },
+  "changed_files": [
+    {
+      "path": "jiuwenswarm/channels/live_voice/native_business_router.py",
+      "owner": "voice",
+      "new_file": false,
+      "current_lines": 665,
+      "baseline_lines": 692,
+      "added_lines": 7,
+      "removed_lines": 34,
+      "net_lines": -27,
+      "sha256": "5bd18e150e50d220d79c2c406b439bc4a244d880ffae89399d96a4ab7d1c1d97"
+    },
+    {
+      "path": "jiuwenswarm/server/runtime/work/service.py",
+      "owner": "jiuwenswarm",
+      "new_file": false,
+      "current_lines": 331,
+      "baseline_lines": 276,
+      "added_lines": 55,
+      "removed_lines": 0,
+      "net_lines": 55,
+      "sha256": "97b5f882699f936eecdfd4b536a28d826acf4c2f4729687c6049f17446eeb3d1"
+    }
+  ]
+}

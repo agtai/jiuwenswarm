@@ -113,7 +113,9 @@ New product semantics, security/authority changes and irreversible migrations
 still require a concrete user decision. Broader management replacement remains
 active. The status-query batch now shares the existing Store authority snapshot
 between Core status and Host product facts, deleting Registry reread orchestration.
-Work admission ownership and broader Voice business management remain unfinished.
+HostWorkService now owns Work submission and the retained execution closure;
+Voice objects can be released while accepted Work continues. WorkStore management,
+Voice context/presentation and wider business convergence remain unfinished.
 
 ### Previous session repair evidence (2026-09-14)
 
