@@ -154,8 +154,15 @@ The hidden manual mutation owner, its editor, pending/prepared state and private
 accepted-command polling are deleted; visible controls retain the shared Task
 owner. Voice retains a recovery diagnostic, exact continuation/presentation fences
 and progress-event proof. This closes the duplicate manual-control and initial
-read orchestration boundary only. Common progress fact ownership and remaining
-Host admission/state responsibility still require work before the Task phase ends.
+read orchestration boundary only. The subsequent browser Task-fact group puts
+UI queries, historical recovery and Voice progress through the shared Task owner:
+per-Task serialized updates, one retained proof state, bounded shared history reads
+and result-version fences. Panel-owned historical/per-Voice leaves and the old
+retry inspector are deleted. Voice retirement closes presentation consumers only.
+Independent review found and verified fixes for cross-Task stale-list/result
+overwrites, same-Task late-result clearing and partial progress receipt commits.
+Remaining Host admission and application receipt/result-service responsibilities
+still require work before the Task phase ends; this is not full goal closure.
 The audit records focused checks, failed-test repairs, independent review and
 same-basis accounting, including the hidden-chain contribution to the reduction.
 

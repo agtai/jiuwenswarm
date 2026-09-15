@@ -19,13 +19,11 @@ import {
   PRODUCT_P3_PROGRESS_EXHAUSTED_CAPACITY,
   bindProductVoiceTaskOrigin,
   awaitProductTaskNotificationPlayout,
-  bootstrapProductP3TaskInspectionLeaf,
   capturedTaskNotificationDeadlineAction,
   capturedTaskNotificationRequiresAnnouncementRequeue,
   classifyProductP2Notification,
   createProductP2ActivationOwner,
   extractWebErrorReason,
-  inspectProductP3RetryCandidate,
   isCurrentProgressOwner,
   reconcileProductP3ProgressEvent,
   productP2WebRequestOptions,
@@ -122,7 +120,6 @@ test('Panel P2 owner factory defaults production to sixteen and injects one for 
 
 import {
   FormalTaskControlLeaf,
-  isFormalTaskRetryEligible,
 } from '../node_modules/.cache/live-voice-integrated-web/features/tasks/formalTaskControlLeaf.js';
 import {
   PRODUCT_P2_NOTIFICATION_NEXT_METHOD,
@@ -1344,235 +1341,6 @@ test('route panel exposes only a stable retry inspection failure reason', async 
     'PRODUCT_P3_RETRY_INSPECTION_FAILED',
   );
 
-});
-
-test('an authenticated historical status bootstraps a query-only P3 leaf and still rejects foreign scope', () => {
-  const response = retryStatus();
-  const leaf = bootstrapProductP3TaskInspectionLeaf(response, { session_id: 'session-1', task_id: 'task-1' });
-  assert.deepEqual(leaf.snapshot().binding, { ...retryBinding, generation: 1 });
-  assert.deepEqual(
-    leaf.snapshot().tasks.map(task => [task.task_id, task.attempt_id, task.attempt_number, task.state, task.outcome]),
-    [['task-1', 'attempt-b', 2, 'terminal', 'completed']],
-  );
-  assert.throws(() => bootstrapProductP3TaskInspectionLeaf(response, { session_id: 'session-foreign', task_id: 'task-1' }), /Session binding mismatch/);
-});
-
-test('retry candidate inspection binds exact status and full A/B history before exposing eligibility', async () => {
-  const leaf = new FormalTaskControlLeaf({ enabled: true, binding: retryBinding });
-  const calls = [];
-  const { record, admission } = await inspectProductP3RetryCandidate({
-    leaf,
-    session_id: 'session-1',
-    task_id: 'task-1',
-    request_nonce: 'positive',
-    is_current: () => true,
-    request: async (method, params, options) => {
-      calls.push({ method, params, options });
-      if (method === 'live_voice.task.status') return retryStatus();
-      if (method === 'live_voice.task.events') return retryEvents();
-      throw new Error(`unexpected method ${method}`);
-    },
-  });
-
-  assert.deepEqual(calls, [
-    {
-      method: 'live_voice.task.status',
-      params: { session_id: 'session-1', task_id: 'task-1' },
-      options: { requestId: 'web-task-status-positive' },
-    },
-    {
-      method: 'live_voice.task.events',
-      params: { session_id: 'session-1', task_id: 'task-1', after_seq: -1 },
-      options: { requestId: 'web-task-events-positive' },
-    },
-  ]);
-  assert.equal(isFormalTaskRetryEligible(record), true);
-  assert.deepEqual(admission, {
-    eligible: true,
-    reason: 'TASK_RETRY_ELIGIBLE',
-    task_id: 'task-1',
-    attempt_id: 'attempt-b',
-    attempt_number: 3,
-  });
-  assert.deepEqual(
-    {
-      task_id: record.task_id,
-      attempt_id: record.attempt_id,
-      attempt_number: record.attempt_number,
-      state: record.state,
-      outcome: record.outcome,
-      event_head: record.event_head,
-    },
-    {
-      task_id: 'task-1',
-      attempt_id: 'attempt-b',
-      attempt_number: 2,
-      state: 'terminal',
-      outcome: 'completed',
-      event_head: 3,
-    },
-  );
-  assert.deepEqual(leaf.snapshot().tasks, [record]);
-});
-
-test('retry candidate inspection preserves a stable server-side dirty-worktree rejection', async () => {
-  const leaf = new FormalTaskControlLeaf({ enabled: true, binding: retryBinding });
-  const inspection = await inspectProductP3RetryCandidate({
-    leaf,
-    session_id: 'session-1',
-    task_id: 'task-1',
-    request_nonce: 'dirty-context',
-    is_current: () => true,
-    request: async method =>
-      method === 'live_voice.task.status'
-        ? retryStatus({
-            retryAdmission: {
-              eligible: false,
-              reason: 'TASK_CONTEXT_WORKTREE_DIRTY',
-              task_id: 'task-1',
-              attempt_id: null,
-              attempt_number: null,
-            },
-          })
-        : retryEvents(),
-  });
-
-  assert.equal(isFormalTaskRetryEligible(inspection.record), true);
-  assert.deepEqual(inspection.admission, {
-    eligible: false,
-    reason: 'TASK_CONTEXT_WORKTREE_DIRTY',
-    task_id: 'task-1',
-    attempt_id: null,
-    attempt_number: null,
-  });
-});
-
-test('retry candidate inspection rejects a foreign status before events with zero live-replica effect', async () => {
-  const leaf = new FormalTaskControlLeaf({ enabled: true, binding: retryBinding });
-  let calls = 0;
-  await assert.rejects(
-    inspectProductP3RetryCandidate({
-      leaf,
-      session_id: 'session-1',
-      task_id: 'task-1',
-      request_nonce: 'foreign',
-      is_current: () => true,
-      request: async method => {
-        calls += 1;
-        if (method !== 'live_voice.task.status') throw new Error('events must not be requested');
-        return retryStatus({ taskId: 'task-foreign', attemptId: 'attempt-foreign', attemptNumber: 1 });
-      },
-    }),
-    /binding mismatch/,
-  );
-  assert.equal(calls, 1);
-  assert.deepEqual(leaf.snapshot().tasks, []);
-});
-
-test('retry candidate inspection rejects a stale Session binding before any network effect', async () => {
-  const wrongSessionLeaf = new FormalTaskControlLeaf({ enabled: true, binding: retryBinding });
-  const disconnectedLeaf = new FormalTaskControlLeaf({ enabled: true, binding: retryBinding });
-  disconnectedLeaf.disconnect();
-  for (const [leaf, sessionId] of [
-    [wrongSessionLeaf, 'session-foreign'],
-    [disconnectedLeaf, 'session-1'],
-  ]) {
-    let calls = 0;
-    await assert.rejects(
-      inspectProductP3RetryCandidate({
-        leaf,
-        session_id: sessionId,
-        task_id: 'task-1',
-        request_nonce: 'stale-session',
-        is_current: () => true,
-        request: async () => {
-          calls += 1;
-          throw new Error('network must not be reached');
-        },
-      }),
-      /Session binding/,
-    );
-    assert.equal(calls, 0);
-    assert.deepEqual(leaf.snapshot().tasks, []);
-  }
-});
-
-test('retry candidate inspection rejects same-head status/events disagreement with zero live-replica effect', async () => {
-  const leaf = new FormalTaskControlLeaf({ enabled: true, binding: retryBinding });
-  const staleBAtHeadFour = [
-    retryEvent(0, { attemptId: 'attempt-a', eventType: 'task.accepted', state: 'accepted' }),
-    retryEvent(1, { attemptId: 'attempt-a', eventType: 'task.terminal', state: 'terminal', outcome: 'cancelled' }),
-    retryEvent(2, {
-      attemptId: 'attempt-b',
-      eventType: 'task.retry_accepted',
-      state: 'accepted',
-      sourceEventId: null,
-      causationId: 'retry-b',
-      details: {
-        command_id: 'retry-b',
-        retry_of_attempt_id: 'attempt-a',
-        previous_outcome: 'cancelled',
-        attempt_number: 2,
-      },
-    }),
-    retryEvent(3, { attemptId: 'attempt-b', eventType: 'task.running', state: 'running' }),
-    retryEvent(4, { attemptId: 'attempt-b', eventType: 'task.terminal', state: 'terminal', outcome: 'completed' }),
-  ];
-  await assert.rejects(
-    inspectProductP3RetryCandidate({
-      leaf,
-      session_id: 'session-1',
-      task_id: 'task-1',
-      request_nonce: 'conflict',
-      is_current: () => true,
-      request: async method =>
-        method === 'live_voice.task.status'
-          ? retryStatus({ attemptId: 'attempt-c', attemptNumber: 3, state: 'accepted', outcome: null, eventHead: 4 })
-          : retryEvents(staleBAtHeadFour, 4),
-    }),
-    /replay conflicts/,
-  );
-  assert.deepEqual(leaf.snapshot().tasks, []);
-});
-
-test('overlapping retry inspections let only the current generation perform events and publish truth', async () => {
-  const leaf = new FormalTaskControlLeaf({ enabled: true, binding: retryBinding });
-  let currentGeneration = 1;
-  let releaseOldStatus;
-  const oldStatus = new Promise(resolve => {
-    releaseOldStatus = resolve;
-  });
-  const oldCalls = [];
-  const oldInspection = inspectProductP3RetryCandidate({
-    leaf,
-    session_id: 'session-1',
-    task_id: 'task-1',
-    request_nonce: 'old',
-    is_current: () => currentGeneration === 1,
-    request: async method => {
-      oldCalls.push(method);
-      if (method !== 'live_voice.task.status') throw new Error('stale inspection issued events');
-      return oldStatus;
-    },
-  });
-
-  currentGeneration = 2;
-  const currentInspection = await inspectProductP3RetryCandidate({
-    leaf,
-    session_id: 'session-1',
-    task_id: 'task-1',
-    request_nonce: 'current',
-    is_current: () => currentGeneration === 2,
-    request: async method => (method === 'live_voice.task.status' ? retryStatus() : retryEvents()),
-  });
-  releaseOldStatus(retryStatus());
-
-  await assert.rejects(oldInspection, /became stale/);
-  assert.deepEqual(oldCalls, ['live_voice.task.status']);
-  assert.equal(currentInspection.record.attempt_id, 'attempt-b');
-  assert.equal(isFormalTaskRetryEligible(currentInspection.record), true);
-  assert.equal(leaf.snapshot().tasks[0].attempt_id, 'attempt-b');
-  assert.equal(leaf.snapshot().tasks[0].attempt_number, 2);
 });
 
 test('P3 progress reconciliation advances accepted UI truth only from exact authoritative terminal events', async () => {

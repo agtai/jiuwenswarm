@@ -4564,16 +4564,16 @@ test('mounted P3 restores the historical task correlation and advances progress 
     }
     if (method === 'live_voice.task.status') {
       assert.equal(params.task_id, 'task-historical-progress');
-      return mountedP3Status(historicalBinding, {
+      return mountedTaskReadEnvelope(mountedP3Status(historicalBinding, {
         taskId: 'task-historical-progress',
         state: 'terminal',
         outcome: 'cancelled',
         eventHead: 2,
-      });
+      }), options?.requestId);
     }
     if (method === 'live_voice.task.events') {
       assert.equal(params.task_id, 'task-historical-progress');
-      return mountedP3Events(historicalBinding, { taskId: 'task-historical-progress', terminalA: true });
+      return mountedTaskReadEnvelope(mountedP3Events(historicalBinding, { taskId: 'task-historical-progress', terminalA: true }), options?.requestId);
     }
     if (method === 'live_voice.composition.p3.progress.activate') {
       assert.equal(params.task_id, 'task-historical-progress');

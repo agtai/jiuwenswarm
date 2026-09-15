@@ -1,3 +1,7 @@
+import { FormalTaskControlLeaf, type FormalTaskControlBinding, type FormalTaskControlRecord, type FormalTaskControlSnapshot } from './formalTaskControlLeaf.js';
+import { parseProductP3RetryAdmission, reconcileProductP3ProgressEvent } from './taskOperations.js';
+import type { ProductTextProgressEvent } from './productTextProgress';
+
 export const FORMAL_P3_TASK_METHODS = Object.freeze({
   list: 'live_voice.task.list',
   status: 'live_voice.task.status',
@@ -113,6 +117,7 @@ export type FormalP3TaskRequest = (
 ) => Promise<unknown>;
 
 export type FormalP3TaskFacts = Readonly<{
+  observation_version: number;
   task: FormalP3TaskRecord;
   status_response: unknown;
   events_response: unknown;
@@ -134,6 +139,19 @@ let requestSequence = 0;
 type JsonObject = Record<string, unknown>;
 
 class FormalP3DefinitiveRejection extends Error {}
+class FormalP3SupersededRead extends Error {}
+
+function projectObservedTask(task: FormalP3TaskRecord, record: FormalTaskControlRecord): FormalP3TaskRecord {
+  return Object.freeze({
+    ...task, attempt_id: record.attempt_id!, attempt_number: record.attempt_number,
+    canonical_state: record.state!, outcome: record.outcome as FormalP3TaskRecord['outcome'],
+    display_state: (record.state === 'terminal' ? record.outcome : record.state) as FormalP3TaskDisplayState,
+    event_head: record.event_head!, queued: false, admission_priority: null, admission_reason: null,
+    available_operations: Object.freeze([]), result_availability: null, result_text: null,
+    result_attempt_id: null, blocking_question: null, progress: null,
+    replay_event_count: 0, replay_event_types: Object.freeze([]),
+  });
+}
 const DEFINITIVE_CODES = new Set(['INVALID_ARGUMENT', 'UNAUTHENTICATED', 'PERMISSION_DENIED',
   'NOT_FOUND', 'CONFLICT', 'STALE', 'UNSUPPORTED', 'CAPABILITY_UNAVAILABLE']);
 
@@ -339,7 +357,7 @@ function parseList(value: unknown, requestId: string, sessionId: string): Readon
 }
 
 function parseEventPage(
-  record: FormalP3TaskRecord,
+  record: Pick<FormalP3TaskRecord, 'task_id' | 'event_head'>,
   value: unknown,
   requestId: string,
   expectedAfter: number,
@@ -529,6 +547,9 @@ export class FormalP3TaskExperienceOwner {
   #epoch = 0;
   #liveRefreshNeeded = false;
   #factReads = new Map<string, { promise: Promise<FormalP3TaskFacts>; consumers: Set<() => boolean> }>();
+  #taskUpdates = new Map<string, Promise<unknown>>();
+  #factVersion = 0;
+  #observations = new Map<string, { leaf: FormalTaskControlLeaf; factsVersion: number | null }>();
 
   constructor(input: Readonly<{
     enabled: boolean;
@@ -545,7 +566,75 @@ export class FormalP3TaskExperienceOwner {
 
   snapshot(): FormalP3TaskExperienceSnapshot { return this.#state; }
 
-  async readTaskFacts(sessionIdInput: string, taskIdInput: string, isCurrent: () => boolean = () => true): Promise<FormalP3TaskFacts> {
+  taskObservation(sessionId: string, taskId: string): FormalTaskControlSnapshot | null {
+    if (this.#state.session_id !== null && this.#state.session_id !== sessionId) return null;
+    return this.#observations.get(JSON.stringify([sessionId, taskId]))?.leaf.snapshot() ?? null;
+  }
+
+  #retainObservedTasks(tasks: readonly FormalP3TaskRecord[]): readonly FormalP3TaskRecord[] {
+    return tasks.map(task => {
+      const observation = this.#observations.get(JSON.stringify([task.session_id, task.task_id]));
+      if (observation === undefined) return task;
+      const snapshot = observation.leaf.snapshot();
+      if (task.subject_id !== snapshot.binding.subject_id || task.project_id !== snapshot.binding.project_id
+          || task.correlation_id !== snapshot.binding.correlation_id) throw new Error('formal P3 Task collection authority changed identity');
+      const record = snapshot.tasks[0]!;
+      if (record.event_head === task.event_head && (record.attempt_id !== task.attempt_id
+          || record.state !== task.canonical_state || record.outcome !== task.outcome)) {
+        throw new Error('formal P3 Task collection conflicts with observed truth');
+      }
+      if (record.event_head! > task.event_head || (record.event_head === task.event_head && observation.factsVersion === null)) {
+        const known = this.#state.tasks.find(previous => previous.task_id === task.task_id);
+        return projectObservedTask(known ?? task, record);
+      }
+      return task;
+    });
+  }
+
+  async #updateTask<T>(sessionId: string, taskId: string, current: () => boolean, update: () => Promise<T>): Promise<T> {
+    const key = JSON.stringify([this.#epoch, sessionId, taskId]);
+    const previous = this.#taskUpdates.get(key);
+    if (previous === undefined && this.#taskUpdates.size >= 128) throw new Error('formal P3 Task update capacity exceeded');
+    const flight = (async () => {
+      if (previous !== undefined) await previous.catch(() => {});
+      if (!current()) throw new Error('formal P3 Task read became stale');
+      return update();
+    })();
+    this.#taskUpdates.set(key, flight);
+    try { return await flight; }
+    finally { if (this.#taskUpdates.get(key) === flight) this.#taskUpdates.delete(key); }
+  }
+
+  #retireTaskFacts(): void {
+    for (const observation of this.#observations.values()) observation.leaf.disconnect();
+    this.#observations.clear();
+    this.#taskUpdates.clear();
+    this.#factReads.clear();
+  }
+
+  async reconcileProgress(event: Readonly<ProductTextProgressEvent>, isCurrent: () => boolean): Promise<FormalTaskControlRecord> {
+    const epoch = this.#epoch;
+    const key = JSON.stringify([event.session_id, event.task_id]);
+    const observation = this.#observations.get(key);
+    const current = () => epoch === this.#epoch && this.#observations.get(key) === observation
+      && (this.#state.session_id === null || this.#state.session_id === event.session_id) && isCurrent();
+    if (observation === undefined || !current()) throw new Error('formal product progress reconciliation became stale');
+    return this.#updateTask(event.session_id, event.task_id, current, async () => {
+      const record = await reconcileProductP3ProgressEvent({
+        request: async () => (await this.#readTaskHistory(event.session_id, event.task_id, current)).response,
+        leaf: observation.leaf, event, session_id: event.session_id,
+        request_nonce: requestId('formal-p3-progress'), is_current: current,
+      });
+      // History proves lifecycle truth, not fresh command eligibility or result
+      // authority. A status/result read must restore those capabilities.
+      observation.factsVersion = null;
+      const tasks = this.#state.tasks.map(task => task.task_id !== event.task_id ? task : projectObservedTask(task, record));
+      this.#publish({ ...this.#state, tasks: Object.freeze(tasks) });
+      return record;
+    });
+  }
+
+  async readTaskFacts(sessionIdInput: string, taskIdInput: string, isCurrent: () => boolean = () => true, expectedBinding?: FormalTaskControlBinding): Promise<FormalP3TaskFacts> {
     const sessionId = text(sessionIdInput, 'session_id');
     const taskId = text(taskIdInput, 'task_id');
     const epoch = this.#epoch;
@@ -553,13 +642,14 @@ export class FormalP3TaskExperienceOwner {
       && !['closed', 'disconnected'].includes(this.#state.status)
       && (this.#state.session_id === null || this.#state.session_id === sessionId);
     if (!current() || !isCurrent()) throw new Error('formal P3 Task read became stale');
-    const key = JSON.stringify([epoch, sessionId, taskId]);
+    const key = JSON.stringify([epoch, sessionId, taskId, expectedBinding ?? null]);
     let flight = this.#factReads.get(key);
     if (flight === undefined) {
       if (this.#factReads.size >= 128) throw new Error('formal P3 Task read capacity exceeded');
       const consumers = new Set([isCurrent]);
-      flight = { consumers, promise: this.#readTaskFacts(sessionId, taskId,
-        () => current() && [...consumers].some(consumer => consumer())) };
+      const active = () => current() && [...consumers].some(consumer => consumer());
+      flight = { consumers, promise: this.#updateTask(sessionId, taskId, active,
+        () => this.#readTaskFacts(sessionId, taskId, active, expectedBinding)) };
       this.#factReads.set(key, flight);
     } else {
       flight.consumers.add(isCurrent);
@@ -574,7 +664,7 @@ export class FormalP3TaskExperienceOwner {
     }
   }
 
-  async #readTaskFacts(sessionId: string, taskId: string, current: () => boolean): Promise<FormalP3TaskFacts> {
+  async #readTaskFacts(sessionId: string, taskId: string, current: () => boolean, expectedBinding?: FormalTaskControlBinding): Promise<FormalP3TaskFacts> {
     const statusId = requestId('formal-p3-task-status');
     const statusResponse = await this.#request(FORMAL_P3_TASK_METHODS.status, { session_id: sessionId, task_id: taskId }, statusId);
     if (!current()) throw new Error('formal P3 Task read became stale');
@@ -584,28 +674,65 @@ export class FormalP3TaskExperienceOwner {
       supported_operations: status.supported_operations,
     });
     if (selected.task_id !== taskId) throw new Error('formal P3 Task selection target mismatch');
+    if (expectedBinding !== undefined && (expectedBinding.subject_id !== selected.subject_id
+      || expectedBinding.session_id !== sessionId || expectedBinding.project_id !== selected.project_id
+      || expectedBinding.correlation_id !== selected.correlation_id
+      || !Number.isSafeInteger(expectedBinding.generation) || expectedBinding.generation <= 0)) {
+      throw new Error('formal task inspection task-control binding mismatch');
+    }
+    const { events, response: eventsResponse } = await this.#readTaskHistory(sessionId, taskId, current, selected.event_head);
+    const facts = Object.freeze({ observation_version: ++this.#factVersion,
+      task: enrichEvents(selected, events), status_response: statusResponse,
+      events_response: eventsResponse,
+      terminal_source_event_id: events.length === 0 || events[events.length - 1].source_event_id === null
+        ? null : text(events[events.length - 1].source_event_id, 'TaskEvent source_event_id') });
+    const key = JSON.stringify([sessionId, taskId]);
+    const existing = this.#observations.get(key);
+    if (existing === undefined && this.#observations.size >= TASK_LIMIT * MAX_LIST_PAGES) throw new Error('formal P3 Task observation capacity exceeded');
+    const binding = { subject_id: selected.subject_id, session_id: sessionId,
+      project_id: selected.project_id, correlation_id: selected.correlation_id, generation: this.#epoch + 1 };
+    const probe = new FormalTaskControlLeaf({ enabled: true, binding, event_capacity: MAX_EVENT_PAGES * 500 });
+    probe.adopt('task.status', statusResponse, { connection_generation: probe.snapshot().connection_generation,
+      command_id: null, target_task_id: taskId, events_query: null });
+    const adoptHistory = (leaf: FormalTaskControlLeaf) => leaf.adopt('task.events', facts.events_response, {
+      connection_generation: leaf.snapshot().connection_generation, command_id: null, target_task_id: null,
+      events_query: { task_id: taskId, after_seq: -1 },
+    });
+    adoptHistory(probe);
+    parseProductP3RetryAdmission(statusResponse, probe.snapshot().tasks[0]!);
+    if (!current()) throw new Error('formal P3 Task read became stale');
+    // The existing reducer rejects regressing heads and conflicting same-head
+    // histories. Never replace it with a fresh probe on an ordinary refresh.
+    if (existing !== undefined) {
+      adoptHistory(existing.leaf);
+      existing.factsVersion = facts.observation_version;
+    } else this.#observations.set(key, { leaf: probe, factsVersion: facts.observation_version });
+    return facts;
+  }
+
+  async #readTaskHistory(sessionId: string, taskId: string, current: () => boolean, expectedHead?: number) {
     const events: JsonObject[] = [];
-    const pages: { after_seq: number; response: unknown }[] = [];
+    let firstResponse: unknown;
+    let head = expectedHead;
     let afterSeq = -1;
     for (let page = 0; page < MAX_EVENT_PAGES; page += 1) {
       const eventsId = requestId('formal-p3-task-events');
-      const response = await this.#request(FORMAL_P3_TASK_METHODS.events, { session_id: sessionId, task_id: taskId, after_seq: afterSeq, limit: 500 }, eventsId);
+      const response = await this.#request(FORMAL_P3_TASK_METHODS.events,
+        { session_id: sessionId, task_id: taskId, after_seq: afterSeq, limit: 500 }, eventsId);
       if (!current()) throw new Error('formal P3 Task read became stale');
-      const parsed = parseEventPage(selected, response, eventsId, afterSeq);
-      pages.push(Object.freeze({ after_seq: afterSeq, response }));
+      if (page === 0) firstResponse = response;
+      head ??= integer(envelope(response, eventsId).head_seq, 'event head', -1);
+      const parsed = parseEventPage({ task_id: taskId, event_head: head }, response, eventsId, afterSeq);
+      if (parsed.events.length > 500) throw new Error('formal P3 TaskEvent page exceeds its bound');
       events.push(...parsed.events);
       if (!parsed.has_more) break;
       if (parsed.next_after_seq === null || parsed.next_after_seq <= afterSeq || page === MAX_EVENT_PAGES - 1) throw new Error('formal P3 TaskEvent replay exceeds its bound');
       afterSeq = parsed.next_after_seq;
     }
-    return Object.freeze({ task: enrichEvents(selected, events), status_response: statusResponse,
-      // Every page was checked against the same Task head. The control reducer
-      // consumes a complete replay, not a page advertising a later global head.
-      events_response: Object.freeze({ ...objectValue(pages[0]?.response),
-        result: Object.freeze({ ...objectValue(objectValue(pages[0]?.response)?.result),
-          events: Object.freeze(events), after_seq: -1, has_more: false, next_after_seq: null }) }),
-      terminal_source_event_id: events.length === 0 || events[events.length - 1].source_event_id === null
-        ? null : text(events[events.length - 1].source_event_id, 'TaskEvent source_event_id') });
+    // A complete proof is reduced only after every page has the same head.
+    return { events, response: Object.freeze({ ...objectValue(firstResponse),
+      result: Object.freeze({ ...objectValue(objectValue(firstResponse)?.result),
+        events: Object.freeze(events), after_seq: -1, has_more: false, next_after_seq: null }) }) };
   }
 
   async refreshLiveTasks(sessionId: string, isCurrent: () => boolean = () => true): Promise<FormalP3TaskExperienceSnapshot> {
@@ -626,7 +753,7 @@ export class FormalP3TaskExperienceOwner {
     if (this.#state.status === 'closed') throw new Error('formal P3 Task experience is closed');
     if (this.#state.session_id !== null && this.#state.session_id !== sessionId) {
       this.#epoch += 1;
-      this.#factReads.clear();
+      this.#retireTaskFacts();
       this.#pending = null;
       this.#rpc = null;
       this.#mutationFlight = null;
@@ -654,7 +781,7 @@ export class FormalP3TaskExperienceOwner {
         cursor = parsed.next_cursor;
       }
       if (new Set(collected.map(task => task.task_id)).size !== collected.length) throw new Error('formal P3 Task pages overlap');
-      const linked = linkSuccessors(collected);
+      const linked = this.#retainObservedTasks(linkSuccessors(collected));
       const hint = readHint(this.#store, sessionId);
       const prior = this.#state.session_id === sessionId ? this.#state.selected_task_id : null;
       const selected = [prior, hint].find(candidate => candidate !== null && linked.some(task => task.task_id === candidate))
@@ -669,7 +796,7 @@ export class FormalP3TaskExperienceOwner {
       writeHint(this.#store, sessionId, this.#state.selected_task_id);
       return this.#state;
     } catch (error) {
-      if (generation === this.#generation && isCurrent()) this.#publish({ status: 'failed', session_id: sessionId, tasks: Object.freeze([]), selected_task_id: null, collection_operations: Object.freeze([]), command: this.#state.command, reason: reason(error) });
+      if (generation === this.#generation && isCurrent() && !(error instanceof FormalP3SupersededRead)) this.#publish({ status: 'failed', session_id: sessionId, tasks: Object.freeze([]), selected_task_id: null, collection_operations: Object.freeze([]), command: this.#state.command, reason: reason(error) });
       throw error;
     }
   }
@@ -704,8 +831,9 @@ export class FormalP3TaskExperienceOwner {
       resultId,
     );
     if (generation !== this.#generation || !isCurrent()) throw new Error('formal P3 Task detail became stale');
+    if (this.#observations.get(JSON.stringify([sessionId, taskId]))?.factsVersion !== facts.observation_version) throw new FormalP3SupersededRead('formal P3 Task result revision became stale');
     const enriched = enrichResult(selected, resultResponse, resultId, facts.terminal_source_event_id);
-    const tasks = listedTasks.map(task => task.task_id === taskId ? enriched : task);
+    const tasks = this.#state.tasks.map(task => task.task_id === taskId ? enriched : task);
     const currentCommand = this.#state.command;
     const command = currentCommand?.task_id === taskId
       ? Object.freeze({ ...currentCommand, terminal_outcome: enriched.outcome })
@@ -715,7 +843,10 @@ export class FormalP3TaskExperienceOwner {
     return this.#state;
     } catch (error) {
       if (generation === this.#generation && isCurrent()) {
-        this.#publish({ status: 'failed', session_id: sessionId, tasks: Object.freeze([]), selected_task_id: null, collection_operations: Object.freeze([]), command: this.#state.command, reason: reason(error) });
+        if (error instanceof FormalP3SupersededRead) {
+          this.#publish({ ...this.#state, status: 'ready', selected_task_id: taskId, reason: reason(error) });
+          this.#liveRefreshNeeded = true;
+        } else this.#publish({ status: 'failed', session_id: sessionId, tasks: Object.freeze([]), selected_task_id: null, collection_operations: Object.freeze([]), command: this.#state.command, reason: reason(error) });
       }
       throw error;
     }
@@ -817,7 +948,7 @@ export class FormalP3TaskExperienceOwner {
   disconnect(): FormalP3TaskExperienceSnapshot {
     this.#generation += 1;
     this.#epoch += 1;
-    this.#factReads.clear();
+    this.#retireTaskFacts();
     this.#mutationFlight = null;
     const command = this.#rpc === null ? this.#state.command
       : Object.freeze({ ...this.#rpc.command, phase: 'unknown' as const, reason: 'FORMAL_P3_RESULT_RECOVERY_REQUIRED' });
@@ -827,7 +958,7 @@ export class FormalP3TaskExperienceOwner {
   close(): FormalP3TaskExperienceSnapshot {
     this.#generation += 1;
     this.#epoch += 1;
-    this.#factReads.clear();
+    this.#retireTaskFacts();
     this.#pending = null;
     this.#rpc = null;
     this.#mutationFlight = null;

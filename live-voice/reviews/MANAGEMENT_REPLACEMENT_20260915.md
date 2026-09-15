@@ -1176,3 +1176,88 @@ Work unification, audio lifecycle restructuring, SDK changes, runtime deployment
 remote updates, private configuration and user project files. Full common progress
 state/receipt/result ownership and remaining Host admission responsibilities stay
 open under the active goal.
+
+### Shared Task fact ownership (in progress)
+
+Tier 2, existing FormalP3TaskExperienceOwner, task event proof and integrated
+Panel recovery/progress consumers. Replace Panel-owned historical/per-Voice
+Task leaves with the shared Task owner's exact scoped facts. Serialize updates
+per Task, retain complete event provenance/prefix/head/Attempt validation, and
+prevent stale status/results from overwriting a newer observation. Voice owns
+presentation/activation cancellation only; it must not disconnect Task facts.
+Selecting B must not retire background A. Session/connection retirement fences
+all old reads. Progress advancement withdraws stale operation/result authority
+until refreshed through the common reader. No protocol, persistence, audio or
+Work policy changes. Required evidence includes positive UI/Voice recovery,
+A/B concurrency, stale reads/results, scope/provenance rejection with no fact or
+ACK adoption, retry Attempt isolation and current mounted regressions. The
+authorized independent reviewer checked this design and specifically requires
+common read/commit ownership, not merely relocating a leaf map.
+
+Implemented the browser fact boundary: FormalP3TaskExperienceOwner owns the
+retained exact Task leaf and observation version. It serializes reads/progress
+updates per Task and shares bounded event pagination. It retains no full-history
+cache. UI selection and background consumers use this same proof state; late
+result responses cannot reinstate superseded facts or permissions. List/selection
+publication merges against current observations, including other Tasks advanced
+while a request was pending. Reconciliation proves lifecycle, then withdraws
+unrefreshed operation/admission/result projections. Voice retains only activation,
+delivery/presentation, cancellation and exact consumer guards, not a Task leaf.
+Voice detach does not retire shared Task facts; Host disconnect/Session retirement
+does. Historical target hints are checked against authenticated status before
+history reads or fact adoption. The old bootstrap/retry-inspector implementations
+and their Panel exports are removed.
+
+The existing control reducer's default 256-event bound is unchanged. The shared
+owner explicitly uses the already-supported UI bound of ten 500-event pages;
+all pages must share one head and the complete replay passes the original
+provenance/Attempt reducer. Progress probes inherit that configured bound.
+The retained Task count is bounded by the existing 500-Task collection limit.
+The diagnostic error formatter stays with the Voice adapter so the common Task
+reader does not import/initialize the WebSocket client; standalone package
+compilation remains valid.
+
+Independent complete-diff review found three issues and verified their fixes:
+cross-Task delayed result/list overwrites; same-Task superseded-result error
+handling clearing newly adopted facts; and history adoption preceding a failing
+progress-receipt check. Current code validates origin and existing receipt
+conflict/capacity before synchronous history/progress adoption. Dedicated tests
+prove A/B preservation, retained terminal facts, and zero partial adoption for
+reused receipts and forged causation. Final read-only review found no remaining
+blocking issue. The reviewer did not run Main's tests.
+
+Seven obsolete inspector-specific tests were retired with their implementation.
+Their current oracles are shared-owner A/B Attempt-history and exact retry tests,
+authenticated historical-hint rejection before events, dirty-worktree admission
+reason preservation, same-head status/history rejection, and retired
+caller/connection/Session reads. Three additional tests exercise per-Task queued
+reads/progress with independent A selection, Voice retirement and Session
+disconnect. All current checks retain positive scenarios and zero forbidden
+effects; raw progress payloads never authorize UI facts or ACK.
+
+Final evidence: common Task owner **67 passed** within a four-file group of
+**158 passed** (Task owner, control proof, Host Session provider, Panel units).
+Affected mounted Task/progress/recognition/confirmation/retained/draft/refresh
+selection **52 passed, 1 skipped**. The unchanged Provider-starting case remains
+skipped. Full frontend `tsc --noEmit`, the exact TypeScript compilation stage of
+`test:live-voice-integrated-web`, and `git diff --check` passed. Initial failures
+identified old fixtures with mismatched source/causation, invented lifecycle
+events, absent Attempt/retry metadata, or incomplete Host envelopes; fixtures now
+use valid accepted/running/terminal/retry histories. No production validation was
+relaxed to accommodate those fixtures. Mounted recovery and Host polling after
+Voice detach both pass through the actual shared Owner.
+
+[Physical production accounting](../evidence/MANAGEMENT_TASK_FACTS_20260915.json):
+Voice **+21/-215 = -194**, Host **+189/-53 = +136**, SDK unchanged; combined
+**+210/-268 = -58** against `66687015`. This group removes live duplicate fact
+ownership; the added shared serialization/proof is counted in full. Goal totals
+are **+961/-3331 = -2370**, still including earlier dormant/hidden-chain deletions.
+Official-baseline net additions are Voice **109673**, Host **48275**, SDK **34212**,
+total **192160**. Production hashes and merged module totals are in the evidence.
+
+This coherent group includes its affected tests and documentation. No backend,
+SDK, Work, audio-policy, private configuration, user-project, deployment or remote
+update is included. Remaining Host admission and application receipt/result
+service convergence stay open under the active goal. The legacy control leaf's
+unused mutation API is not credited as deleted; this group removes its duplicate
+live owners and historical inspection flow, not every dormant helper.

@@ -122,7 +122,7 @@ function event(task, seq, eventType, state, outcome = null, details = {}) {
     outcome,
     producer: 'task_core',
     source_event_id: seq === 0 ? null : `${task.task_id}:source:${seq}`,
-    causation_id: `${task.task_id}:cause:${seq}`,
+    causation_id: seq === 0 ? `${task.task_id}:cause:${seq}` : `${task.task_id}:source:${seq}`,
     correlation_id: task.correlation_id,
     occurred_at: '2026-08-21T00:00:00Z',
     details,
@@ -254,6 +254,287 @@ function authoritativeFixture({
   };
   return { taskA, taskB, calls, request, store: memoryStorage(selectedHint) };
 }
+
+function terminalProgress(task) {
+  const sourceId = `${task.task_id}:event:2`;
+  return {
+    session_id: sessionId, project_id: scope.project_id, correlation_id: task.correlation_id,
+    task_id: task.task_id, attempt_id: task.attempt_id, state: 'terminal',
+    source_event: { event_id: sourceId, seq: 2, event_type: 'task.terminal',
+      payload: { state: 'terminal', outcome: 'completed' },
+      raw: { extensions: { 'jiuwenswarm.task_progress_return': { persistent_event_producer: 'task_core' } } } },
+    progress_event: { event_id: `${task.task_id}:progress:2`, causation_id: sourceId,
+      payload: { state: 'terminal', outcome: 'completed' } },
+  };
+}
+
+function terminalHistory(task, id, afterSeq = -1) {
+  return envelope(id, { task_id: task.task_id, after_seq: afterSeq, head_seq: 2,
+    events: [event(task, 0, 'task.accepted', 'accepted'), event(task, 1, 'task.running', 'running'),
+      event(task, 2, 'task.terminal', 'terminal', 'completed')], has_more: false, next_after_seq: null });
+}
+
+test('shared progress advances background B without selecting it and withdraws unproved operations/results', async () => {
+  const fixture = authoritativeFixture();
+  let terminal = false;
+  const owner = new FormalP3TaskExperienceOwner({ enabled: true, store: fixture.store,
+    request: (method, params, id) => terminal && method === FORMAL_P3_TASK_METHODS.events && params.task_id === 'task-b'
+      ? Promise.resolve(terminalHistory(fixture.taskB, id)) : fixture.request(method, params, id) });
+  await owner.refresh(sessionId);
+  await owner.readTaskFacts(sessionId, 'task-b');
+  terminal = true;
+  await owner.reconcileProgress(terminalProgress(fixture.taskB), () => true);
+  const snapshot = owner.snapshot();
+  assert.equal(snapshot.selected_task_id, 'task-a');
+  assert.equal(owner.taskObservation(sessionId, 'task-b').tasks[0].state, 'terminal');
+  const taskB = snapshot.tasks.find(task => task.task_id === 'task-b');
+  assert.equal(taskB.outcome, 'completed');
+  assert.deepEqual(taskB.available_operations, []);
+  assert.equal(taskB.result_availability, null);
+  assert.equal(taskB.result_text, null);
+  assert.equal(fixture.store.getItem(`jiuwenswarm.live_voice.formal_p3_selection.v1:${encodeURIComponent(sessionId)}`), 'task-a');
+  assert.equal(fixture.calls.filter(call => [FORMAL_P3_TASK_METHODS.intent, FORMAL_P3_TASK_METHODS.confirmation, FORMAL_P3_TASK_METHODS.mutate].includes(call.method)).length, 0);
+});
+
+for (const fault of ['producer', 'scope', 'same-head', 'retired-consumer']) {
+  test(`shared progress ${fault} rejects without changing Task facts, selection or receipts`, async () => {
+    const fixture = authoritativeFixture();
+    let corrupt = false;
+    const owner = new FormalP3TaskExperienceOwner({ enabled: true, store: fixture.store,
+      request: async (method, params, id) => {
+        const reply = await fixture.request(method, params, id);
+        if (corrupt && method === FORMAL_P3_TASK_METHODS.events && params.task_id === 'task-b') {
+          reply.result.events[1].event_id = 'forged-same-head-event';
+        }
+        return reply;
+      } });
+    await owner.refresh(sessionId);
+    await owner.readTaskFacts(sessionId, 'task-b');
+    const before = owner.taskObservation(sessionId, 'task-b');
+    const beforeUi = owner.snapshot();
+    const delivery = terminalProgress(fixture.taskB);
+    if (fault === 'producer') delivery.source_event.raw.extensions['jiuwenswarm.task_progress_return'].persistent_event_producer = 'forged';
+    if (fault === 'scope') delivery.project_id = 'other-project';
+    corrupt = fault === 'same-head';
+    if (corrupt) {
+      delivery.state = 'running';
+      Object.assign(delivery.source_event, { event_id: 'forged-same-head-event', seq: 1, event_type: 'task.running',
+        payload: { state: 'running', outcome: null } });
+      Object.assign(delivery.progress_event, { causation_id: 'forged-same-head-event', payload: { state: 'running', outcome: null } });
+    }
+    await assert.rejects(owner.reconcileProgress(delivery, () => fault !== 'retired-consumer'));
+    assert.deepEqual(owner.taskObservation(sessionId, 'task-b'), before);
+    assert.equal(owner.snapshot(), beforeUi);
+    assert.equal(owner.taskObservation(sessionId, 'task-b').connected, true);
+    assert.equal(fixture.calls.filter(call => /ack|mutate|intent/.test(call.method)).length, 0);
+  });
+}
+
+test('result arriving after a shared progress commit cannot restore the old Task revision', async () => {
+  const fixture = authoritativeFixture({ selectedHint: 'task-b' });
+  let holdResult = false;
+  let terminal = false;
+  let release;
+  const resultStarted = new Promise(resolve => { release = resolve; });
+  let finishResult;
+  const owner = new FormalP3TaskExperienceOwner({ enabled: true, store: fixture.store,
+    request: async (method, params, id) => {
+      if (terminal && method === FORMAL_P3_TASK_METHODS.events) return terminalHistory(fixture.taskB, id);
+      const reply = await fixture.request(method, params, id);
+      if (holdResult && method === FORMAL_P3_TASK_METHODS.result) {
+        release();
+        return new Promise(resolve => { finishResult = () => resolve(reply); });
+      }
+      return reply;
+    } });
+  await owner.refresh(sessionId);
+  holdResult = true;
+  const selection = owner.select('task-b');
+  const rejectedSelection = assert.rejects(selection, /result revision became stale/);
+  await resultStarted;
+  terminal = true;
+  await owner.reconcileProgress(terminalProgress(fixture.taskB), () => true);
+  finishResult();
+  await rejectedSelection;
+  assert.equal(owner.taskObservation(sessionId, 'task-b').tasks[0].outcome, 'completed');
+  assert.equal(owner.snapshot().tasks.find(task => task.task_id === 'task-b').outcome, 'completed');
+  assert.deepEqual(owner.snapshot().tasks.find(task => task.task_id === 'task-b').available_operations, []);
+});
+
+for (const delayed of ['result', 'list']) {
+  test(`late A ${delayed} preserves B progress and cannot restore B operations`, async () => {
+    const fixture = authoritativeFixture();
+    let hold = false;
+    let terminal = false;
+    let started;
+    const waiting = new Promise(resolve => { started = resolve; });
+    let finish;
+    const owner = new FormalP3TaskExperienceOwner({ enabled: true, store: fixture.store,
+      request: async (method, params, id) => {
+        if (terminal && method === FORMAL_P3_TASK_METHODS.events && params.task_id === 'task-b') return terminalHistory(fixture.taskB, id);
+        const reply = await fixture.request(method, params, id);
+        if (hold && method === FORMAL_P3_TASK_METHODS[delayed]) {
+          hold = false;
+          const old = structuredClone(reply);
+          started();
+          return new Promise(resolve => { finish = () => resolve(old); });
+        }
+        return reply;
+      } });
+    await owner.refresh(sessionId);
+    await owner.readTaskFacts(sessionId, 'task-b');
+    hold = true;
+    const flight = delayed === 'list' ? owner.refresh(sessionId) : owner.select('task-a');
+    await waiting;
+    terminal = true;
+    await owner.reconcileProgress(terminalProgress(fixture.taskB), () => true);
+    finish();
+    await flight;
+    const b = owner.snapshot().tasks.find(task => task.task_id === 'task-b');
+    assert.equal(owner.snapshot().selected_task_id, 'task-a');
+    assert.equal(b.outcome, 'completed');
+    assert.equal(b.event_head, 2);
+    assert.deepEqual(b.available_operations, []);
+    assert.equal(b.result_text, null);
+  });
+}
+
+for (const fault of ['receipt-reuse', 'causation']) {
+  test(`progress ${fault} cannot partially commit history before rejecting its receipt`, async () => {
+    const fixture = authoritativeFixture({ selectedHint: 'task-b' });
+    let terminal = false;
+    const owner = new FormalP3TaskExperienceOwner({ enabled: true, store: fixture.store,
+      request: (method, params, id) => terminal && method === FORMAL_P3_TASK_METHODS.events
+        ? Promise.resolve(terminalHistory(fixture.taskB, id)) : fixture.request(method, params, id) });
+    await owner.refresh(sessionId);
+    const delivery = terminalProgress(fixture.taskB);
+    if (fault === 'receipt-reuse') {
+      const running = structuredClone(delivery);
+      running.state = 'running';
+      Object.assign(running.source_event, { seq: 1, event_id: 'task-b:event:1', event_type: 'task.running', payload: { state: 'running', outcome: null } });
+      Object.assign(running.progress_event, { causation_id: 'task-b:event:1', payload: { state: 'running', outcome: null } });
+      await owner.reconcileProgress(running, () => true);
+    } else delivery.progress_event.causation_id = 'wrong-source';
+    const before = owner.taskObservation(sessionId, 'task-b');
+    const ui = owner.snapshot();
+    terminal = true;
+    await assert.rejects(owner.reconcileProgress(delivery, () => true), /receipt conflicts|origin binding mismatch/);
+    assert.deepEqual(owner.taskObservation(sessionId, 'task-b'), before);
+    assert.equal(owner.snapshot(), ui);
+  });
+}
+
+test('historical scope hint is checked before any event read or shared fact adoption', async () => {
+  const fixture = authoritativeFixture();
+  const owner = new FormalP3TaskExperienceOwner({ enabled: true, request: fixture.request, store: fixture.store });
+  await assert.rejects(owner.readTaskFacts(sessionId, 'task-b', () => true, {
+    ...scope, correlation_id: 'wrong-correlation', generation: 7,
+  }), /task-control binding mismatch/);
+  assert.equal(owner.taskObservation(sessionId, 'task-b'), null);
+  assert.equal(fixture.calls.length, 1);
+  assert.equal(fixture.calls[0].method, FORMAL_P3_TASK_METHODS.status);
+});
+
+test('the shared reader retains a server dirty-worktree retry rejection without manufacturing eligibility', async () => {
+  const fixture = authoritativeFixture();
+  const owner = new FormalP3TaskExperienceOwner({ enabled: true, store: fixture.store,
+    request: async (method, params, id) => {
+      const reply = await fixture.request(method, params, id);
+      if (method === FORMAL_P3_TASK_METHODS.status) {
+        reply.result.retry_admission = { eligible: false, reason: 'TASK_CONTEXT_WORKTREE_DIRTY',
+          task_id: params.task_id, attempt_id: null, attempt_number: null };
+      }
+      return reply;
+    } });
+  const facts = await owner.readTaskFacts(sessionId, 'task-a');
+  assert.equal(facts.status_response.result.retry_admission.eligible, false);
+  assert.equal(facts.status_response.result.retry_admission.reason, 'TASK_CONTEXT_WORKTREE_DIRTY');
+  assert.equal(owner.taskObservation(sessionId, 'task-a').tasks[0].outcome, 'completed');
+  assert.equal(fixture.calls.filter(call => /intent|mutate/.test(call.method)).length, 0);
+});
+
+for (const retirement of [null, 'voice', 'session']) {
+  test(`per-Task updates serialize without blocking A selection; retirement=${retirement}`, async () => {
+    const fixture = authoritativeFixture();
+    let holding = false;
+    let started;
+    const statusStarted = new Promise(resolve => { started = resolve; });
+    let finishStatus;
+    let laterHistoryCalls = 0;
+    let voiceCurrent = true;
+    const owner = new FormalP3TaskExperienceOwner({ enabled: true, store: fixture.store,
+      request: async (method, params, id) => {
+        const reply = await fixture.request(method, params, id);
+        if (holding && params.task_id === 'task-b') {
+          if (method === FORMAL_P3_TASK_METHODS.status) {
+            started();
+            return new Promise(resolve => { finishStatus = () => resolve(reply); });
+          }
+          if (method === FORMAL_P3_TASK_METHODS.events && ++laterHistoryCalls === 2) return terminalHistory(fixture.taskB, id);
+        }
+        return reply;
+      } });
+    await owner.refresh(sessionId);
+    await owner.readTaskFacts(sessionId, 'task-b');
+    holding = true;
+    const reading = owner.readTaskFacts(sessionId, 'task-b');
+    await statusStarted;
+    const reconciling = owner.reconcileProgress(terminalProgress(fixture.taskB), () => voiceCurrent);
+    const readOutcome = retirement === 'session' ? assert.rejects(reading, /stale/) : reading;
+    const progressOutcome = retirement === null ? reconciling : assert.rejects(reconciling, /stale/);
+    await owner.select('task-a');
+    assert.equal(owner.snapshot().selected_task_id, 'task-a');
+    assert.equal(laterHistoryCalls, 0);
+    if (retirement === 'voice') voiceCurrent = false;
+    if (retirement === 'session') owner.disconnect();
+    finishStatus();
+    await readOutcome;
+    await progressOutcome;
+    if (retirement === 'session') {
+      assert.equal(owner.taskObservation(sessionId, 'task-b'), null);
+      assert.equal(laterHistoryCalls, 0);
+    } else {
+      assert.equal(owner.taskObservation(sessionId, 'task-b').connected, true);
+      assert.equal(owner.taskObservation(sessionId, 'task-b').tasks[0].state, retirement === null ? 'terminal' : 'running');
+      assert.equal(laterHistoryCalls, retirement === null ? 2 : 1);
+    }
+  });
+}
+
+test('same-head status/history disagreement leaves no shared Task observation', async () => {
+  const fixture = authoritativeFixture();
+  const owner = new FormalP3TaskExperienceOwner({ enabled: true, store: fixture.store,
+    request: async (method, params, id) => {
+      const reply = await fixture.request(method, params, id);
+      if (method === FORMAL_P3_TASK_METHODS.events) reply.result.events[1].outcome = 'cancelled';
+      return reply;
+    } });
+  await assert.rejects(owner.readTaskFacts(sessionId, 'task-a'), /current Attempt mismatch/);
+  assert.equal(owner.taskObservation(sessionId, 'task-a'), null);
+  assert.equal(owner.snapshot().selected_task_id, null);
+  assert.equal(fixture.calls.filter(call => /result|intent|mutate/.test(call.method)).length, 0);
+});
+
+test('shared Task history preserves the existing paginated UI capacity beyond 256 events', async () => {
+  const fixture = authoritativeFixture({ selectedHint: 'task-b' });
+  fixture.taskB.event_head = 300;
+  const history = Array.from({ length: 301 }, (_, seq) => event(fixture.taskB, seq,
+    seq === 0 ? 'task.accepted' : 'task.running', seq === 0 ? 'accepted' : 'running'));
+  const cursors = [];
+  const owner = new FormalP3TaskExperienceOwner({ enabled: true, store: fixture.store,
+    request: async (method, params, id) => {
+      if (method !== FORMAL_P3_TASK_METHODS.events) return fixture.request(method, params, id);
+      cursors.push(params.after_seq);
+      const page = history.slice(params.after_seq + 1, params.after_seq + 151);
+      const next = page.at(-1).seq < 300 ? page.at(-1).seq : null;
+      return envelope(id, { task_id: 'task-b', after_seq: params.after_seq, head_seq: 300,
+        events: page, has_more: next !== null, next_after_seq: next });
+    } });
+  await owner.refresh(sessionId);
+  assert.deepEqual(cursors, [-1, 149, 299]);
+  assert.equal(owner.taskObservation(sessionId, 'task-b').tasks[0].last_event_seq, 300);
+  assert.equal(owner.snapshot().tasks.find(task => task.task_id === 'task-b').replay_event_count, 301);
+});
 
 test('background Task reads share one flight without selecting or invalidating another Task', async () => {
   const fixture = authoritativeFixture();
@@ -822,7 +1103,7 @@ test('ordinary event advancement does not invalidate exact confirmation', async 
   const request = async (method, params, id) => {
     const reply = await fixture.request(method, params, id);
     if (method === FORMAL_P3_TASK_METHODS.events && params.task_id === 'task-b' && fixture.taskB.event_head === 2) {
-      reply.result.events.push(event(fixture.taskB, 2, 'task.progress', 'running', null, { progress: 'next checkpoint' }));
+      reply.result.events.push(event(fixture.taskB, 2, 'task.running', 'running', null, { progress: 'next checkpoint' }));
     }
     return reply;
   };
@@ -836,12 +1117,30 @@ test('ordinary event advancement does not invalidate exact confirmation', async 
 for (const field of ['attempt_id', 'revision']) {
   test(`first confirmation rejects changed ${field} before mutation`, async () => {
     const fixture = authoritativeFixture({ selectedHint: 'task-b' });
-    const owner = new FormalP3TaskExperienceOwner({ enabled: true, request: fixture.request, store: fixture.store });
+    const predecessor = { ...fixture.taskB };
+    const request = async (method, params, id) => {
+      const reply = await fixture.request(method, params, id);
+      if (params.task_id === 'task-b' && fixture.taskB.attempt_id === 'attempt-successor') {
+        if (method === FORMAL_P3_TASK_METHODS.status) reply.result.attempt.attempt_number = 2;
+        if (method === FORMAL_P3_TASK_METHODS.events) reply.result.events = [
+          event(predecessor, 0, 'task.accepted', 'accepted'),
+          event(predecessor, 1, 'task.running', 'running'),
+          event(predecessor, 2, 'task.terminal', 'terminal', 'completed'),
+          { ...event(fixture.taskB, 3, 'task.retry_accepted', 'accepted'), source_event_id: null,
+            causation_id: 'retry-b', details: { command_id: 'retry-b', retry_of_attempt_id: predecessor.attempt_id,
+              previous_outcome: 'completed', attempt_number: 2 } },
+          event(fixture.taskB, 4, 'task.running', 'running'),
+        ];
+      }
+      return reply;
+    };
+    const owner = new FormalP3TaskExperienceOwner({ enabled: true, request, store: fixture.store });
     await owner.refresh(sessionId);
     await owner.issue({ operation: 'task.adjust', task_id: 'task-b', adjustment: 'advance checkpoint' });
     if (field === 'attempt_id') {
       fixture.taskB.attempt_id = 'attempt-successor';
       fixture.taskB.admission.attempt_id = 'attempt-successor';
+      fixture.taskB.event_head = 4;
     }
     else fixture.taskB.revision.number += 1;
     await assert.rejects(owner.confirm(), /CONFIRMATION_STALE/);
@@ -1042,15 +1341,21 @@ test('Task-wide replay keeps previous Attempt history but projects progress only
   fixture.taskB.event_head = 3;
   const oldAttempt = { ...fixture.taskB, attempt_id: 'attempt-b-old' };
   const request = async (method, params, id) => {
-    if (method !== FORMAL_P3_TASK_METHODS.events || params.task_id !== 'task-b') return fixture.request(method, params, id);
+    if (method !== FORMAL_P3_TASK_METHODS.events || params.task_id !== 'task-b') {
+      const reply = await fixture.request(method, params, id);
+      if (method === FORMAL_P3_TASK_METHODS.status && params.task_id === 'task-b') reply.result.attempt.attempt_number = 2;
+      return reply;
+    }
     fixture.calls.push({ method, params, requestId: id });
     return envelope(id, {
       task_id: 'task-b',
       after_seq: -1,
       events: [
-        event(oldAttempt, 0, 'task.running', 'running', null, { progress: 'previous Attempt 1/2' }),
-        event(fixture.taskB, 1, 'task.accepted', 'accepted'),
-        event(oldAttempt, 2, 'task.running', 'running', null, { progress: 'late previous Attempt 2/2' }),
+        event(oldAttempt, 0, 'task.accepted', 'accepted', null, { progress: 'previous Attempt 1/2' }),
+        event(oldAttempt, 1, 'task.terminal', 'terminal', 'completed', { progress: 'previous Attempt 2/2' }),
+        { ...event(fixture.taskB, 2, 'task.retry_accepted', 'accepted'), source_event_id: null,
+          causation_id: 'retry-b', details: { command_id: 'retry-b', retry_of_attempt_id: oldAttempt.attempt_id,
+            previous_outcome: 'completed', attempt_number: 2 } },
         event(fixture.taskB, 3, 'task.running', 'running', null, { progress: 'current Attempt 1/3' }),
       ],
       head_seq: 3,
@@ -1067,7 +1372,7 @@ test('Task-wide replay keeps previous Attempt history but projects progress only
   const selected = snapshot.tasks.find(task => task.task_id === 'task-b');
   assert.equal(selected.progress, 'current Attempt 1/3');
   assert.equal(selected.replay_event_count, 4);
-  assert.deepEqual(selected.replay_event_types, ['task.running', 'task.accepted', 'task.running', 'task.running']);
+  assert.deepEqual(selected.replay_event_types, ['task.accepted', 'task.terminal', 'task.retry_accepted', 'task.running']);
 });
 
 test('concurrent refreshes fence a late predecessor without overwriting the newer authority', async () => {

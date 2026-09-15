@@ -1,4 +1,4 @@
-import { recordValue, hasExactFields, type ProductP3RetryInspection, parseProductP3RetryAdmission } from "../../features/tasks/taskOperations";
+import { recordValue, hasExactFields, PRODUCT_P3_STABLE_REASON_PATTERN, PRODUCT_P3_RETRY_INSPECTION_FAILED_REASON } from "../../features/tasks/taskOperations";
 import {
   FEATURE_LIVE_VOICE_INTEGRATED_P1,
   FEATURE_LIVE_VOICE_INTEGRATED_WEB,
@@ -7,7 +7,6 @@ import {
 import type { BrowserAudioCaptureStreamFactory } from '../../features/live-voice/formal/adapters/browserAudioIOAdapter';
 import { type FormalP3TaskExperienceSnapshot, type FormalP3TaskMutationInput } from '../../features/tasks/formalP3TaskExperience';
 import {
-  FormalTaskControlLeaf,
   type FormalTaskControlBinding,
 } from '../../features/tasks/formalTaskControlLeaf';
 import {
@@ -24,8 +23,6 @@ import { type ProductTextProgressEvent } from '../../features/tasks/productTextP
 import {
   PRODUCT_P2_NOTIFICATION_NEXT_METHOD,
   PRODUCT_P2_PRESENTATION_ACK_METHOD,
-  PRODUCT_P3_TASK_EVENTS_METHOD,
-  PRODUCT_P3_TASK_STATUS_METHOD,
   ProductWebP2ActivationOwner,
   type ProductWebP2ActivationBinding,
   type ProductWebP2ActivationSnapshot,
@@ -461,6 +458,11 @@ export type ProductVoiceTaskOrigin = Readonly<{
 
 export type ProductWebRequest = NonNullable<LiveVoiceIntegratedRoutePanelProps['request']>;
 
+export function productP3RetryInspectionFailureReason(error: unknown): string {
+  const reason = extractWebErrorReason(error);
+  return reason && PRODUCT_P3_STABLE_REASON_PATTERN.test(reason) ? reason : PRODUCT_P3_RETRY_INSPECTION_FAILED_REASON;
+}
+
 export function sameFormalTaskControlBinding(left: Readonly<FormalTaskControlBinding>, right: Readonly<FormalTaskControlBinding>): boolean {
   return (
     left.subject_id === right.subject_id &&
@@ -478,151 +480,6 @@ export function sameFormalTaskControlBinding(left: Readonly<FormalTaskControlBin
  * so a forged scope, Session, correlation, target, or attempt still fails
  * closed before the caller can expose retry or mutation controls.
  */
-export function bootstrapProductP3TaskInspectionLeaf(
-  response: unknown,
-  input: Readonly<{
-    session_id: string;
-    task_id: string;
-    expected_binding?: FormalTaskControlBinding;
-  }>,
-): FormalTaskControlLeaf {
-  const envelope = recordValue(response);
-  const result = recordValue(envelope?.result);
-  const task = recordValue(result?.task);
-  const scope = recordValue(task?.scope);
-  const required = (value: unknown, field: string): string => {
-    if (typeof value !== 'string' || !value.trim()) throw new Error(`formal task inspection ${field} is invalid`);
-    return value;
-  };
-  const observedBinding = Object.freeze({
-    subject_id: required(scope?.subject_id, 'subject_id'),
-    session_id: required(scope?.session_id, 'session_id'),
-    project_id: required(scope?.project_id, 'project_id'),
-    correlation_id: required(task?.correlation_id, 'correlation_id'),
-  });
-  if (observedBinding.session_id !== input.session_id) throw new Error('formal task inspection Session binding mismatch');
-  const expectedBinding = input.expected_binding;
-  if (
-    expectedBinding !== undefined &&
-    (observedBinding.subject_id !== required(expectedBinding.subject_id, 'expected subject_id') ||
-      observedBinding.session_id !== required(expectedBinding.session_id, 'expected session_id') ||
-      observedBinding.project_id !== required(expectedBinding.project_id, 'expected project_id') ||
-      observedBinding.correlation_id !== required(expectedBinding.correlation_id, 'expected correlation_id') ||
-      !Number.isSafeInteger(expectedBinding.generation) ||
-      expectedBinding.generation <= 0)
-  ) {
-    throw new Error('formal task inspection task-control binding mismatch');
-  }
-  const binding = Object.freeze({
-    ...observedBinding,
-    generation: expectedBinding?.generation ?? 1,
-  });
-  const leaf = new FormalTaskControlLeaf({ enabled: true, binding });
-  leaf.adopt('task.status', response, {
-    connection_generation: leaf.snapshot().connection_generation,
-    command_id: null,
-    target_task_id: input.task_id,
-    events_query: null,
-  });
-  return leaf;
-}
-
-
-/**
- * Read and validate one exact retry candidate before publishing it to the live
- * leaf.  Status and full history are first reduced in an isolated probe; only
- * the already-validated event history may update the live replica, and only
- * while the caller's Session/target generation is still current.
- */
-export async function inspectProductP3RetryCandidate(
-  input: Readonly<{
-    request: ProductWebRequest;
-    leaf: FormalTaskControlLeaf;
-    session_id: string;
-    task_id: string;
-    request_nonce: string;
-    is_current: () => boolean;
-  }>,
-): Promise<ProductP3RetryInspection> {
-  const taskId = input.task_id.trim();
-  if (!taskId || !input.session_id || !input.request_nonce || !input.is_current()) {
-    throw new Error('formal task retry inspection is stale or incomplete');
-  }
-  const initialSnapshot = input.leaf.snapshot();
-  if (!initialSnapshot.connected || initialSnapshot.binding.session_id !== input.session_id) {
-    throw new Error('formal task retry inspection does not own the exact Session binding');
-  }
-  const ownedGeneration = initialSnapshot.connection_generation;
-  const probe = new FormalTaskControlLeaf({ enabled: true, binding: initialSnapshot.binding });
-  const stillCurrent = () => input.is_current() && input.leaf.snapshot().connected && input.leaf.snapshot().connection_generation === ownedGeneration;
-  const statusResponse = await input.request(
-    PRODUCT_P3_TASK_STATUS_METHOD,
-    { session_id: input.session_id, task_id: taskId },
-    { requestId: `web-task-status-${input.request_nonce}` },
-  );
-  if (!stillCurrent()) throw new Error('formal task retry inspection became stale');
-  probe.adopt('task.status', statusResponse, {
-    connection_generation: probe.snapshot().connection_generation,
-    command_id: null,
-    target_task_id: taskId,
-    events_query: null,
-  });
-  const eventsResponse = await input.request(
-    PRODUCT_P3_TASK_EVENTS_METHOD,
-    { session_id: input.session_id, task_id: taskId, after_seq: -1 },
-    { requestId: `web-task-events-${input.request_nonce}` },
-  );
-  if (!stillCurrent()) throw new Error('formal task retry inspection became stale');
-  probe.adopt('task.events', eventsResponse, {
-    connection_generation: probe.snapshot().connection_generation,
-    command_id: null,
-    target_task_id: null,
-    events_query: { task_id: taskId, after_seq: -1 },
-  });
-  const selected = probe.snapshot().tasks.find(task => task.task_id === taskId) ?? null;
-  if (selected === null) throw new Error('formal task retry inspection returned no exact task');
-  const admission = parseProductP3RetryAdmission(statusResponse, selected);
-  const previouslyObserved = initialSnapshot.tasks.find(task => task.task_id === taskId) ?? null;
-  if (
-    previouslyObserved !== null &&
-    previouslyObserved.attempt_id !== null &&
-    previouslyObserved.attempt_number !== null &&
-    (selected.attempt_id === null ||
-      selected.attempt_number === null ||
-      selected.attempt_number < previouslyObserved.attempt_number ||
-      (selected.attempt_number === previouslyObserved.attempt_number && selected.attempt_id !== previouslyObserved.attempt_id) ||
-      (selected.attempt_id === previouslyObserved.attempt_id &&
-        previouslyObserved.last_event_seq !== null &&
-        (selected.last_event_seq === null || selected.last_event_seq < previouslyObserved.last_event_seq)) ||
-      (selected.attempt_id === previouslyObserved.attempt_id && previouslyObserved.state === 'terminal' && selected.state !== 'terminal') ||
-      (selected.attempt_id === previouslyObserved.attempt_id &&
-        previouslyObserved.state === 'terminal' &&
-        selected.state === 'terminal' &&
-        selected.outcome !== previouslyObserved.outcome))
-  ) {
-    throw new Error('formal task retry inspection cannot regress an observed successor');
-  }
-  input.leaf.adopt('task.events', eventsResponse, {
-    connection_generation: ownedGeneration,
-    command_id: null,
-    target_task_id: null,
-    events_query: { task_id: taskId, after_seq: -1 },
-  });
-  const adopted = input.leaf.snapshot().tasks.find(task => task.task_id === taskId) ?? null;
-  if (
-    adopted === null ||
-    adopted.attempt_id !== selected.attempt_id ||
-    adopted.attempt_number !== selected.attempt_number ||
-    adopted.state !== selected.state ||
-    adopted.outcome !== selected.outcome ||
-    adopted.event_head !== selected.event_head
-  ) {
-    throw new Error('formal task retry inspection lost its exact task revision');
-  }
-  return Object.freeze({ record: adopted, admission });
-}
-
-
 export function resolveProductTaskCreateOrigin(
   instruction: string,
   activeSessionId: string | null,
@@ -1629,5 +1486,5 @@ export function isCurrentProgressOwner(input: {
   );
 }
 
-export { productP3ProgressReconciliationRetryDelayMs, rememberProductP3ProgressExhaustion, recordValue, hasExactFields, PRODUCT_P3_RETRY_INSPECTION_FAILED_REASON, PRODUCT_P3_STABLE_REASON_PATTERN, parseProductP3RetryAdmission, productP3RetryInspectionFailureReason, PRODUCT_P3_TERMINAL_STATUSES, PRODUCT_P3_PROGRESS_EVENT_TYPES, productP3ProgressState, productP3ProgressOutcome, productP3TerminalStatus, PRODUCT_P3_PROGRESS_QUARANTINABLE_FAILURES, productP3ProgressFailureIsQuarantinable, reconcileProductP3ProgressEvent, PRODUCT_P3_PROGRESS_EXHAUSTED_CAPACITY, PRODUCT_P3_PROGRESS_RECONCILIATION_RETRY_MS, PRODUCT_P3_PROGRESS_RECONCILIATION_MAX_ATTEMPTS } from "../../features/tasks/taskOperations";
+export { productP3ProgressReconciliationRetryDelayMs, rememberProductP3ProgressExhaustion, recordValue, hasExactFields, PRODUCT_P3_RETRY_INSPECTION_FAILED_REASON, PRODUCT_P3_STABLE_REASON_PATTERN, parseProductP3RetryAdmission, PRODUCT_P3_TERMINAL_STATUSES, PRODUCT_P3_PROGRESS_EVENT_TYPES, productP3ProgressState, productP3ProgressOutcome, productP3TerminalStatus, PRODUCT_P3_PROGRESS_QUARANTINABLE_FAILURES, productP3ProgressFailureIsQuarantinable, reconcileProductP3ProgressEvent, PRODUCT_P3_PROGRESS_EXHAUSTED_CAPACITY, PRODUCT_P3_PROGRESS_RECONCILIATION_RETRY_MS, PRODUCT_P3_PROGRESS_RECONCILIATION_MAX_ATTEMPTS } from "../../features/tasks/taskOperations";
 export type { ProductP3RetryAdmission, ProductP3RetryInspection, ProductP3TerminalStatus, ProductP3MutationStatus } from "../../features/tasks/taskOperations";

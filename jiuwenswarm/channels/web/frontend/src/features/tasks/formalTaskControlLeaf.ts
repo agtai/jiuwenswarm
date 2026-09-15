@@ -418,6 +418,7 @@ export function prepareFormalTaskMutation(
 }
 
 export class FormalTaskControlLeaf {
+  readonly eventCapacity: number;
   readonly #enabled: boolean;
   readonly #binding: FormalTaskControlBinding;
   #connected = true;
@@ -430,7 +431,11 @@ export class FormalTaskControlLeaf {
   readonly #submittedMutations = new Map<string, SubmittedMutationBinding>();
   readonly #progressReceipts = new Map<string, string>();
 
-  constructor(input: { enabled: boolean; binding: FormalTaskControlBinding }) {
+  constructor(input: { enabled: boolean; binding: FormalTaskControlBinding; event_capacity?: number }) {
+    this.eventCapacity = input.event_capacity ?? FORMAL_TASK_CONTROL_LIMITS.max_events_per_response;
+    if (!Number.isSafeInteger(this.eventCapacity) || this.eventCapacity < 1 || this.eventCapacity > 5_000) {
+      throw new Error('formal task event capacity is invalid');
+    }
     this.#enabled = input.enabled === true;
     this.#binding = freezeBinding(input.binding);
   }
@@ -784,9 +789,17 @@ export class FormalTaskControlLeaf {
     ) {
       throw new Error('formal progress origin binding mismatch');
     }
+    this.assertProgressReceiptAvailable(origin.progress_event_id, origin.source_event_id);
     const receipt = text(origin.progress_event_id, 'progress.progress_event_id');
+    this.#progressReceipts.set(receipt, origin.source_event_id);
+    return this.snapshot();
+  }
+
+  assertProgressReceiptAvailable(progressEventId: string, sourceEventId: string): void {
+    const receipt = text(progressEventId, 'progress.progress_event_id');
+    text(sourceEventId, 'progress.source_event_id');
     const retainedSource = this.#progressReceipts.get(receipt);
-    if (retainedSource !== undefined && retainedSource !== origin.source_event_id) {
+    if (retainedSource !== undefined && retainedSource !== sourceEventId) {
       throw new Error('formal progress receipt conflicts with its TaskEvent source');
     }
     if (
@@ -795,13 +808,11 @@ export class FormalTaskControlLeaf {
     ) {
       throw new Error('formal progress receipt capacity is exhausted');
     }
-    this.#progressReceipts.set(receipt, origin.source_event_id);
-    return this.snapshot();
   }
 
   #adoptEvents(result: JsonObject, contextInput: FormalTaskEventsQueryContext | undefined): void {
     if (!Array.isArray(result.events)) throw new Error('task.events result is invalid');
-    if (result.events.length > FORMAL_TASK_CONTROL_LIMITS.max_events_per_response) {
+    if (result.events.length > this.eventCapacity) {
       throw new Error('task.events result exceeds the formal event capacity');
     }
     if (contextInput === undefined) throw new Error('task.events query context is required');

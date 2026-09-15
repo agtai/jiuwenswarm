@@ -1,7 +1,6 @@
 // Shared task retry and authoritative progress reconciliation; no audio owner.
-import { FormalTaskControlLeaf, isFormalTaskRetryEligible, type FormalTaskControlRecord, type FormalTaskState } from './formalTaskControlLeaf';
+import { FormalTaskControlLeaf, isFormalTaskRetryEligible, type FormalTaskControlRecord, type FormalTaskState } from './formalTaskControlLeaf.js';
 import type { ProductTextProgressEvent } from './productTextProgress';
-import { extractWebErrorReason } from '../../services/webClient';
 import type { WebRequestOptions } from '../../types';
 type ProductWebRequest = (method: string, params?: Record<string, unknown>, options?: WebRequestOptions) => Promise<unknown>;
 const PRODUCT_P3_TASK_EVENTS_METHOD = 'live_voice.task.events';
@@ -91,12 +90,6 @@ export function parseProductP3RetryAdmission(response: unknown, record: Readonly
     attempt_id: raw.attempt_id as string | null,
     attempt_number: raw.attempt_number as number | null,
   });
-}
-
-
-export function productP3RetryInspectionFailureReason(error: unknown): string {
-  const reason = extractWebErrorReason(error);
-  return reason && PRODUCT_P3_STABLE_REASON_PATTERN.test(reason) ? reason : PRODUCT_P3_RETRY_INSPECTION_FAILED_REASON;
 }
 
 
@@ -251,7 +244,7 @@ export async function reconcileProductP3ProgressEvent(
       events: Object.freeze(evidenceEvents),
     }),
   });
-  const evidenceProbe = new FormalTaskControlLeaf({ enabled: true, binding: initialSnapshot.binding });
+  const evidenceProbe = new FormalTaskControlLeaf({ enabled: true, binding: initialSnapshot.binding, event_capacity: input.leaf.eventCapacity });
   evidenceProbe.adopt('task.events', evidenceResponse, {
     connection_generation: evidenceProbe.snapshot().connection_generation,
     command_id: null,
@@ -270,7 +263,7 @@ export async function reconcileProductP3ProgressEvent(
     throw new Error('formal product progress conflicts with authoritative task.events truth');
   }
 
-  const headProbe = new FormalTaskControlLeaf({ enabled: true, binding: initialSnapshot.binding });
+  const headProbe = new FormalTaskControlLeaf({ enabled: true, binding: initialSnapshot.binding, event_capacity: input.leaf.eventCapacity });
   headProbe.adopt('task.events', eventsResponse, {
     connection_generation: headProbe.snapshot().connection_generation,
     command_id: null,
@@ -291,6 +284,19 @@ export async function reconcileProductP3ProgressEvent(
   input.before_adopt?.(selected);
   if (!stillCurrent()) throw new Error('formal product progress reconciliation became stale');
 
+  // Receipt rejection must happen before committing history to the shared
+  // Task facts. No asynchronous boundary separates this check and both adopts.
+  const progressOrigin = {
+    task_id: event.task_id, correlation_id: event.correlation_id,
+    source_event_id: event.source_event.event_id, source_event_seq: event.source_event.seq,
+    progress_event_id: event.progress_event.event_id, progress_causation_id: event.progress_event.causation_id ?? '',
+    state, outcome: progressOutcome,
+  };
+  if (selectedLastEventSeq === event.source_event.seq) {
+    headProbe.adoptProgress(progressOrigin, headProbe.snapshot().connection_generation);
+    input.leaf.assertProgressReceiptAvailable(event.progress_event.event_id, event.source_event.event_id);
+  }
+
   input.leaf.adopt('task.events', eventsResponse, {
     connection_generation: ownedConnectionGeneration,
     command_id: null,
@@ -298,19 +304,7 @@ export async function reconcileProductP3ProgressEvent(
     events_query: { task_id: event.task_id, after_seq: -1 },
   });
   if (selectedLastEventSeq === event.source_event.seq) {
-    input.leaf.adoptProgress(
-      {
-        task_id: event.task_id,
-        correlation_id: event.correlation_id,
-        source_event_id: event.source_event.event_id,
-        source_event_seq: event.source_event.seq,
-        progress_event_id: event.progress_event.event_id,
-        progress_causation_id: event.progress_event.causation_id ?? '',
-        state,
-        outcome: progressOutcome,
-      },
-      ownedConnectionGeneration,
-    );
+    input.leaf.adoptProgress(progressOrigin, ownedConnectionGeneration);
   }
   const adopted = input.leaf.snapshot().tasks.find(task => task.task_id === event.task_id) ?? null;
   if (

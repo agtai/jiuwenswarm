@@ -22,9 +22,6 @@ import {
 } from '../../features/live-voice/formal/browserAudioDeviceSelection';
 import type { FormalP3TaskExperienceOwner, FormalP3TaskExperienceSnapshot } from '../../features/tasks/formalP3TaskExperience';
 import { useFormalTaskSession } from '../../features/tasks/FormalTaskSessionProvider';
-import {
-  FormalTaskControlLeaf,
-} from '../../features/tasks/formalTaskControlLeaf';
 import { parseNativeGeneratedText } from '../../features/live-voice/formal/nativeGeneratedText';
 import { nativeWorkBindingMatches, nativeWorkSnapshotAdvances, type NativeWorkStateSnapshot } from '../../features/live-voice/formal/nativeWorkState';
 import {
@@ -82,7 +79,6 @@ import {
   PRODUCT_PLAYOUT_DEFERRED_TO_SPEAKER,
   PRODUCT_TASK_NOTIFICATION_PLAYOUT_TIMEOUT_MS,
   awaitProductTaskNotificationPlayout,
-  bootstrapProductP3TaskInspectionLeaf,
   capturedTaskNotificationDeadlineAction,
   capturedTaskNotificationRequiresAnnouncementRequeue,
   classifyProductP2Notification,
@@ -93,13 +89,11 @@ import {
   durablePresentationAckMatches,
   foregroundPresentationFenceMatchesResponse,
   hasDurableProductVoiceSession,
-  inspectProductP3RetryCandidate,
   isCurrentProgressOwner,
   isHarmlessCompletedBargeInError,
   isStaleProductResponseError,
   normalizeProductP1StatusForP2Retirement,
   playoutDeferredToSpeaker,
-  parseProductP3RetryAdmission,
   productForegroundPresentationIdentity,
   productP2NotificationRepollDelayMs,
   productP2NotificationTransportBlockedByP1,
@@ -117,7 +111,6 @@ import {
   recognizedSpeechConfirmationAuthorityMatches,
   recognizedSpeechConfirmationMatches,
   recognizedVoiceMatchesProductBinding,
-  reconcileProductP3ProgressEvent,
   recordValue,
   rememberProductP3ProgressExhaustion,
   retainBoundedPresentedProductResponse,
@@ -157,13 +150,11 @@ export {
   PRODUCT_TASK_NOTIFICATION_PLAYOUT_TIMEOUT_MS,
   awaitProductTaskNotificationPlayout,
   bindProductVoiceTaskOrigin,
-  bootstrapProductP3TaskInspectionLeaf,
   capturedTaskNotificationDeadlineAction,
   capturedTaskNotificationRequiresAnnouncementRequeue,
   classifyProductP2Notification,
   createProductP2ActivationOwner,
   hasDurableProductVoiceSession,
-  inspectProductP3RetryCandidate,
   isCurrentProgressOwner,
   normalizeProductP1StatusForP2Retirement,
   parseProductP3RetryAdmission,
@@ -324,7 +315,6 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const voiceProgressOwnersRef = useRef(new Map<string, {
     binding: Readonly<ProductWebP2ActivationBinding>;
     owner: ProductWebP3ProgressOwner;
-    leaf: FormalTaskControlLeaf | null;
     closed: boolean;
     terminal_presented: boolean;
     notification_chinese: boolean;
@@ -464,7 +454,6 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const p1VoiceCaptureBindingRef = useRef<Readonly<NonNullable<ProductWebP2ActivationSnapshot['binding']>> | null>(null);
   const recognizedSpeechConfirmationRef = useRef<RecognizedSpeechConfirmation | null>(null);
   const editedVoiceDraftConfirmationRef = useRef<EditedVoiceDraftConfirmation | null>(null);
-  const formalTaskControlLeafRef = useRef<FormalTaskControlLeaf | null>(null);
   const activeSessionRef = useRef<string | null>(props.activeSessionId);
   const isConnectedRef = useRef(props.isConnected);
   const mountedRef = useRef(true);
@@ -2572,18 +2561,19 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       void (async () => {
         while (!effectClosed && mountedRef.current && activeSessionRef.current === ownedSessionId && progressAckOwnerRef.current === owner) {
           const ownedProgress = (event: Readonly<ProductTextProgressEvent>) => {
+            const taskOwner = taskExperienceOwnerRef.current;
+            if (taskOwner?.taskObservation(ownedSessionId, event.task_id)?.connected !== true) return null;
             const voice = voiceProgressOwnersRef.current.get(event.task_id);
             if (voice !== undefined && voiceProgressIsCurrent(voice)) {
               const activation = voice.owner.snapshot();
-              if (activation.status === 'active' && activation.binding !== null && voice.leaf !== null
+              if (activation.status === 'active' && activation.binding !== null
                 && progressMatchesOwnedBinding(event, activation.binding, ownedSessionId)) {
-                return { activation, leaf: voice.leaf, voice };
+                return { activation, taskOwner, voice };
               }
             }
             const activation = progressActivationOwnerRef.current?.snapshot();
-            const leaf = formalTaskControlLeafRef.current;
-            if (activation?.status === 'active' && activation.binding !== null && leaf !== null
-              && progressMatchesOwnedBinding(event, activation.binding, ownedSessionId)) return { activation, leaf, voice: null };
+            if (activation?.status === 'active' && activation.binding !== null
+              && progressMatchesOwnedBinding(event, activation.binding, ownedSessionId)) return { activation, taskOwner, voice: null };
             return null;
           };
           for (const deliveryId of reconciliationFailures.keys()) {
@@ -2597,7 +2587,6 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             )[0];
           if (parsed === undefined) return;
           const owned = ownedProgress(parsed)!;
-          const leaf = owned.leaf;
           const candidate = adoptParsedProductTextProgressEvent(progressRef.current, parsed, ownedSessionId);
           if (candidate === progressRef.current && progressRef.current?.delivery_id === parsed.delivery_id) {
             try {
@@ -2636,7 +2625,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               mountedRef.current &&
               activeSessionRef.current === ownedSessionId &&
               progressAckOwnerRef.current === owner &&
-              currentOwned?.leaf === leaf &&
+              currentOwned?.taskOwner === owned.taskOwner && currentOwned?.voice === owned.voice &&
               (owned.voice !== null || (
                 p3ProgressReconciliationGenerationRef.current === reconciliationGeneration &&
                 progressOwnerEpochRef.current === ownerEpoch &&
@@ -2645,14 +2634,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             );
           };
           try {
-            const record = await reconcileProductP3ProgressEvent({
-              request: productRequest,
-              leaf,
-              event: parsed,
-              session_id: ownedSessionId,
-              request_nonce: `${Date.now()}-${reconciliationGeneration}-${parsed.source_event.seq}`,
-              is_current: isCurrent,
-            });
+            const record = await owned.taskOwner.reconcileProgress(parsed, isCurrent);
             if (!isCurrent()) return;
             const fallbackMessage = await terminalTextFallbackMessage(
               parsed,
@@ -4229,15 +4211,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     p3ProgressReconciliationGenerationRef.current += 1;
     recognizedVoiceRef.current = null;
     activeVoiceResponseRef.current = null;
-    formalTaskControlLeafRef.current?.disconnect();
-    formalTaskControlLeafRef.current = null;
     progressTaskTargetRef.current = null;
     recoveredP3TaskTargetRef.current = null;
     adoptCreatedProgressRoute(null);
     setTaskRecoveryReason(null);
-    return () => {
-      formalTaskControlLeafRef.current?.disconnect();
-    };
   }, [props.activeSessionId]);
 
   useEffect(() => {
@@ -4262,44 +4239,34 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const recoveryIdentity = `${sessionId}\u0000${recovered.task_control_binding.correlation_id}\u0000${recovered.task_id}`;
     if (recoveredP3TaskTargetRef.current === recoveryIdentity) return;
     recoveredP3TaskTargetRef.current = recoveryIdentity;
-    const leaf = new FormalTaskControlLeaf({ enabled: true, binding: recovered.task_control_binding });
+    const taskOwner = taskExperienceOwnerRef.current;
+    if (taskOwner === null) return;
     const recoveryGeneration = p3ProgressReconciliationGenerationRef.current + 1;
     p3ProgressReconciliationGenerationRef.current = recoveryGeneration;
     let cancelled = false;
     const isCurrent = () =>
       !cancelled &&
+      taskExperienceOwnerRef.current === taskOwner &&
       mountedRef.current &&
       props.isConnected &&
       activeSessionRef.current === sessionId &&
       recoveredP3TaskTargetRef.current === recoveryIdentity &&
       p3ProgressReconciliationGenerationRef.current === recoveryGeneration;
-    void inspectProductP3RetryCandidate({
-      request: productRequest,
-      leaf,
-      session_id: sessionId,
-      task_id: recovered.task_id,
-      request_nonce: `web-task-refresh-${Date.now()}-${recoveryGeneration}`,
-      is_current: isCurrent,
-    })
+    void taskOwner.readTaskFacts(sessionId, recovered.task_id, isCurrent, recovered.task_control_binding)
       .then(() => {
         if (!isCurrent()) return;
         setTaskRecoveryReason(null);
-        formalTaskControlLeafRef.current?.disconnect();
-        formalTaskControlLeafRef.current = leaf;
         progressDrainRef.current?.();
         progressTaskTargetRef.current = recovered.task_id;
         adoptCreatedProgressRoute(Object.freeze({ task_id: recovered.task_id, correlation_id: recovered.correlation_id, origin: null }));
       })
       .catch(error => {
         if (!isCurrent()) return;
-        leaf.disconnect();
         recoveredP3TaskTargetRef.current = null;
         setTaskRecoveryReason(stableProductTextReason(error, 'PRODUCT_P3_TASK_TARGET_RECOVERY_REQUIRED'));
       });
     return () => {
       cancelled = true;
-      leaf.disconnect();
-      if (formalTaskControlLeafRef.current === leaf) formalTaskControlLeafRef.current = null;
       if (recoveredP3TaskTargetRef.current === recoveryIdentity) recoveredP3TaskTargetRef.current = null;
     };
   }, [correlationId, p2JournalState, productRequest, props.activeSessionId, props.isConnected]);
@@ -4347,12 +4314,6 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   useEffect(() => {
     if (!props.isConnected) {
       p3ProgressReconciliationGenerationRef.current += 1;
-      formalTaskControlLeafRef.current?.disconnect();
-      return;
-    }
-    const leaf = formalTaskControlLeafRef.current;
-    if (leaf !== null && !leaf.snapshot().connected) {
-      leaf.reconnect(leaf.snapshot().binding);
     }
   }, [props.isConnected]);
 
@@ -4513,7 +4474,6 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const closeVoiceProgress = (taskId: string, entry: NonNullable<ReturnType<typeof voiceProgressOwnersRef.current.get>>) => {
     entry.closed = true;
     entry.retry_abort.abort();
-    entry.leaf?.disconnect();
     return entry.owner.closeWithRetry().then(() => {
       if (voiceProgressOwnersRef.current.get(taskId) === entry) voiceProgressOwnersRef.current.delete(taskId);
     });
@@ -4551,7 +4511,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         if (snapshot.status === 'active') progressDrainRef.current?.();
       },
     });
-    const entry = { binding, owner, leaf: null as FormalTaskControlLeaf | null, closed: false, terminal_presented: false, notification_chinese: false,
+    const entry = { binding, owner, closed: false, terminal_presented: false, notification_chinese: false,
       notification_name: null as string | null,
       voice_generation: voiceLoopGenerationRef.current, retry_abort: new AbortController(), ready: Promise.resolve() };
     voiceProgressOwnersRef.current.set(taskId, entry);
@@ -4568,15 +4528,6 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             () => isCurrent() && taskExperienceOwnerRef.current === taskOwner);
           if (!isCurrent()) throw new Error('PRODUCT_VOICE_TASK_PROGRESS_STALE');
           const response = facts.status_response;
-          entry.leaf = bootstrapProductP3TaskInspectionLeaf(response, { session_id: binding.session_id, task_id: taskId });
-          entry.leaf.adopt('task.events', facts.events_response, {
-            connection_generation: entry.leaf.snapshot().connection_generation,
-            command_id: null, target_task_id: null,
-            events_query: { task_id: taskId, after_seq: -1 },
-          });
-          const observed = entry.leaf.snapshot().tasks.find(task => task.task_id === taskId);
-          if (observed === undefined) throw new Error('formal task inspection returned no exact task');
-          parseProductP3RetryAdmission(response, observed);
           const task = recordValue(recordValue(recordValue(response)?.result)?.task);
           const instruction = recordValue(task?.spec)?.instruction;
           const name = recordValue(task?.spec)?.name;
@@ -4590,8 +4541,6 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           const reason = extractWebErrorReason(error) ?? recordValue(error)?.code;
           if (!isCurrent() || attempt >= PRODUCT_P3_CREATED_TASK_BOOTSTRAP_DELAYS_MS.length
             || !['REQUEST_TIMEOUT', 'UNAVAILABLE', 'PRODUCTION_TASK_AUTHORITY_PROJECTION_MISMATCH'].includes(String(reason ?? ''))) throw error;
-          entry.leaf?.disconnect();
-          entry.leaf = null;
           await (props.p3RetryInspectionWait ?? defaultP3RetryInspectionWait)(
             PRODUCT_P3_CREATED_TASK_BOOTSTRAP_DELAYS_MS[attempt]!, entry.retry_abort.signal);
           if (!isCurrent()) throw new Error('PRODUCT_VOICE_TASK_PROGRESS_STALE');
@@ -4675,7 +4624,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         await ensureVoiceTaskProgress(taskId, binding);
         if (!isCurrentSession()) return false;
         const entry = voiceProgressOwnersRef.current.get(taskId);
-        const snapshot = entry?.leaf?.snapshot();
+        const snapshot = taskExperienceOwnerRef.current?.taskObservation(binding.session_id, taskId);
         if (entry !== undefined && voiceProgressIsCurrent(entry) && snapshot?.connected
             && snapshot.tasks.some(task => task.task_id === taskId)) {
           const taskBinding = snapshot.binding;

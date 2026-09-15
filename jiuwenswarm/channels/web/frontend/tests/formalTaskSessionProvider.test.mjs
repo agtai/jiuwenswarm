@@ -178,7 +178,7 @@ test('Host polling refreshes a live task after the Voice consumer detaches', asy
     state: 'running',
     outcome: null,
     queued: false,
-    event_head: 0,
+    event_head: 1,
     revision: { number: 1, predecessor_task_id: null },
     successor_task_id: null,
   };
@@ -189,27 +189,31 @@ test('Host polling refreshes a live task after the Voice consumer detaches', asy
       method === 'live_voice.task.list'
         ? { tasks: [task], has_more: false, next_cursor: null, supported_operations: [] }
         : method === 'live_voice.task.status'
-          ? { task, supported_operations: [] }
+          ? { task, supported_operations: [],
+              attempt: { task_id: task.task_id, attempt_id: task.attempt_id, attempt_number: 1, state: task.state, outcome: task.outcome },
+              retry_admission: { task_id: task.task_id, eligible: false, reason: 'TASK_RETRY_STATE_CONFLICT', attempt_id: null, attempt_number: null } }
           : method === 'live_voice.task.events'
             ? {
                 task_id: task.task_id,
                 after_seq: -1,
-                head_seq: 0,
+                head_seq: 1,
                 has_more: false,
                 next_after_seq: null,
-                events: [
-                  {
+                events: ['accepted', 'running'].map((state, seq) => ({
                     correlation_id: task.correlation_id,
                     scope: task.scope,
                     task_id: task.task_id,
                     attempt_id: task.attempt_id,
-                    seq: 0,
-                event_type: 'task.running',
-                source_event_id: 'event-running',
-                    state: 'running',
+                    seq,
+                    event_id: `event-${state}`,
+                    event_type: `task.${state}`,
+                    producer: 'task_core',
+                    source_event_id: seq === 0 ? null : 'source-running',
+                    causation_id: seq === 0 ? 'create-live' : 'source-running',
+                    state,
                     outcome: null,
-                  },
-                ],
+                    details: {},
+                  })),
               }
             : method === 'live_voice.task.result'
               ? { task_id: task.task_id, availability: 'not_ready', task_result: null }
