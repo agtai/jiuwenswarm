@@ -19,7 +19,7 @@ import { UpdatePanel } from './components/UpdatePanel';
 import { DocWorkbench } from '../../../../extensions/co_scribe/frontend/DocWorkbench';
 import { CO_SCRIBE_PLUGIN_ID } from '../../../../extensions/co_scribe/frontend/pluginId';
 import { useDocWorkbenchStore } from '../../../../extensions/co_scribe/frontend/stores/docWorkbenchStore';
-import { OPEN_DOC_EVENT, consumePendingOpenDoc } from '../../../../extensions/co_scribe/frontend/features/clouddoc/openDocSignal';
+import { OPEN_DOC_EVENT, SHOW_WORKBENCH_EVENT, consumePendingOpenDoc } from '../../../../extensions/co_scribe/frontend/features/clouddoc/openDocSignal';
 import { ExternalCliInstallDialog, type ExternalCliInstallStatuses } from './components/ExternalCliInstallDialog';
 import { PersonalContextPanel } from './components/PersonalContext';
 import { SettingsPage } from './features/settings/SettingsPage';
@@ -190,7 +190,7 @@ function normalizeConfigBoolean(value: unknown): boolean {
   );
 }
 
-type MainNavKey = SidebarNavKey | 'connectorMarket' | ApplicationPluginNavKey;
+type MainNavKey = SidebarNavKey | 'connectorMarket' | 'workbench' | ApplicationPluginNavKey;
 
 type LoadedHistoryPage = {
   pageIdx: number;
@@ -1611,7 +1611,7 @@ function AppContent({
             providerName: row?.provider_name,
           });
           locate();
-          setActiveNav('chat');
+          setActiveNav('workbench');
         })
         .catch(() => {
           // list_docs itself failed. The id is still all Google needs, so a Google-shaped
@@ -1627,11 +1627,18 @@ function AppContent({
             provider: '',
           });
           locate();
-          setActiveNav('chat');
+          setActiveNav('workbench');
         });
     };
     window.addEventListener(OPEN_DOC_EVENT, onOpenDoc);
     return () => window.removeEventListener(OPEN_DOC_EVENT, onOpenDoc);
+  }, []);
+
+  // A return to a document that is already a tab: nothing to open, just the page.
+  useEffect(() => {
+    const onShow = () => setActiveNav('workbench');
+    window.addEventListener(SHOW_WORKBENCH_EVENT, onShow);
+    return () => window.removeEventListener(SHOW_WORKBENCH_EVENT, onShow);
   }, []);
 
   const clearRestartAutoCloseTimer = useCallback(() => {
@@ -3244,23 +3251,26 @@ function AppContent({
     && missingSessionId === routeSessionId
     && isConversationMissing(routeSessionId, true, sessions);
   const showConversationNotFound = route.kind === 'not-found' || routeSessionMissing;
-  // The workbench takes the whole chat view: the conversation sidebar (the "工作"
-  // column) folds away with it, as the owner's layout has only the icon rail on
-  // the left; 退出编辑 brings the sidebar back.
-  // A new conversation counts: clicking "open in the workbench" from the new-task
-  // home used to hide the workbench silently, which reads as a dead click. The
-  // composer below the document is the session's own, and sending the first
-  // message from there promotes the new conversation exactly as the chat view
-  // does, so the workbench stays up across the promotion (verified live).
+  // The workbench is its own page on the icon rail, listed while the current
+  // session has a document open and closable from there. It used to replace the
+  // chat view under "工作", which took the conversation away with the sidebar;
+  // now the chat stays a chat, and the workbench is a place one goes to.
+  // A new conversation counts: the composer below the document is the session's
+  // own, and sending the first message from there promotes the new conversation
+  // exactly as the chat view does; the tabs are adopted across the promotion.
   // Everything the workbench renders is co-scribe UI: turning the plugin off
-  // takes it away wholesale, tabs and all. The workbench is not a nav page, so
-  // it has no contribution point of its own yet -- but its enabled flag is read
-  // from the same manifest entry that decides whether the Docs page is listed,
-  // so the two can never disagree.
+  // takes it away wholesale, tabs and all. Its enabled flag is read from the
+  // same manifest entry that decides whether the Docs page is listed, so the two
+  // can never disagree.
   const coScribeEnabled = applicationPlugins.some(
     (plugin) => plugin.plugin_id === CO_SCRIBE_PLUGIN_ID && plugin.enabled !== false,
   );
   const docWorkbenchShown = coScribeEnabled && docWorkbenchOpen && !showConversationNotFound && !!sessionId;
+  // The page goes with its last tab, or with 退出编辑: standing on a page that no
+  // longer exists would show an empty main column with nothing to do on it.
+  useEffect(() => {
+    if (activeNav === 'workbench' && !docWorkbenchShown) setActiveNav('chat');
+  }, [activeNav, docWorkbenchShown]);
 const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFound && !shouldFullscreen;
   const isNewSessionPromotion = Boolean(sessionId && sessionIdsCreatedInThisPageRef.current.has(sessionId));
   const composerFocusKey = showConversationNotFound ? null : `${sessionId}:${composerFocusNonce}`;
@@ -3289,6 +3299,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
         showNewSession={false}
         hiddenNavItems={hiddenNavItems}
         applicationPlugins={visibleApplicationPlugins}
+        workbench={{ visible: docWorkbenchShown, onClose: () => useDocWorkbenchStore.getState().exit() }}
       />
 
       {modelSetupGuideStep !== null ? (
@@ -3300,7 +3311,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
       ) : null}
 
       {/* Main Content */}
-      <main className={`content ${activeNav === 'chat' ? 'content--chat' : ''} ${effectiveTeamAreaExpanded ? 'content--team-expanded' : ''}`}>
+      <main className={`content ${activeNav === 'chat' || activeNav === 'workbench' ? 'content--chat' : ''} ${effectiveTeamAreaExpanded ? 'content--team-expanded' : ''}`}>
         {configError && (
           <div className="card mb-4" data-testid="app-config-error">
             <div className="text-sm text-text-muted">
@@ -3316,7 +3327,6 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
         {activeNav === 'chat' && (
           <>
             <div className="chat-layout flex-1 flex min-h-0 overflow-hidden">
-              {!docWorkbenchShown && (
               <ConversationSidebar
                 activeSessionId={sessionId === NEW_CONVERSATION_ID ? null : sessionId}
                 onNew={(options) => requestSessionNavigation('new', options)}
@@ -3328,31 +3338,9 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                 floating={conversationSidebarFloating}
                 onToggleCollapse={() => setConversationSidebarCollapsed((v) => !v)}
               />
-              )}
-              {docWorkbenchShown && (
-                <DocWorkbench
-                  onUserAnswer={handleUserAnswer}
-                  composer={{
-                    onSubmit: handleSendMessage,
-                    onEnsureSession: ensureApplicationPluginSession,
-                    onInputIntent: kvCacheAffinityEnabled ? handleKVCInputIntent : undefined,
-                    onPersistMedia: handlePersistMedia,
-                    onPersistDocuments: handlePersistDocuments,
-                    onInterrupt: handleInterrupt,
-                    onCancel: handleCancel,
-                    onSwitchMode: handleSwitchMode,
-                    isProcessing,
-                    permissionsEnabled: serverConfig?.permissions_enabled !== 'false',
-                    onSavePermission: savePermissionSilent,
-                    onSetGoal: setGoalObjective,
-                    onClearGoal: handleClearGoal,
-                    onDrainTaskQueueIfIdle: drainTaskQueueIfIdle,
-                  }}
-                />
-              )}
               <div
                 className={`chat-workspace flex-1 flex min-h-0 overflow-hidden ${insetTrajectoryFloatingTasks ? 'chat-workspace--trajectory-floating-tools' : ''}`}
-                style={docWorkbenchShown ? { display: 'none' } : { position: 'relative' }}
+                style={{ position: 'relative' }}
               >
                 {showConversationNotFound && (
                   <div className="flex-1 flex flex-col items-center justify-center gap-4" data-testid="app-conversation-not-found">
@@ -3583,6 +3571,29 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
               externalCliDetectResults={externalCliDetectResults}
               onExternalCliDetectResultsChange={setExternalCliDetectResults}
               initialModuleId={requestedSettingsModuleId ?? undefined}
+            />
+          </div>
+        )}
+        {activeNav === 'workbench' && docWorkbenchShown && (
+          <div className="chat-layout flex-1 flex min-h-0 overflow-hidden" data-testid="app-workbench-page">
+            <DocWorkbench
+              onUserAnswer={handleUserAnswer}
+              composer={{
+                onSubmit: handleSendMessage,
+                onEnsureSession: ensureApplicationPluginSession,
+                onInputIntent: kvCacheAffinityEnabled ? handleKVCInputIntent : undefined,
+                onPersistMedia: handlePersistMedia,
+                onPersistDocuments: handlePersistDocuments,
+                onInterrupt: handleInterrupt,
+                onCancel: handleCancel,
+                onSwitchMode: handleSwitchMode,
+                isProcessing,
+                permissionsEnabled: serverConfig?.permissions_enabled !== 'false',
+                onSavePermission: savePermissionSilent,
+                onSetGoal: setGoalObjective,
+                onClearGoal: handleClearGoal,
+                onDrainTaskQueueIfIdle: drainTaskQueueIfIdle,
+              }}
             />
           </div>
         )}

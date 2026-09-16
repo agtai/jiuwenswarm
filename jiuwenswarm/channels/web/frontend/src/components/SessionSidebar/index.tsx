@@ -6,6 +6,7 @@
 
 import { useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
+import { FileText, X } from 'lucide-react';
 import './SessionSidebar.css';
 import PlusIcon from '../../assets/sidebar/plus.svg?react';
 import logoIcon from '/logo.svg';
@@ -21,7 +22,7 @@ import type {
   ApplicationPluginNavKey,
 } from '../../applicationPlugins/types';
 
-type MainNavKey = SidebarNavKey | 'connectorMarket' | ApplicationPluginNavKey;
+type MainNavKey = SidebarNavKey | 'connectorMarket' | 'workbench' | ApplicationPluginNavKey;
 
 interface SessionSidebarProps {
   activeNav: MainNavKey;
@@ -30,6 +31,12 @@ interface SessionSidebarProps {
   showNewSession?: boolean;
   hiddenNavItems?: MainNavKey[];
   applicationPlugins?: ApplicationPluginContribution[];
+  /**
+   * The document workbench, listed only while a document is open: a page that
+   * exists because of something the person did, not a fixture of the rail, so
+   * it can be closed from here and goes when its last tab does.
+   */
+  workbench?: { visible: boolean; onClose: () => void };
 }
 
 interface NavItem {
@@ -92,6 +99,7 @@ export function SessionSidebar({
   showNewSession = true,
   hiddenNavItems = [],
   applicationPlugins = [],
+  workbench,
 }: SessionSidebarProps) {
   const { t } = useTranslation();
 
@@ -176,6 +184,30 @@ export function SessionSidebar({
       )}
 
       {renderNavItems(visibleSystemNavItems)}
+
+      {workbench?.visible && (
+        <div className="icon-rail-nav-item__closable" data-testid="session-sidebar-workbench">
+          <button
+            className={`icon-rail-nav-item${activeNav === 'workbench' ? ' icon-rail-nav-item--active' : ''}`}
+            onClick={() => handleNavClick('workbench')}
+            data-testid="session-sidebar-nav-item"
+            data-variant="workbench"
+          >
+            <span className="icon-rail-nav-item__icon"><FileText aria-hidden size={16} /></span>
+            <span className="icon-rail-nav-item__label">{t('nav.workbench')}</span>
+          </button>
+          <button
+            type="button"
+            className="icon-rail-nav-item__close"
+            onClick={workbench.onClose}
+            aria-label={t('docs.workbench.exit')}
+            title={t('docs.workbench.exit')}
+            data-testid="session-sidebar-workbench-close"
+          >
+            <X size={10} />
+          </button>
+        </div>
+      )}
 
       {visiblePluginNavItems.length > 0 && (
         <div className="icon-rail-divider" data-testid="session-sidebar-plugin-divider" />

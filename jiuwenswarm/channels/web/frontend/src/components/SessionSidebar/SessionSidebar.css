@@ -142,6 +142,42 @@
   background: var(--color-sidebar-nav-active);
 }
 
+/* An entry that can be closed from the rail: the close sits in the item's top
+   corner and shows on hover, so the rail reads the same as before until the
+   pointer says otherwise. The wrapper carries the item's bottom gap. */
+.icon-rail-nav-item__closable {
+  position: relative;
+  flex-shrink: 0;
+  margin-bottom: 8px;
+}
+.icon-rail-nav-item__closable .icon-rail-nav-item {
+  margin-bottom: 0;
+}
+.icon-rail-nav-item__close {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: none;
+  border-radius: 9999px;
+  background: var(--color-surface-elevated);
+  color: var(--color-text-secondary);
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity 120ms;
+}
+.icon-rail-nav-item__closable:hover .icon-rail-nav-item__close,
+.icon-rail-nav-item__close:focus-visible {
+  opacity: 1;
+}
+.icon-rail-nav-item__close:hover {
+  color: var(--color-text-primary);
+}
+
 /* Spacer pushes bottom items down */
 /* The rule between the built-in pages and the pages an installed plugin adds.
    Inset so it reads as a separator inside the rail rather than a border of it. */

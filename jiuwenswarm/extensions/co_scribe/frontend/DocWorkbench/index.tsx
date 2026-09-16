@@ -1,5 +1,5 @@
 /**
- * 文档工作台（release §14）：打开一份纳管文档时替换会话工作区。
+ * 文档工作台（release §14）：左侧图标栏上自成一页，打开纳管文档时出现，可从图标栏关闭。
  * 主列 = 标签栏 + 主界面（平台编辑器 iframe / md 编辑器）+ 底部聊天条；右栏 = 回执 / 聊天历史 / 状态。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';

@@ -28,6 +28,17 @@ export function looksLikeDocRef(id: string): boolean {
 
 export const OPEN_DOC_EVENT = 'jiuwen:clouddoc-open-doc';
 
+/**
+ * "Show the workbench as it is": no document to open, just the page to bring
+ * up. A chip for a document that is already a tab uses it, so the return trip
+ * costs no metadata lookup. App owns the nav, so App is the one consumer.
+ */
+export const SHOW_WORKBENCH_EVENT = 'jiuwen:clouddoc-show-workbench';
+
+export function requestShowWorkbench(): void {
+  window.dispatchEvent(new Event(SHOW_WORKBENCH_EVENT));
+}
+
 let pendingDocId: string | null = null;
 // A receipt the opener wants landed on, travelling with the id for the same
 // reason the id does: the workbench may not be mounted yet, and an event

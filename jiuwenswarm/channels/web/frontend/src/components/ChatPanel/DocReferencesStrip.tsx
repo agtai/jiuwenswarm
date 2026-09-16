@@ -14,7 +14,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useChatStore } from '../../stores/chatStore';
 import { webRequest } from '../../services/webClient';
-import { requestOpenDoc, looksLikeDocRef } from '../../../../../../extensions/co_scribe/frontend/features/clouddoc/openDocSignal';
+import { requestOpenDoc, requestShowWorkbench, looksLikeDocRef } from '../../../../../../extensions/co_scribe/frontend/features/clouddoc/openDocSignal';
 import { useDocWorkbenchStore } from '../../../../../../extensions/co_scribe/frontend/stores/docWorkbenchStore';
 
 export function DocReferencesStrip() {
@@ -86,6 +86,7 @@ export function DocReferencesStrip() {
             if (wb.tabs.some((x) => x.docId === id)) {
               wb.activate(id);
               wb.reopen();
+              requestShowWorkbench();
             } else {
               requestOpenDoc(id);
             }
