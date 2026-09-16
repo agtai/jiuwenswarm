@@ -3277,6 +3277,18 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
   const activeApplicationPlugin = visibleApplicationPlugins.find(
     (plugin) => plugin.nav_key === activeNav,
   );
+  // A plugin page stays mounted once visited and is hidden in between, like the
+  // built-in pages: remounting fetched its data again and showed its skeleton
+  // on every click. Only pages someone opened are paid for.
+  const [visitedPluginNavs, setVisitedPluginNavs] = useState<Set<string>>(() => new Set());
+  useEffect(() => {
+    if (!activeApplicationPlugin) return;
+    const key = activeApplicationPlugin.nav_key;
+    setVisitedPluginNavs((prev) => (prev.has(key) ? prev : new Set(prev).add(key)));
+  }, [activeApplicationPlugin]);
+  const mountedApplicationPlugins = visibleApplicationPlugins.filter(
+    (plugin) => plugin.nav_key === activeNav || visitedPluginNavs.has(plugin.nav_key),
+  );
 
   useEffect(() => {
     if (!showWorkspaceDivider) clearChatPanelResize();
@@ -3574,8 +3586,15 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
             />
           </div>
         )}
-        {activeNav === 'workbench' && docWorkbenchShown && (
-          <div className="chat-layout flex-1 flex min-h-0 overflow-hidden" data-testid="app-workbench-page">
+        {/* Mounted while it exists, hidden while another page is up: the framed
+            editor is a whole platform page, and a remount reloaded it on every
+            visit. Hidden, it keeps its frame, its scroll and its receipts. */}
+        {docWorkbenchShown && (
+          <div
+            className="chat-layout flex-1 flex min-h-0 overflow-hidden"
+            style={activeNav === 'workbench' ? undefined : { display: 'none' }}
+            data-testid="app-workbench-page"
+          >
             <DocWorkbench
               onUserAnswer={handleUserAnswer}
               composer={{
@@ -3597,11 +3616,11 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
             />
           </div>
         )}
-        {activeApplicationPlugin && (
-          <div className="app-section">
-            <ApplicationPluginOutlet contribution={activeApplicationPlugin} />
+        {mountedApplicationPlugins.map((plugin) => (
+          <div key={plugin.nav_key} className={`app-section ${plugin.nav_key === activeNav ? '' : 'is-hidden'}`}>
+            <ApplicationPluginOutlet contribution={plugin} />
           </div>
-        )}
+        ))}
         {FEATURE_APP_UPDATER_UI && activeNav === 'updatepanel' && (
           <div className="app-section">
             <UpdatePanel isConnected={isConnected} request={request} />

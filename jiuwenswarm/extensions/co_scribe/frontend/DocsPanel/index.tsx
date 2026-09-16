@@ -31,7 +31,7 @@
  * not change once they have.
  */
 import type { ReactNode } from 'react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { webRequest } from '../../../../channels/web/frontend/src/services/webClient';
 import { requestOpenDoc } from '../features/clouddoc/openDocSignal';
@@ -393,6 +393,23 @@ export function DocsPanel({ isConnected }: { isConnected: boolean }) {
   useEffect(() => {
     if (isConnected) void reload();
   }, [isConnected, reload]);
+
+  // The page is kept mounted while another is up (a remount fetched everything
+  // again and showed the skeleton on every visit). A return refreshes quietly:
+  // documents are registered from chat, and the list must not be older than that.
+  const rootRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el || typeof IntersectionObserver === 'undefined') return undefined;
+    let wasVisible = el.offsetParent !== null;
+    const io = new IntersectionObserver((entries) => {
+      const visible = entries.some((e) => e.isIntersecting);
+      if (visible && !wasVisible && isConnected) void reload();
+      wasVisible = visible;
+    });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [isConnected, reload, loading]);
 
   const conns = conf?.connections ?? [];
   // Unique within this set, so the connection column can tell two service
@@ -1023,7 +1040,7 @@ export function DocsPanel({ isConnected }: { isConnected: boolean }) {
 
   if (loading) {
     return (
-      <div className="flex h-full w-full flex-col px-6 py-4">
+      <div ref={rootRef} className="flex h-full w-full flex-col px-6 py-4">
         <div className="h-7 w-24 animate-pulse rounded-md bg-bg-muted" />
         <div className="mt-2 h-4 w-64 animate-pulse rounded-md bg-bg-muted" />
         <div className="mt-4 grid flex-1 gap-4" style={{ gridTemplateColumns: 'minmax(340px, 430px) 1fr' }}>
@@ -1037,7 +1054,7 @@ export function DocsPanel({ isConnected }: { isConnected: boolean }) {
   const hasConn = conns.length > 0;
 
   return (
-    <div className="flex h-full w-full flex-col px-6 py-4">
+    <div ref={rootRef} className="flex h-full w-full flex-col px-6 py-4">
       <h1 className="text-[22px] font-semibold">{t('docs.title')}</h1>
       <p className="mt-0.5 text-[13px] text-text-muted">{t('docs.subtitle')}</p>
 
