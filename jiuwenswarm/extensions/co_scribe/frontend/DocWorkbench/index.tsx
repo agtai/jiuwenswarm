@@ -8,6 +8,7 @@ import { useDocWorkbenchStore } from '../stores/docWorkbenchStore';
 import { webClient, webRequest } from '../../../../channels/web/frontend/src/services/webClient';
 import { canLocate, receiptAnchor, receiptsFromExecutions, type ReceiptRow } from '../features/clouddoc/receipts';
 import { TabStrip } from './TabStrip';
+import type { SessionMenuProps } from './SessionMenu';
 import { DocFrame } from './DocFrame';
 import type { ComponentProps, CSSProperties } from 'react';
 import { ChatStrip, type ComposerProps } from './ChatStrip';
@@ -21,8 +22,10 @@ const POLL_MS = 60_000;
 
 type WatchListPayload = { watches?: { doc_id: string; mode: string; expires_at?: number | null; expired?: boolean; revoked?: boolean }[] };
 
-export function DocWorkbench({ composer, onUserAnswer }: {
+export function DocWorkbench({ composer, onUserAnswer, session }: {
   composer: ComposerProps;
+  /** The tab bar's session control; App owns sessions, so App supplies it. */
+  session?: SessionMenuProps;
   /** Passed straight to the docked strip, which needs its own authorization slot. */
   onUserAnswer: ComponentProps<typeof ChatStrip>['onUserAnswer'];
 }) {
@@ -199,6 +202,7 @@ export function DocWorkbench({ composer, onUserAnswer }: {
         )}
         <ChatStrip
           composer={revealingComposer}
+          session={session}
           onUserAnswer={onUserAnswer}
           visible={wb.chatVisible}
           titleOf={titleOf}

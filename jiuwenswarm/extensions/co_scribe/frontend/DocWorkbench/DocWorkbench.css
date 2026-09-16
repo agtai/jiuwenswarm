@@ -48,6 +48,17 @@
 /* Once dragged, the reply pane is the size that was dragged, short reply or not:
    what the handle sets is what stays on screen. Double-click sizes to content again. */
 .doc-workbench[style*="--doc-workbench-chat-height"] .doc-workbench__chat-last-text { height: var(--doc-workbench-chat-height); }
+/* The session control: a small toggle in the chat strip's header line, and a
+   menu that opens upward since the strip is at the foot of the page. */
+.doc-workbench__session { position: relative; flex: none; }
+.doc-workbench__session-toggle { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; border-radius: 9999px; border: 1px solid var(--color-border-default); background: var(--color-surface-elevated); font-size: 11px; color: var(--color-text-secondary); cursor: pointer; }
+.doc-workbench__session-toggle:hover { color: var(--color-text-primary); background: var(--color-surface-hover); }
+.doc-workbench__session-menu { position: absolute; bottom: calc(100% + 6px); right: 0; z-index: 20; min-width: 240px; max-width: 320px; padding: 6px; border-radius: 10px; border: 1px solid var(--color-border-default); background: var(--color-surface-elevated); box-shadow: var(--effect-shadow-md); display: flex; flex-direction: column; gap: 2px; }
+.doc-workbench__session-item { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border: 0; border-radius: 6px; background: transparent; font-size: 12.5px; color: var(--color-text-primary); text-align: left; cursor: pointer; }
+.doc-workbench__session-item:hover { background: var(--color-surface-hover); }
+.doc-workbench__session-item .truncate { min-width: 0; }
+.doc-workbench__session-label { padding: 6px 8px 2px; font-size: 11px; color: var(--color-text-meta); }
+.doc-workbench__session-empty { padding: 4px 8px 6px; font-size: 12px; color: var(--color-text-muted); }
 /* Drag handles: a thin strip that widens on hover, on the rail's left edge and
    the chat strip's top edge. The rail's sits in the flex row between the two
    columns; the chat's overlaps the strip's top border so nothing shifts. */

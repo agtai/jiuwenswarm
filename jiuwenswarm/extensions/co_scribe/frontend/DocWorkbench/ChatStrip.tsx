@@ -11,11 +11,14 @@ import { InteractionSlot } from '../../../../channels/web/frontend/src/component
 import beeAvatar from '../../../../channels/web/frontend/src/assets/bee-static.png';
 import type { ComponentProps } from 'react';
 import { editingDocId, receiptsFromExecutions } from '../features/clouddoc/receipts';
+import { SessionMenu, type SessionMenuProps } from './SessionMenu';
 
 export type ComposerProps = ComponentProps<typeof InputArea>;
 
-export function ChatStrip({ composer, visible, titleOf, onHide, onShow, unreadReceipts, onLocate, canLocate, onHistory, onUserAnswer }: {
+export function ChatStrip({ composer, visible, titleOf, onHide, onShow, unreadReceipts, onLocate, canLocate, onHistory, onUserAnswer, session }: {
   composer: ComposerProps;
+  /** The session control, beside the composer it governs. */
+  session?: SessionMenuProps;
   /** Answering an authorization prompt. The strip has its own composer, so it needs
    *  its own slot to put the prompt in: a write started here could otherwise never be
    *  approved -- the input greyed out and told the person to deal with the item above,
@@ -89,6 +92,7 @@ export function ChatStrip({ composer, visible, titleOf, onHide, onShow, unreadRe
           </span>
         )}
         <a className="text-xs text-text-link hover:underline" onClick={onHistory}>{t('docs.workbench.history')}</a>
+        {session && <SessionMenu {...session} />}
         <div className="h-4 w-px bg-border" />
         <button type="button" className="doc-workbench__icon-btn" style={{ width: 24, height: 24 }} onClick={onHide} title={t('docs.workbench.hideChat')} data-testid="doc-workbench-chat-hide"><Minus size={16} /></button>
       </div>

@@ -317,6 +317,10 @@ function AppContent({
   const [trajectoryUiRequested, setTrajectoryUiRequested] = useState(false);
 
   const [activeNav, setActiveNav] = useState<MainNavKey>('chat');
+  // Read by the route effect, which must not re-run on nav changes: a session
+  // change made from the workbench page keeps the person on that page.
+  const activeNavRef = useRef<MainNavKey>('chat');
+  activeNavRef.current = activeNav;
   const masterEnabled = usePersonalContextStore(
     (s) => s.config.collection_enabled || s.config.agent_use_enabled,
   );
@@ -553,7 +557,11 @@ function AppContent({
 
   useEffect(() => {
     const oauthNav = sessionStorage.getItem('oauth_redirect_nav');
-    const targetNav = (oauthNav || 'chat') as MainNavKey;
+    // A session change while the workbench page is up (its session menu, or the
+    // first message promoting a new conversation) stays on the workbench: the
+    // route names the session, not the page the person is reading it on.
+    const stayOnWorkbench = !oauthNav && activeNavRef.current === 'workbench';
+    const targetNav = (stayOnWorkbench ? 'workbench' : oauthNav || 'chat') as MainNavKey;
     if (oauthNav === 'skills') setHasVisitedSkills(true);
     if (route.kind === 'chat-session') {
       sessionIdRef.current = route.sessionId;
@@ -3069,6 +3077,45 @@ function AppContent({
     void handleRestoreSession(target.session_id, target.mode, target);
   }, [enterNewConversation, handleRestoreSession, isMobile, mode, setSingleAgentPanelExpanded, setTeamAreaExpanded, setToolPanelHidden]);
 
+  // The workbench's session control. Sessions are App's, so App supplies the
+  // list and the two moves; both carry the focused document along, since the
+  // person is changing conversation about the document in front of them, not
+  // leaving it.
+  const projectSessions = useWorkspaceStore((s) => s.projectSessions);
+  const workbenchSession = useMemo(() => {
+    const all = Object.values(projectSessions).flat();
+    const byActivity = [...all].sort((a, b) => Date.parse(b.updated_at || '') - Date.parse(a.updated_at || ''));
+    const current = all.find((s) => s.session_id === sessionId);
+    const focusedTab = () => {
+      const wb = useDocWorkbenchStore.getState();
+      return wb.tabs.find((t) => t.docId === wb.activeDocId) ?? null;
+    };
+    return {
+      title: sessionId === NEW_CONVERSATION_ID ? '' : (current?.display_title?.trim() || current?.title?.trim() || ''),
+      recent: byActivity
+        .filter((s) => s.session_id !== sessionId)
+        .slice(0, 10)
+        .map((s) => ({ id: s.session_id, title: s.display_title?.trim() || s.title?.trim() || '' })),
+      onNew: () => {
+        const tab = focusedTab();
+        enterNewConversation(mode);
+        const wb = useDocWorkbenchStore.getState();
+        wb.setSession(null);
+        if (tab) wb.openDoc(tab);
+        setActiveNav('workbench');
+      },
+      onSelect: (id: string) => {
+        const target = all.find((s) => s.session_id === id);
+        if (!target) return;
+        const tab = focusedTab();
+        const wb = useDocWorkbenchStore.getState();
+        wb.setSession(id);
+        if (tab) wb.openDoc(tab);
+        void handleRestoreSession(target.session_id, target.mode, target).then(() => setActiveNav('workbench'));
+      },
+    };
+  }, [projectSessions, sessionId, enterNewConversation, handleRestoreSession, mode]);
+
   const handleDeleteConversation = useCallback(async () => {
     if (!deleteTarget) return;
     const runtime = useChatStore.getState().getRuntime(deleteTarget.session_id);
@@ -3596,6 +3643,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
             data-testid="app-workbench-page"
           >
             <DocWorkbench
+              session={workbenchSession}
               onUserAnswer={handleUserAnswer}
               composer={{
                 onSubmit: handleSendMessage,
