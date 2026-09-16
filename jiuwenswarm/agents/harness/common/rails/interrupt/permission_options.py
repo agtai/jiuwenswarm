@@ -45,7 +45,9 @@ _ALIAS_SOURCES: tuple[tuple[str, tuple[str, ...]], ...] = (
         ALLOW_ONCE,
         ("allow_once", "approve", "accept", "proceed", "本次允许", "批准", "开始执行", "接收", "接受"),
     ),
-    (SESSION_ALLOW, ("session_allow", "会话内记住")),
+    # "allow for this session" is the English label the interrupt rail renders when
+    # the UI language is English; the TUI answers with the label, so it must resolve.
+    (SESSION_ALLOW, ("session_allow", "会话内记住", "allow for this session")),
     (ALWAYS_ALLOW, ("always_allow", "allow_always", "永久记住", "总是允许")),
     (
         # ``reject_once`` 是 ACP 的写法（``reject-once``）。ACP 走的是

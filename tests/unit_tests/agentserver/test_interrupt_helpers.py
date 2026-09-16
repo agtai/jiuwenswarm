@@ -393,7 +393,12 @@ def _write_test_value(value, name, item) -> None:
         setattr(value, name, item)
 
 
-def test_permission_interrupt_exposes_only_reviewer_ui_metadata() -> None:
+def test_permission_interrupt_exposes_only_reviewer_ui_metadata(monkeypatch) -> None:
+    # Option copy follows the UI language; this test is about the metadata, so
+    # it pins the language rather than reading the machine's config.
+    import jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers as helpers
+
+    monkeypatch.setattr(helpers, "_display_language", lambda: "zh")
     interaction = SimpleNamespace(
         id="tool-call-17",
         metadata={
@@ -435,6 +440,53 @@ def test_permission_interrupt_exposes_only_reviewer_ui_metadata() -> None:
         "reviewer_status": "manual",
     }
     assert "secret_context" not in question["reviewer_metadata"]
+
+
+def test_permission_interrupt_copy_follows_english_ui(monkeypatch) -> None:
+    import jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers as helpers
+    from jiuwenswarm.agents.harness.common.rails.interrupt.permission_options import (
+        resolve_permission_action,
+    )
+
+    monkeypatch.setattr(helpers, "_display_language", lambda: "en")
+    # The engine's own copy, as it reaches the rail: risk line as ask_title, the
+    # scope summary and the path-scoped remember hint in the message.
+    interaction = SimpleNamespace(
+        id="tool-call-18",
+        metadata={},
+        value={
+            "message": (
+                "list C:/x/chat-1\n\n"
+                "> 选择「会话内记住」可在本会话内自动放行 ``list_files`` 类工具在 ``C:\\x\\chat-1`` 下的调用；"
+                "选择「永久记住」可将此规则写回磁盘，所有会话均自动放行。"
+            ),
+            "tool_name": "list_files",
+            "metadata": {"ask_title": "检测到受保护的文件路径访问，需要确认后才能执行"},
+        },
+    )
+
+    registry = _bind_single_permission_interaction(interaction)
+    result = convert_interactions_to_ask_user_question(
+        [interaction], root_permission_queue=registry
+    )
+
+    assert result is not None
+    question = result["questions"][0]
+    assert question["header"] == "Access to a protected path; confirm to proceed"
+    assert question["question"] == (
+        "list C:/x/chat-1\n\n"
+        "> \"Allow for this session\" allows ``list_files`` calls under ``C:\\x\\chat-1`` for the rest of this session; "
+        "\"Always allow\" saves the rule to disk and allows them in every session."
+    )
+    assert "（当前模式默认需确认）" not in helpers._localize_permission_message(
+        "clouddoc_apply（当前模式默认需确认）", "en"
+    )
+    labels = [option["label"] for option in question["options"]]
+    assert labels == ["Allow once", "Allow for this session", "Always allow", "Reject"]
+    # The TUI answers with the label, so every English label must decode.
+    assert [resolve_permission_action(label) for label in labels] == [
+        option["value"] for option in question["options"]
+    ]
 
 
 def test_verified_permission_card_keeps_core_locator_backend_only() -> None:

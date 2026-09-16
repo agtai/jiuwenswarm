@@ -1468,16 +1468,102 @@ def _normalize_question_option(option: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def _display_language() -> str:
+    """``"en"`` or ``"zh"``: the language the UI is set to (``preferred_language``).
+
+    The rail's own copy -- header, option labels, fallback message -- follows it.
+    An English UI used to get a Chinese approval bar because this copy never
+    looked. Anything unreadable resolves to Chinese, the historical default.
+    """
+    try:
+        from jiuwenswarm.common.config import get_config
+        from openjiuwen.harness.prompts import resolve_language
+
+        lang = resolve_language(str(get_config().get("preferred_language") or "zh"))
+        return "en" if lang == "en" else "zh"
+    except Exception:
+        return "zh"
+
+
 # 权限审批的兜底选项。``value`` 取自 ``permission_options``，与解析回答用的是同一份
 # 词表：web / CLI 回传 ``value``，TUI 回传 ``label``，两条路都要能被 ``build_inputs``
-# 解出同一个动作。label / description 保持原样，渲染出的文案不变。
-def _default_interrupt_options() -> list[dict[str, str]]:
-    return [
+# 解出同一个动作。label / description 按界面语言给出；每个英文 label 都必须能被
+# ``permission_options`` 的别名表解回同一个动作，因为 TUI 只回传 label。
+_INTERRUPT_OPTION_COPY: dict[str, list[dict[str, str]]] = {
+    "zh": [
         {"value": ALLOW_ONCE, "label": "本次允许", "description": "仅本次授权执行"},
         {"value": SESSION_ALLOW, "label": "会话内记住", "description": "本次会话内自动放行同类操作"},
         {"value": ALWAYS_ALLOW, "label": "永久记住", "description": "写回磁盘，所有会话均自动放行"},
         {"value": REJECT, "label": "拒绝", "description": "拒绝执行此工具"},
-    ]
+    ],
+    "en": [
+        {"value": ALLOW_ONCE, "label": "Allow once", "description": "Allow this call only"},
+        {"value": SESSION_ALLOW, "label": "Allow for this session", "description": "Allow the same kind of action for the rest of this session"},
+        {"value": ALWAYS_ALLOW, "label": "Always allow", "description": "Save to disk and allow in every session"},
+        {"value": REJECT, "label": "Reject", "description": "Do not run this tool"},
+    ],
+}
+
+
+def _default_interrupt_options() -> list[dict[str, str]]:
+    return [dict(item) for item in _INTERRUPT_OPTION_COPY[_display_language()]]
+
+
+# The permission engine writes its message in Chinese with no language hook
+# (openjiuwen ``ask_presentation`` and the always-allow hint). Its sentences are a
+# closed set, so an English UI gets them translated here, longest match first;
+# anything outside the set -- a command line, a path -- is left as it is.
+_PERMISSION_MESSAGE_EN: tuple[tuple[str, str], ...] = (
+    ("检测到受保护的文件路径访问，需要确认后才能执行", "Access to a protected path; confirm to proceed"),
+    ("检测到需确认的网络访问，需要确认后才能执行", "Network access that needs confirmation; confirm to proceed"),
+    ("检测到需确认的命令执行，需要确认后才能执行", "A command that needs confirmation; confirm to proceed"),
+    ("检测到风险命令结构，需要确认后才能执行", "A risky command structure; confirm to proceed"),
+    ("检测到命令结构过复杂，需要确认后才能执行", "A command too complex to check; confirm to proceed"),
+    ("检测到管道汇入解释器，需要确认后才能执行", "A pipe into an interpreter; confirm to proceed"),
+    ("工具需要授权后才能使用", "The tool needs your permission before it can run"),
+    ("操作需要授权", "This action needs your permission"),
+    ("（当前模式默认需确认）", " (this mode asks before running it)"),
+    ("> 选择「会话内记住」可在本会话内自动放行 ", "> \"Allow for this session\" allows "),
+    ("选择「永久记住」可将此规则写回磁盘，所有会话均自动放行。", "\"Always allow\" saves the rule to disk and allows them in every session."),
+    # Three shapes of the hint's scope: a shell key, a tool under a path, a tool alone.
+    (" 类工具在 ", " calls under "),
+    (" 下的调用；", " for the rest of this session; "),
+    (" 类工具的调用；", " calls for the rest of this session; "),
+    (" 类调用；", " calls for the rest of this session; "),
+    (" 类调用。", " calls for the rest of this session."),
+) + tuple(
+    # The engine's risk titles: one per rule or finding label it knows. Whole
+    # sentences only -- a prefix rule left "Detected: <Chinese>" on the screen.
+    (f"检测到{zh}，需要确认后才能执行", f"{en}; confirm to proceed")
+    for zh, en in (
+        ("下载并执行", "Downloads and executes"),
+        ("动态或编码执行", "Dynamic or encoded execution"),
+        ("含重定向或命令替换等结构", "Redirection or command substitution"),
+        ("文件外发", "Sends files out"),
+        ("反向或绑定 shell", "Reverse or bind shell"),
+        ("提权", "Privilege escalation"),
+        ("递归或强制删除", "Recursive or forced delete"),
+        ("注册表删除", "Registry delete"),
+        ("磁盘分区或裸设备写入", "Disk partition or raw device write"),
+        ("远程执行或横向移动", "Remote execution or lateral movement"),
+        ("资源滥用", "Resource abuse"),
+        ("关机或重启", "Shutdown or reboot"),
+        ("权限放宽为全局可写", "Makes a file world-writable"),
+        ("LD_PRELOAD 劫持", "LD_PRELOAD hijack"),
+        ("清除审计记录", "Clears audit history"),
+        ("关闭防火墙", "Disables the firewall"),
+        ("Docker 特权运行", "Privileged Docker run"),
+    )
+)
+
+
+def _localize_permission_message(message: str, language: str) -> str:
+    if language != "en" or not message:
+        return message
+    out = message
+    for zh, en in _PERMISSION_MESSAGE_EN:
+        out = out.replace(zh, en)
+    return out
 
 
 def _plan_approval_interrupt_options(
@@ -1599,6 +1685,7 @@ def _format_question_from_interaction(
     """Render one question after queue identity validation."""
 
     tool_name, message, tool_args = _read_interrupt_fields(value_obj)
+    language = _display_language()
     reviewer_metadata = _reviewer_ui_metadata_from_interaction(payload, value_obj)
     generic_confirm_message = message.strip() in {"", "Please approve or reject?"}
     needs_message = not message or (
@@ -1612,20 +1699,33 @@ def _format_question_from_interaction(
 
             message = build_confirm_interrupt_message(tool_name, tool_args or {})
         elif not message:
-            message = f"工具 `{tool_name}` 需要授权才能执行"
+            message = (
+                f"Tool `{tool_name}` requires permission to run"
+                if language == "en"
+                else f"工具 `{tool_name}` 需要授权才能执行"
+            )
 
     plan_approval_options = _plan_approval_interrupt_options(source, tool_name, message)
     if plan_approval_options:
         header = "Exit Plan and Execute"
         question = strip_inline_plan_approval_choices(message)
     elif source == "confirm_interrupt":
-        header = f"操作确认: {tool_name}" if tool_name else "操作确认"
-        question = message
+        if language == "en":
+            header = f"Confirm: {tool_name}" if tool_name else "Confirm"
+        else:
+            header = f"操作确认: {tool_name}" if tool_name else "操作确认"
+        question = _localize_permission_message(message, language)
     else:
         metadata = _extract_interrupt_metadata(value_obj)
-        ask_title = str(metadata.get("ask_title") or "").strip()
-        header = ask_title or (f"权限审批: {tool_name}" if tool_name else "权限审批")
-        question = message
+        # The engine's title (its risk line) rides in as ask_title, in Chinese.
+        ask_title = _localize_permission_message(
+            str(metadata.get("ask_title") or "").strip(), language
+        )
+        if language == "en":
+            header = ask_title or (f"Permission: {tool_name}" if tool_name else "Permission")
+        else:
+            header = ask_title or (f"权限审批: {tool_name}" if tool_name else "权限审批")
+        question = _localize_permission_message(message, language)
 
     question_data = {
         "question": question,
