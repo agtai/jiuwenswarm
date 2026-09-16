@@ -44,7 +44,17 @@
 /* The reply is shown whole, not clipped to one line: a truncated answer sends
    the reader to the rail for something the strip could have said. It wraps and
    scrolls past a few lines so the composer never gets pushed off screen. */
-.doc-workbench__chat-last-text { flex: 1; min-width: 0; max-height: 6.4em; overflow-y: auto; white-space: pre-wrap; word-break: break-word; line-height: 1.6; }
+.doc-workbench__chat-last-text { flex: 1; min-width: 0; max-height: var(--doc-workbench-chat-height, 6.4em); overflow-y: auto; white-space: pre-wrap; word-break: break-word; line-height: 1.6; }
+/* Once dragged, the reply pane is the size that was dragged, short reply or not:
+   what the handle sets is what stays on screen. Double-click sizes to content again. */
+.doc-workbench[style*="--doc-workbench-chat-height"] .doc-workbench__chat-last-text { height: var(--doc-workbench-chat-height); }
+/* Drag handles: a thin strip that widens on hover, on the rail's left edge and
+   the chat strip's top edge. The rail's sits in the flex row between the two
+   columns; the chat's overlaps the strip's top border so nothing shifts. */
+.doc-workbench__resize { flex: none; position: relative; z-index: 3; background: transparent; transition: background 120ms; }
+.doc-workbench__resize:hover, .doc-workbench__resize:active { background: var(--color-action-primary); }
+.doc-workbench__resize--x { width: 4px; margin: 0 -2px; cursor: col-resize; }
+.doc-workbench__resize--y { height: 4px; margin: -2px 0; cursor: row-resize; }
 .doc-workbench__chat-pill { position: absolute; left: 16px; bottom: 40px; display: inline-flex; align-items: center; gap: 8px; height: 36px; padding: 0 14px; border-radius: 18px; background: var(--color-surface-elevated); border: 1px solid var(--color-chat-card-border); box-shadow: var(--effect-shadow-md); font-size: 12px; cursor: pointer; z-index: 2; }
 /* Its own width: --tool-panel-width is shared with the other tool panels, whose
    contents are wider than a receipt list. */

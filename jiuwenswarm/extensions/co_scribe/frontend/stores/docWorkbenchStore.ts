@@ -50,6 +50,10 @@ interface DocWorkbenchState {
   chatVisible: boolean;
   /** 按平台记住的「总是在新标签打开」。 */
   alwaysNewTab: Record<string, boolean>;
+  /** Rail width in px, or null for the stylesheet's default. Dragged, persisted. */
+  railWidth: number | null;
+  /** Height in px of the strip's reply pane, or null to size to content. Dragged, persisted. */
+  chatHeight: number | null;
   /** 定位请求：切到该文档并把回执的区域交给主界面。 */
   locate: { docId: string; receiptId: string; anchor: string; nonce: number } | null;
 
@@ -79,6 +83,9 @@ interface DocWorkbenchState {
   historyRevealNonce: number;
   toggleChat: () => void;
   setAlwaysNewTab: (provider: string, value: boolean) => void;
+  /** Null restores the default. Values are clamped to the workbench's bounds. */
+  setRailWidth: (px: number | null) => void;
+  setChatHeight: (px: number | null) => void;
   /** 记录一份文档最新的回执 id 列表；返回本次新增的数量。 */
   noteReceipts: (docId: string, receiptIds: string[]) => number;
   requestLocate: (docId: string, receiptId: string, anchor?: string) => void;
@@ -86,27 +93,41 @@ interface DocWorkbenchState {
 
 const PREFS_KEY = 'jiuwenswarm.docWorkbench.prefs.v1';
 
-function loadPrefs(): { railVisible: boolean; chatVisible: boolean; alwaysNewTab: Record<string, boolean> } {
+/** Bounds for the dragged sizes: wide enough to read, never most of the screen. */
+export const RAIL_WIDTH_RANGE = { min: 200, max: 640 } as const;
+export const CHAT_HEIGHT_RANGE = { min: 40, max: 480 } as const;
+
+function clampSize(px: number | null, range: { min: number; max: number }): number | null {
+  if (px == null || !Number.isFinite(px)) return null;
+  return Math.round(Math.min(range.max, Math.max(range.min, px)));
+}
+
+type Prefs = Pick<DocWorkbenchState, 'railVisible' | 'chatVisible' | 'alwaysNewTab' | 'railWidth' | 'chatHeight'>;
+
+function loadPrefs(): Prefs {
   try {
     const raw = localStorage.getItem(PREFS_KEY);
     if (raw) {
-      const p = JSON.parse(raw) as Partial<{ railVisible: boolean; chatVisible: boolean; alwaysNewTab: Record<string, boolean> }>;
+      const p = JSON.parse(raw) as Partial<Prefs>;
       return {
         railVisible: p.railVisible ?? true,
         chatVisible: p.chatVisible ?? true,
         alwaysNewTab: p.alwaysNewTab ?? {},
+        railWidth: clampSize(p.railWidth ?? null, RAIL_WIDTH_RANGE),
+        chatHeight: clampSize(p.chatHeight ?? null, CHAT_HEIGHT_RANGE),
       };
     }
   } catch {
     /* no storage: defaults */
   }
-  return { railVisible: true, chatVisible: true, alwaysNewTab: {} };
+  return { railVisible: true, chatVisible: true, alwaysNewTab: {}, railWidth: null, chatHeight: null };
 }
 
-function savePrefs(s: Pick<DocWorkbenchState, 'railVisible' | 'chatVisible' | 'alwaysNewTab'>): void {
+function savePrefs(s: Prefs): void {
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify({
       railVisible: s.railVisible, chatVisible: s.chatVisible, alwaysNewTab: s.alwaysNewTab,
+      railWidth: s.railWidth, chatHeight: s.chatHeight,
     }));
   } catch {
     /* ignore */
@@ -212,6 +233,16 @@ export const useDocWorkbenchStore = create<DocWorkbenchState>((set, get) => ({
     const alwaysNewTab = { ...s.alwaysNewTab, [provider]: value };
     savePrefs({ ...s, alwaysNewTab });
     return { alwaysNewTab };
+  }),
+  setRailWidth: (px) => set((s) => {
+    const railWidth = clampSize(px, RAIL_WIDTH_RANGE);
+    savePrefs({ ...s, railWidth });
+    return { railWidth };
+  }),
+  setChatHeight: (px) => set((s) => {
+    const chatHeight = clampSize(px, CHAT_HEIGHT_RANGE);
+    savePrefs({ ...s, chatHeight });
+    return { chatHeight };
   }),
   noteReceipts: (docId, receiptIds) => {
     const s = get();

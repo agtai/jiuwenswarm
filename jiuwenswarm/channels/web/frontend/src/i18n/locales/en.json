@@ -276,6 +276,7 @@
       "alwaysExternal": "Always open in a new tab",
       "cantSee": "Can't see the document?",
       "liveFromPlatform": "Edits show up live from the platform",
+      "resizeHint": "Drag to resize, double-click to reset",
       "chat": "Chat",
       "noReplyYet": "No reply yet",
       "receipt": "receipt",

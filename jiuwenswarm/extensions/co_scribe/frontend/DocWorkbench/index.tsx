@@ -2,16 +2,17 @@
  * 文档工作台（release §14）：打开一份纳管文档时替换会话工作区。
  * 主列 = 标签栏 + 主界面（平台编辑器 iframe / md 编辑器）+ 底部聊天条；右栏 = 回执 / 聊天历史 / 状态。
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useChatStore } from '../../../../channels/web/frontend/src/stores/chatStore';
 import { useDocWorkbenchStore } from '../stores/docWorkbenchStore';
 import { webClient, webRequest } from '../../../../channels/web/frontend/src/services/webClient';
 import { canLocate, receiptAnchor, receiptsFromExecutions, type ReceiptRow } from '../features/clouddoc/receipts';
 import { TabStrip } from './TabStrip';
 import { DocFrame } from './DocFrame';
-import type { ComponentProps } from 'react';
+import type { ComponentProps, CSSProperties } from 'react';
 import { ChatStrip, type ComposerProps } from './ChatStrip';
 import { SideRail, type WatchInfo } from './SideRail';
+import { ResizeHandle } from './ResizeHandle';
 import './DocWorkbench.css';
 
 // The gateway pushes clouddoc.receipts_changed when the ledger file moves; the
@@ -145,6 +146,20 @@ export function DocWorkbench({ composer, onUserAnswer }: {
     onSetGoal: composer.onSetGoal ? (sid, objective) => { showHistory(); composer.onSetGoal?.(sid, objective); } : undefined,
   }), [composer, showHistory]);
 
+  // Dragged sizes for the rail and the strip's reply pane. A null size means the
+  // stylesheet's default, so a drag starts from what is actually on screen.
+  const rootRef = useRef<HTMLDivElement>(null);
+  const measure = useCallback((selector: string, prop: 'width' | 'height') => {
+    const el = rootRef.current?.querySelector<HTMLElement>(selector);
+    return el ? el.getBoundingClientRect()[prop] : 0;
+  }, []);
+  const railSize = useCallback(() => wb.railWidth ?? measure('.doc-workbench__rail', 'width'), [wb.railWidth, measure]);
+  const chatSize = useCallback(() => wb.chatHeight ?? measure('.doc-workbench__chat-last-text', 'height'), [wb.chatHeight, measure]);
+  const sizeVars = {
+    ...(wb.railWidth != null ? { '--doc-workbench-rail-width': `${wb.railWidth}px` } : {}),
+    ...(wb.chatHeight != null ? { '--doc-workbench-chat-height': `${wb.chatHeight}px` } : {}),
+  } as CSSProperties;
+
   const [frameNonce, setFrameNonce] = useState(0);
   // The frame reloads only on request: the reload button, or a locate that must
   // land on a new anchor. A receipt never reloads it; the platform renders live.
@@ -154,7 +169,7 @@ export function DocWorkbench({ composer, onUserAnswer }: {
   const unreadTotal = wb.tabs.reduce((a, t) => a + t.unread, 0);
 
   return (
-    <div className="doc-workbench" data-testid="doc-workbench">
+    <div ref={rootRef} className="doc-workbench" style={sizeVars} data-testid="doc-workbench">
       <div className="doc-workbench__main">
         <TabStrip
           tabs={wb.tabs}
@@ -179,6 +194,9 @@ export function DocWorkbench({ composer, onUserAnswer }: {
           onAlwaysNewTab={(v) => wb.setAlwaysNewTab(tab.provider, v)}
           onReload={() => setFrameNonce((n) => n + 1)}
         />
+        {wb.chatVisible && (
+          <ResizeHandle axis="y" size={chatSize} onResize={wb.setChatHeight} testId="doc-workbench-chat-resize" />
+        )}
         <ChatStrip
           composer={revealingComposer}
           onUserAnswer={onUserAnswer}
@@ -192,6 +210,9 @@ export function DocWorkbench({ composer, onUserAnswer }: {
           onHistory={showHistory}
         />
       </div>
+      {wb.railVisible && (
+        <ResizeHandle axis="x" size={railSize} onResize={wb.setRailWidth} testId="doc-workbench-rail-resize" />
+      )}
       {wb.railVisible && (
         <SideRail
           tab={tab}

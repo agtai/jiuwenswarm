@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { useDocWorkbenchStore } from '../../../../channels/web/frontend/node_modules/.cache/clouddoc-workbench-store/docWorkbenchStore.mjs';
+import { CHAT_HEIGHT_RANGE, RAIL_WIDTH_RANGE, useDocWorkbenchStore } from '../../../../channels/web/frontend/node_modules/.cache/clouddoc-workbench-store/docWorkbenchStore.mjs';
 
 const doc = (docId) => ({ docId, title: docId, kind: 'document', url: `https://x/${docId}`, provider: 'p' });
 
@@ -65,6 +65,26 @@ test('showHistory opens the rail on the history tab and bumps the reveal counter
   after = useDocWorkbenchStore.getState();
   assert.equal(after.railVisible, true);
   assert.equal(after.historyRevealNonce, 2);
+});
+
+test('dragged sizes are clamped to their bounds and null restores the default', () => {
+  reset();
+  const s = useDocWorkbenchStore.getState();
+  s.setRailWidth(300);
+  assert.equal(useDocWorkbenchStore.getState().railWidth, 300);
+  s.setRailWidth(RAIL_WIDTH_RANGE.min - 100);
+  assert.equal(useDocWorkbenchStore.getState().railWidth, RAIL_WIDTH_RANGE.min);
+  s.setRailWidth(RAIL_WIDTH_RANGE.max + 100);
+  assert.equal(useDocWorkbenchStore.getState().railWidth, RAIL_WIDTH_RANGE.max);
+  s.setRailWidth(null);
+  assert.equal(useDocWorkbenchStore.getState().railWidth, null);
+
+  s.setChatHeight(120.6);
+  assert.equal(useDocWorkbenchStore.getState().chatHeight, 121);
+  s.setChatHeight(CHAT_HEIGHT_RANGE.max + 1);
+  assert.equal(useDocWorkbenchStore.getState().chatHeight, CHAT_HEIGHT_RANGE.max);
+  s.setChatHeight(Number.NaN);
+  assert.equal(useDocWorkbenchStore.getState().chatHeight, null);
 });
 
 test('parked sessions come back untouched around a promotion', () => {
