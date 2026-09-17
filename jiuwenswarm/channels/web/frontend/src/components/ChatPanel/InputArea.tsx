@@ -18,6 +18,7 @@
   type SVGProps,
 } from 'react';
 import { createPortal } from 'react-dom';
+import { useRegisteredDocs } from '../../../../../../extensions/co_scribe/frontend/features/clouddoc/useRegisteredDocs';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { AtSign, ChevronRight, CircleX, Loader2, Mic, Plus, Settings, Square, Workflow, X } from 'lucide-react';
@@ -182,7 +183,11 @@ type InputAreaTeamMember = {
   status?: string;
 };
 
-type ComposerSuggestionKind = 'member' | 'role' | 'slash';
+// ``doc`` is never a trigger of its own: a registered cloud document is offered
+// under ``@`` beside the team members and inserted as ``@<title>``. The
+// co-scribe backend recognizes a document by its title in the user's text, so
+// the mention names it for the model without the person typing the whole title.
+type ComposerSuggestionKind = 'member' | 'role' | 'slash' | 'doc';
 type WorkIconName = 'add' | 'arrow' | 'check' | 'close' | 'collapse' | 'expand' | 'folder' | 'search';
 
 type ComposerSuggestionState = {
@@ -195,7 +200,7 @@ type ComposerSuggestionItem = {
   label: string;
   status?: string;
   description?: string;
-  itemKind?: 'command' | 'skill';
+  itemKind?: 'command' | 'skill' | 'doc';
   takesArgs?: boolean;
   disabled?: boolean;
   disabledReason?: string;
@@ -207,8 +212,15 @@ function getComposerSuggestionItems(
   slashCommands: SlashCommandMeta[],
   slashSkills: InputAreaSkillItem[],
   isTeamMode: boolean,
+  docs: ComposerSuggestionItem[] = [],
 ): ComposerSuggestionItem[] {
   if (!suggestion) return [];
+  if (suggestion.kind === 'member') {
+    const query = suggestion.query.trim().toLowerCase();
+    const matches = (item: ComposerSuggestionItem) => !query || `${item.label} ${item.id}`.toLowerCase().includes(query);
+    // Members first, then the documents: both answer to ``@``.
+    return [...members.filter(matches).slice(0, 8), ...docs.filter(matches).slice(0, 8)];
+  }
   if (suggestion.kind === 'slash') {
     const query = suggestion.query.trim().toLowerCase();
     const commands = slashCommands
@@ -872,6 +884,13 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       }));
   }, [teamMembers]);
 
+  // Registered cloud documents, offered under ``@`` beside the members.
+  const registeredDocs = useRegisteredDocs();
+  const docSuggestionItems = useMemo<ComposerSuggestionItem[]>(
+    () => registeredDocs.map((d) => ({ id: d.title, label: d.title, description: d.kind, itemKind: 'doc' as const })),
+    [registeredDocs],
+  );
+
   const composerSuggestionItems = useMemo(() => {
     const items = getComposerSuggestionItems(
       composerSuggestion,
@@ -879,13 +898,14 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       getWebSlashCommandsForMode(slashCommands, mode),
       slashSkills,
       isTeamMode,
+      docSuggestionItems,
     );
     return items.map((item) =>
       item.itemKind === 'command' && isSlashCommandDisabledByGoal(item.id, hasUnfinishedGoal)
         ? { ...item, disabled: true, disabledReason: t('plan.toolbarUnavailableGoal') }
         : item,
     );
-  }, [composerSuggestion, hasUnfinishedGoal, isTeamMode, mentionableMembers, mode, slashCommands, slashSkills, t]);
+  }, [composerSuggestion, docSuggestionItems, hasUnfinishedGoal, isTeamMode, mentionableMembers, mode, slashCommands, slashSkills, t]);
 
   const selectableComposerSuggestionIndices = useMemo(
     () =>
@@ -1966,13 +1986,15 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       setComposerSuggestion(null);
       return;
     }
-    // slash 指令不依赖团队成员，即便没有可 @ 的成员也照常弹出
-    if (trigger.kind !== 'slash' && mentionableMembers.length === 0) {
+    // slash 指令不依赖团队成员，即便没有可 @ 的成员也照常弹出；
+    // ``@`` 还列出已纳管的云文档，所以没有成员但有文档时同样弹出。
+    const hasMentionables = mentionableMembers.length > 0 || (trigger.kind === 'member' && registeredDocs.length > 0);
+    if (trigger.kind !== 'slash' && !hasMentionables) {
       setComposerSuggestion(null);
       return;
     }
     setComposerSuggestion(trigger);
-  }, [getCurrentComposerTrigger, mentionableMembers.length]);
+  }, [getCurrentComposerTrigger, mentionableMembers.length, registeredDocs.length]);
 
   const setRangeStartByTextOffset = useCallback((range: Range, root: HTMLElement, offset: number) => {
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
@@ -1997,7 +2019,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       kind: ComposerSuggestionKind,
       value: string,
       label: string,
-      slashItemKind?: 'command' | 'skill',
+      slashItemKind?: 'command' | 'skill' | 'doc',
       slashTakesArgs?: boolean,
     ) => {
       const el = inputRef.current;
@@ -2143,10 +2165,13 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         range.deleteContents();
       }
 
+      // A document picked from the ``@`` list is its own chip kind; it keeps
+      // the ``@`` prefix, so the message reads ``@<title>``.
+      const tokenKind: ComposerSuggestionKind = slashItemKind === 'doc' ? 'doc' : kind;
       const chip = document.createElement('span');
-      chip.className = `chat-input-chip-inline chat-input-chip-inline--${kind}`;
+      chip.className = `chat-input-chip-inline chat-input-chip-inline--${tokenKind}`;
       chip.setAttribute('contenteditable', 'false');
-      chip.dataset.composerToken = kind;
+      chip.dataset.composerToken = tokenKind;
       chip.dataset.value = value;
 
       const prefix = document.createElement('span');
@@ -4389,7 +4414,7 @@ function ComposerSuggestionMenu({
     kind: ComposerSuggestionKind,
     value: string,
     label: string,
-    slashItemKind?: 'command' | 'skill',
+    slashItemKind?: 'command' | 'skill' | 'doc',
     slashTakesArgs?: boolean,
   ) => void;
   loading: boolean;
@@ -4532,6 +4557,14 @@ function ComposerSuggestionMenu({
                         {item.description ? (
                           <span className="chat-composer-suggestion__meta">{item.description}</span>
                         ) : null}
+                      </span>
+                    </>
+                  ) : item.itemKind === 'doc' ? (
+                    <>
+                      <span className="chat-composer-suggestion__avatar" aria-hidden="true">📄</span>
+                      <span className="chat-composer-suggestion__text">
+                        <span className="chat-composer-suggestion__label">{item.label}</span>
+                        <span className="chat-composer-suggestion__meta">{item.description}</span>
                       </span>
                     </>
                   ) : (
