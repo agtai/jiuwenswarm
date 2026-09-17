@@ -16,12 +16,13 @@ from copy import deepcopy
 from dataclasses import replace
 import inspect
 import logging
+import os
 import re
 import shutil
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Tuple
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Tuple
 
 from jiuwenswarm.dotenv_early import load_dotenv_runtime
 from jiuwenswarm.common.session_message import (
@@ -32,6 +33,7 @@ from jiuwenswarm.common.session_message import (
 from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import (
     SKILLS_REBUILD_SILENT,
 )
+from jiuwenswarm.server.runtime.agent_adapter import formal_tool_gate
 from jiuwenswarm.server.runtime.agent_adapter.agent_adapters import (
     AgentAdapter,
     create_adapter,
@@ -116,6 +118,11 @@ from jiuwenswarm.agents.harness.common.rails.permissions.root_context import (
     HOST_USER_ORIGIN_EXTERNAL,
     HOST_USER_ORIGIN_INTERNAL,
 )
+
+if TYPE_CHECKING:
+    from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
+        FormalAgentExecution,
+    )
 
 
 def _with_request_runtime_context(
@@ -1464,6 +1471,302 @@ class JiuWenSwarm:
         """构建 adapter 所需的 inputs 字典（公共接口）."""
         return self._build_inputs(request)
 
+    def get_project_execution_root(self) -> str | None:
+        """Return the Code Agent root that can be trusted by a task preflight."""
+        adapter = self._adapter
+        if adapter is None or not getattr(adapter, "_is_code_agent", False):
+            return None
+        project_dir = getattr(adapter, "_project_dir", None)
+        if not isinstance(project_dir, str) or not project_dir.strip():
+            return None
+        return str(Path(project_dir).resolve())
+
+    def supports_formal_live_voice(self) -> bool:
+        """Report the optional formal Agent capability without creating work.
+
+        An already-bound Code adapter must not be re-described as an ordinary
+        Agent merely because its class inherits shared implementation helpers.
+        When no adapter has been selected yet, only the real Harness SDK is a
+        supported candidate; this check does not instantiate an adapter,
+        worker, timer, or session.
+        """
+
+        adapter = self._adapter
+        if adapter is None:
+            return resolve_sdk_choice() == "harness"
+        return bool(
+            not getattr(adapter, "_is_code_agent", False)
+            and callable(
+                getattr(adapter, "process_formal_live_voice_stream_impl", None)
+            )
+        )
+
+    async def process_background_code_task_stream(
+        self,
+        request: AgentRequest,
+    ) -> AsyncIterator[AgentResponseChunk]:
+        """Run one project-bound code task without writing Chat history.
+
+        The schedule service owns task persistence and status.  This adapter
+        only drives the already-created Code Agent in an isolated task Session;
+        it deliberately bypasses the facade's user/assistant history hooks.
+        """
+        adapter = self._adapter
+        project_root = self.get_project_execution_root()
+        params = dict(request.params or {})
+        requested_root = params.get("project_dir")
+        if (
+            adapter is None
+            or project_root is None
+            or not isinstance(requested_root, str)
+            or os.path.normcase(os.path.normpath(str(Path(requested_root).resolve())))
+            != os.path.normcase(os.path.normpath(project_root))
+        ):
+            raise RuntimeError("EXECUTION_TARGET_NOT_BOUND: Code Agent root mismatch")
+        if getattr(adapter, "_is_session_scoped_adapter", False):
+            raise RuntimeError(
+                "EXECUTION_TARGET_NOT_BOUND: background tasks require a fresh dedicated session"
+            )
+        prepare_session = getattr(adapter, "prepare_background_project_session", None)
+        if not callable(prepare_session):
+            raise RuntimeError(
+                "EXECUTION_TARGET_NOT_BOUND: Code Agent cannot prepare a dedicated task session"
+            )
+
+        params.update(
+            {
+                "mode": "code",
+                "project_dir": project_root,
+                "cwd": project_root,
+                "trusted_dirs": [project_root],
+                "supports_user_interaction": False,
+                "source": "live_voice_project_task",
+            }
+        )
+        metadata = dict(request.metadata or {})
+        metadata.update(
+            {
+                "enable_memory": False,
+                "skip_a2ui": True,
+                "background_task": True,
+                "project_task_file_tools_only": True,
+            }
+        )
+        background_request = replace(
+            request,
+            params=params,
+            metadata=metadata,
+            is_stream=True,
+        )
+        inputs, _memory_mode, _raw_query = self._build_inputs(background_request)
+        checkpoint_rail = None
+        child = instance = None
+        from contextlib import ExitStack
+
+        checkpoint_scope = ExitStack()
+        checkpoint = None
+        prepared = False
+        try:
+            from openjiuwen.core.application.tasks.execution_checkpoint import current_background_task_checkpoint
+
+            checkpoint = current_background_task_checkpoint(background_request.session_id)
+            if checkpoint is not None:
+                from openjiuwen.core.application.tasks.execution_checkpoint import TaskCheckpointRail, file_effect_plan_tool
+                from openjiuwen.core.single_agent.agent_callback_manager import scoped_agent_rail
+                from openjiuwen.core.single_agent.rail.base import AgentCallbackEvent
+
+                # Preparation starts the Harness supervisor. Its descendants
+                # must inherit this scope, not the caller's later context.
+                # Bind the exact root before submitting any task input.
+                task_rail = TaskCheckpointRail(
+                    checkpoint, root_agent=None,
+                    binding_is_current=lambda: (
+                        child is not None and checkpoint_rail is not None
+                        and child._stream_event_rail is checkpoint_rail and child._instance is instance
+                    ),
+                    session_identity=lambda ctx: checkpoint_rail._resolve_sid(ctx, ctx.session),
+                )
+                checkpoint_scope.enter_context(scoped_agent_rail(
+                    task_rail, before_events=frozenset({AgentCallbackEvent.BEFORE_TOOL_CALL})))
+            await prepare_session(background_request.session_id)
+            prepared = True
+            if checkpoint is not None:
+                child = adapter._get_cached_session_adapter(background_request.session_id)
+                checkpoint_rail = getattr(child, "_stream_event_rail", None)
+                instance = getattr(child, "_instance", None)
+                root_agent = getattr(instance, "_react_agent", None)
+                if checkpoint_rail is None or root_agent is None:
+                    raise RuntimeError("BACKGROUND_TASK_CHECKPOINT_UNAVAILABLE")
+                task_rail.root_agent = root_agent
+                if checkpoint.file_plan is not None:
+                    plan_tool = file_effect_plan_tool()
+                    instance.ability_manager.add_ability(plan_tool.card, plan_tool)
+            async with aclosing(adapter.process_message_stream_impl(
+                background_request,
+                inputs,
+            )) as stream:
+                async for chunk in stream:
+                    if checkpoint is not None:
+                        checkpoint.raise_if_failed()
+                    yield chunk
+            if checkpoint is not None:
+                checkpoint.raise_if_failed()
+        except Exception:
+            if checkpoint is not None:
+                checkpoint.raise_if_failed()
+            raise
+        finally:
+            checkpoint_scope.close()
+            cleanup_session = getattr(adapter, "cleanup_session_adapter", None)
+            if prepared and callable(cleanup_session):
+                await cleanup_session(background_request.session_id)
+
+    def _formal_session_rail(self, session_id: str) -> Any | None:
+        """The stream-event rail that gates ``session_id``'s tool calls, if it exists yet.
+
+        The formal stream runs on a per-session child adapter whose rail is
+        built when that child is created; before that there is no rail to
+        act on, and the gate registry carries the intent instead.
+        """
+
+        adapter = self._ensure_adapter(mode="agent")
+        session_adapters = getattr(adapter, "_session_adapters", None)
+        key_of = getattr(adapter, "_session_adapter_key", None)
+        holder = adapter
+        if isinstance(session_adapters, dict) and callable(key_of):
+            holder = session_adapters.get(key_of(session_id))
+            if holder is None:
+                return None
+        rail = getattr(holder, "_stream_event_rail", None)
+        if rail is None or not all(
+            callable(getattr(rail, name, None))
+            for name in ("pause_tools", "resume_tools", "abort")
+        ):
+            return None
+        return rail
+
+    def supports_speculative_dialogue(self) -> bool:
+        try:
+            adapter = self._ensure_adapter(mode="agent")
+        except Exception:  # noqa: BLE001 - an adapter that cannot be built has no gate
+            return False
+        return self.supports_formal_live_voice() and bool(
+            getattr(adapter, "supports_formal_tool_gate", False)
+        )
+
+    def pause_formal_tools(self, session_id: str) -> None:
+        """Hold every tool call of one formal session until it is released.
+
+        Recorded in the process-local gate before the session's stream
+        starts; the session adapter applies it on its rail right after it
+        opens the tool capture, ahead of the first model call. A rail that
+        already exists is paused immediately as well.
+        """
+
+        formal_tool_gate.request_pause(session_id)
+        rail = self._formal_session_rail(session_id)
+        if rail is not None:
+            rail.pause_tools(session_id)
+
+    def resume_formal_tools(self, session_id: str) -> None:
+        formal_tool_gate.release(session_id)
+        rail = self._formal_session_rail(session_id)
+        if rail is not None:
+            rail.resume_tools(session_id)
+
+    def abort_formal_tools(self, session_id: str) -> None:
+        formal_tool_gate.abort(session_id)
+        rail = self._formal_session_rail(session_id)
+        if rail is not None:
+            rail.abort(session_id)
+
+    def resolve_formal_model_binding(self, model_identity: str | None = None) -> tuple[str, str]:
+        """Read the exact registered model/configuration selected for new work."""
+        adapter = self._ensure_adapter(mode="agent")
+        resolve = getattr(adapter, "resolve_formal_model_binding", None)
+        if not callable(resolve):
+            raise RuntimeError("FORMAL_MODEL_BINDING_UNAVAILABLE")
+        return resolve(model_identity)
+
+    async def process_formal_live_voice_stream(
+        self,
+        execution: "FormalAgentExecution",
+    ) -> AsyncIterator[AgentResponseChunk]:
+        """Run one committed Live Voice turn without owning Chat history.
+
+        This is intentionally distinct from :meth:`process_message_stream`.
+        The caller owns TurnCommit, PresentationAck, and history authority; the
+        facade only drives the real lower Agent adapter in a dedicated session.
+        """
+        from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
+            FormalAgentExecution,
+        )
+
+        if not isinstance(execution, FormalAgentExecution):
+            raise TypeError("formal Live Voice execution has an unsupported type")
+        execution.context.validate_for(execution.commit)
+        if not self.supports_formal_live_voice():
+            raise RuntimeError(
+                "FORMAL_EXECUTION_UNSUPPORTED: lower Agent adapter has no formal seam"
+            )
+        adapter = self._ensure_adapter(mode="agent")
+        if getattr(adapter, "_is_session_scoped_adapter", False):
+            raise RuntimeError(
+                "FORMAL_EXECUTION_NOT_ISOLATED: expected the root Agent adapter"
+            )
+
+        formal_request = AgentRequest(
+            request_id=execution.request_id,
+            channel_id=execution.channel_id,
+            session_id=execution.internal_session_id,
+            req_method=ReqMethod.CHAT_SEND,
+            params={
+                "query": execution.prompt_content(),
+                "mode": "agent",
+                "source": "live_voice.formal",
+                "supports_user_interaction": False,
+            },
+            is_stream=True,
+            metadata={
+                "enable_memory": False,
+                "skip_a2ui": True,
+                "formal_live_voice": True,
+                "formal_live_voice_tools_allowed": execution.allow_tools,
+            },
+            enable_memory=False,
+        )
+        if execution.model_identity is not None:
+            formal_request.metadata.update({
+                "formal_live_voice_read_only_tools": execution.read_only_tools,
+                "formal_live_voice_model_identity": execution.model_identity,
+                "formal_live_voice_model_config_version": execution.model_config_version,
+            })
+        inputs, _memory_mode, _raw_query = self._build_inputs(formal_request)
+        if inputs.get("conversation_id") != execution.internal_session_id:
+            raise RuntimeError(
+                "FORMAL_EXECUTION_NOT_ISOLATED: conversation identity changed"
+            )
+        if inputs.get("enable_memory") is not False:
+            raise RuntimeError(
+                "FORMAL_EXECUTION_MEMORY_ENABLED: formal execution forbids memory"
+            )
+        # The committed envelope already owns its context and current request.
+        # Ordinary chat rendering double-encodes it and prepends a machine clock
+        # that can be mistaken for a document's business/scenario reference time.
+        inputs["query"] = execution.prompt_content()
+        formal_stream = getattr(
+            adapter, "process_formal_live_voice_stream_impl", None
+        )
+        if not callable(formal_stream):
+            raise RuntimeError(
+                "FORMAL_EXECUTION_UNSUPPORTED: lower Agent adapter has no formal seam"
+            )
+        from contextlib import aclosing
+
+        async with aclosing(formal_stream(formal_request, inputs)) as stream:
+            async for chunk in stream:
+                yield chunk
+
     def _build_inputs(self, request: AgentRequest) -> Tuple[dict[str, Any], str, UserTurn]:
         """构建 adapter 所需的 inputs 字典.
 
@@ -1683,42 +1986,6 @@ class JiuWenSwarm:
         # the team path for directive / ``$member`` / slash parsing) and the
         # single renderer that produced ``inputs["query"]``.
         return inputs, memory_mode, turn
-
-    def _make_retry_without_a2ui_call(
-            self,
-            *,
-            adapter: AgentAdapter,
-            request: AgentRequest,
-    ):
-        async def retry_without_a2ui_call(query: str) -> str | None:
-            if getattr(adapter, "_instance", None) is None:
-                return None
-            try:
-                modified_request = AgentRequest(
-                    request_id=request.request_id,
-                    channel_id=request.channel_id,
-                    session_id=request.session_id,
-                    chat_id=request.chat_id,
-                    req_method=request.req_method,
-                    params={**request.params, "query": query},
-                    is_stream=False,
-                    timestamp=request.timestamp,
-                    metadata={**(request.metadata or {}), "skip_a2ui": True},
-                )
-                retry_inputs, _, _ = self._build_inputs(modified_request)
-                retry_inputs["_invoke_turn_id"] = request.request_id
-                result = await adapter.process_message_impl(modified_request, retry_inputs)
-                if result.ok and result.payload.get("content"):
-                    return str(result.payload["content"])
-            except Exception as exc:
-                logger.warning(
-                    "Retry without A2UI failed: request_id=%s error=%s",
-                    request.request_id,
-                    exc,
-                )
-            return None
-
-        return retry_without_a2ui_call
 
     @staticmethod
     def _team_plan_approval_payload_error_message() -> str:
@@ -4617,3 +4884,32 @@ class JiuWenSwarm:
             self._adapter = None
 
         logger.info("[JiuWenSwarm] cleanup: 完成")
+
+    async def cleanup_formal_project_task_agent(self) -> None:
+        """Strictly close a short-lived formal project Agent.
+
+        The D0 Executor must prove that no session runtime remains before it
+        deletes the Agent's detached Git checkout. Unlike general process
+        cleanup, adapter failures propagate so the checkout can be retained
+        for a safe retry.
+        """
+
+        await self._session_manager.close_all_sessions()
+        adapter = self._adapter
+        if adapter is not None:
+            cleanup = getattr(
+                adapter,
+                "cleanup_formal_project_task_agent",
+                None,
+            )
+            if not callable(cleanup):
+                raise RuntimeError("PROJECT_AGENT_CLEANUP_PENDING")
+            await cleanup()
+        # Keep the adapter identity until both the facade and the lower adapter
+        # prove quiescence.  Cleanup failures, partial initialization and caller
+        # cancellation must leave the same owner available for a retry.
+        if self.has_session_runtime():
+            raise RuntimeError("PROJECT_AGENT_CLEANUP_PENDING")
+        if self._adapter is not adapter:
+            raise RuntimeError("PROJECT_AGENT_CLEANUP_PENDING")
+        self._adapter = None

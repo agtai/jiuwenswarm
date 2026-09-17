@@ -80,6 +80,39 @@ def is_valid_session_id(session_id: str) -> bool:
     return _VALID_SESSION_ID.fullmatch(session_id) is not None
 
 
+_FORMAL_LIVE_VOICE_SESSION_PREFIX = "lv-formal-"
+_FORMAL_NO_HISTORY_LOCK = threading.Lock()
+_FORMAL_NO_HISTORY_SESSIONS: dict[str, int] = {}
+
+
+def _is_formal_live_voice_no_history_session(session_id: str) -> bool:
+    with _FORMAL_NO_HISTORY_LOCK:
+        return _FORMAL_NO_HISTORY_SESSIONS.get(session_id, 0) > 0
+
+
+def register_formal_no_history_session(session_id: str) -> None:
+    """Register one trusted formal execution across Agent/tool task contexts."""
+
+    sid = str(session_id or "").strip()
+    if not sid.startswith(_FORMAL_LIVE_VOICE_SESSION_PREFIX):
+        raise ValueError("formal no-history session must use the internal namespace")
+    with _FORMAL_NO_HISTORY_LOCK:
+        _FORMAL_NO_HISTORY_SESSIONS[sid] = _FORMAL_NO_HISTORY_SESSIONS.get(sid, 0) + 1
+
+
+def unregister_formal_no_history_session(session_id: str) -> None:
+    """Release one trusted formal execution registration."""
+
+    sid = str(session_id or "").strip()
+    with _FORMAL_NO_HISTORY_LOCK:
+        retained = _FORMAL_NO_HISTORY_SESSIONS.get(sid, 0)
+        if retained <= 1:
+            _FORMAL_NO_HISTORY_SESSIONS.pop(sid, None)
+        else:
+            _FORMAL_NO_HISTORY_SESSIONS[sid] = retained - 1
+
+
+
 def subagent_history_dir_name(subagent_id: str) -> str:
     """Return a safe directory name for a subagent history bucket."""
     normalized = (subagent_id or "").strip()
@@ -1088,6 +1121,8 @@ def append_history_record(
 ) -> None:
     """向指定 session 的当前激活历史文件异步追加一条记录."""
     sid = (session_id or "default").strip() or "default"
+    if _is_formal_live_voice_no_history_session(sid):
+        return
     if _is_ephemeral_heartbeat_session(sid):
         logger.debug(
             "skip heartbeat session history: session_id=%s event_type=%s",

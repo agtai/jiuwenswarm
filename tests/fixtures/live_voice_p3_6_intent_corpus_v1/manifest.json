@@ -1,0 +1,153 @@
+{
+  "content_policy": {
+    "no_audio": true,
+    "no_credentials": true,
+    "no_private_text": true,
+    "no_real_projects": true,
+    "no_real_task_results": true,
+    "synthetic_only": true
+  },
+  "corpus_version": "1.0.0",
+  "credit": "preparation_only",
+  "dependencies": {
+    "required_before_production": [
+      "accepted_p3_2_command_interface",
+      "accepted_p3_5a_result_event_interface"
+    ]
+  },
+  "description": "Synthetic bilingual P3-6 preparation cases for future resolver and Bridge evaluation; not product evidence.",
+  "files": {
+    "cases": "cases.jsonl"
+  },
+  "limits": {
+    "max_case_bytes": 16384,
+    "max_cases": 128,
+    "max_fields_per_object": 32,
+    "max_file_bytes": 524288,
+    "max_input_bytes": 8192,
+    "max_input_chars": 4096,
+    "max_list_items": 32,
+    "max_manifest_bytes": 32768,
+    "max_nesting_depth": 6,
+    "max_string_chars": 4096,
+    "max_task_facts": 8,
+    "max_zero_effects": 20
+  },
+  "preparation_scope": {
+    "exclusions": [
+      "no_production_resolver",
+      "no_task_core_or_store_call",
+      "no_product_or_wire_composition",
+      "no_agent_tool_task_executor_or_tts_call",
+      "no_p3_6_completion_credit"
+    ],
+    "intended_behavior": "deterministically_validate_synthetic_cases_and_frozen_expected_oracles",
+    "owned_surfaces": [
+      "tests/fixtures/live_voice_p3_6_intent_corpus_v1",
+      "tests/support/live_voice/p3_6_intent_corpus.py",
+      "tests/unit_tests/live_voice/test_p3_6_intent_corpus.py"
+    ]
+  },
+  "production_evidence": false,
+  "required_partitions": {
+    "classifications": ["task_intent", "clarification", "dialogue", "rejected"],
+    "confirmations": ["required", "not_required", "not_applicable"],
+    "forms": [
+      "voice_committed_text",
+      "natural_text",
+      "structured_equivalent",
+      "paraphrase",
+      "word_order_variation",
+      "chinese_update_without_ba_jiang"
+    ],
+    "languages": ["en", "zh-CN"],
+    "operations": [
+      "task.create",
+      "task.get",
+      "task.list",
+      "task.status",
+      "task.events",
+      "task.result",
+      "task.update",
+      "task.adjust",
+      "task.provide_input",
+      "task.pause",
+      "task.resume",
+      "task.reprioritize",
+      "task.cancel",
+      "task.create_successor"
+    ],
+    "origins": ["voice", "natural_text", "structured"],
+    "outcomes": [
+      "proposed",
+      "clarification",
+      "dialogue",
+      "rejected",
+      "unsupported",
+      "conflict"
+    ],
+    "safety": [
+      "negation",
+      "correction",
+      "hypothetical",
+      "question",
+      "ordinary_dialogue",
+      "partial_interim",
+      "low_confidence",
+      "quoted_task_text",
+      "adversarial_instruction",
+      "missing_target",
+      "ambiguous_target",
+      "changed_task_set",
+      "confirmation_changed_operation",
+      "confirmation_changed_target",
+      "confirmation_changed_arguments"
+    ],
+    "scenario_dimensions": ["P", "N", "B", "S", "T", "C", "R", "I", "F", "K"],
+    "targets": [
+      "collection",
+      "explicit_task_id",
+      "stable_user_reference",
+      "unique_authorized_name",
+      "duplicate_name",
+      "zero_candidate",
+      "multiple_candidates",
+      "stale_target",
+      "foreign_scope_project",
+      "terminal_predecessor",
+      "two_visible_tasks",
+      "current_recent_hint_only"
+    ]
+  },
+  "scenario_matrix": {
+    "B": {"applicable": true, "evidence": "closed_schema_and_declared_size_count_field_bounds"},
+    "C": {"applicable": true, "evidence": "changed_task_set_and_confirmation_binding_oracles"},
+    "F": {"applicable": true, "evidence": "unsupported_capability_and_fail_closed_oracles"},
+    "I": {"applicable": true, "evidence": "exact_target_scope_project_and_reference_oracles"},
+    "K": {"applicable": true, "evidence": "structured_natural_voice_parity_groups"},
+    "N": {"applicable": true, "evidence": "negative_dialogue_ambiguity_and_adversarial_oracles"},
+    "P": {"applicable": true, "evidence": "all_declared_operation_proposals_and_queries"},
+    "R": {"applicable": true, "evidence": "clarification_and_confirmation_replay_conflict_oracles"},
+    "S": {"applicable": true, "evidence": "terminal_predecessor_and_terminal_conflict_oracles"},
+    "T": {"applicable": true, "evidence": "stale_target_and_changed_snapshot_oracles"},
+    "X": {"applicable": false, "evidence": "preparation_corpus_is_not_a_real_product_path"}
+  },
+  "schema_version": "live-voice.p3-6-intent-corpus.v1",
+  "zero_effects": [
+    "agent_calls",
+    "tool_calls",
+    "task_writes",
+    "attempt_writes",
+    "command_writes",
+    "event_writes",
+    "result_writes",
+    "executor_calls",
+    "scheduler_calls",
+    "file_writes",
+    "network_calls",
+    "audio_tts_calls",
+    "history_writes",
+    "presentation_writes",
+    "other_scope_writes"
+  ]
+}
