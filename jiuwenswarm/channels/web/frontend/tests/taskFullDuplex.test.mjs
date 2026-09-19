@@ -9,7 +9,7 @@ test('task composer delegates only its empty idle action to application plugins'
   assert.match(source, /<ApplicationPluginTaskInputActions/);
   assert.match(source, /!hasTextDraft/);
   assert.match(source, /attachments\.length === 0/);
-  assert.match(source, /fallback=\{\(/);
+  assert.match(source, /fallback=\{[\s\S]*?data-testid="chat-panel-input-send"/);
   assert.match(source, /data-testid="chat-panel-input-send"/);
 });
 

@@ -52,9 +52,11 @@ export function createQwenOmniSessionUpdate(options: QwenOmniSessionOptions): Re
         output: { format: { type: 'pcm', sample_rate: options.outputRate } },
       },
       turn_detection: {
-        type: 'semantic_vad',
+        // Match the local 1.2s end-of-turn window. Semantic VAD can commit a
+        // complete first clause while the user is still adding task constraints.
+        type: 'server_vad',
         threshold: 0.5,
-        silence_duration_ms: 800,
+        silence_duration_ms: 1200,
       },
       enable_input_audio_transcription: true,
       tools: options.tools || [],

@@ -313,6 +313,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         root_permission_queue: RootPermissionQueue | None = None,
     ) -> None:
         super().__init__()
+        self.managed_tasks: dict[str, Any] = {}
         self._deep_agent: Optional[Any] = None
         self._member_name = str(member_name or "").strip()
         self._role = str(role or "").strip().lower()
@@ -514,6 +515,10 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         if not tool_name:
             return False
         return self._is_legacy_tool_interrupt_placeholder_text(content, tool_name)
+
+    def resolve_session_id(self, ctx: AgentCallbackContext, session: Session | None = None) -> str:
+        """Resolve the Host session for execution adapters and task checkpoints."""
+        return self._resolve_sid(ctx, session)
 
     def _resolve_sid(self, ctx: AgentCallbackContext, session: Session | None = None) -> str:
         """Resolve the per-session key used by this rail.
@@ -883,6 +888,9 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
     # ------------------------------------------------------------------
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
+        from jiuwenswarm.runtime.tasks.checkpoint import task_checkpoint
+
+        await task_checkpoint(self, ctx, "before_model")
         sid = self._resolve_sid(ctx, ctx.session)
         await self._get_pause_event(sid).wait()
         if self._abort_requested.get(sid, False):
@@ -951,6 +959,9 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                 )
 
     async def after_model_call(self, ctx: AgentCallbackContext) -> None:
+        from jiuwenswarm.runtime.tasks.checkpoint import task_checkpoint
+
+        await task_checkpoint(self, ctx, "after_model")
         # New agent-core versions emit the complete pre/post context usage
         # snapshots themselves.  The report on the callback context is the
         # capability marker; emitting the legacy rail event as well would add
@@ -970,6 +981,9 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         )
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
+        from jiuwenswarm.runtime.tasks.checkpoint import task_checkpoint
+
+        await task_checkpoint(self, ctx, "before_tool")
         sid = self._resolve_sid(ctx, ctx.session)
         tc = ctx.inputs.tool_call if isinstance(ctx.inputs, ToolCallInputs) else None
         reviewer_progress_metadata = peek_reviewer_tool_result_metadata(

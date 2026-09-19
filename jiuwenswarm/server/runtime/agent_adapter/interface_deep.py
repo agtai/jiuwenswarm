@@ -1814,6 +1814,11 @@ class JiuWenSwarmDeepAdapter:
     - Deep interrupt / user_answer 处理
     """
 
+    @property
+    def task_execution_binding(self):
+        """Expose the session-owned harness and callback rail to task management."""
+        return self._instance, self._stream_event_rail
+
     def __init__(self) -> None:
         # Apply the MCP per-call timeout patch once per process: wraps
         # StreamableHttpClient/SseClient.call_tool & list_tools in
@@ -13408,6 +13413,10 @@ class JiuWenSwarmDeepAdapter:
                 reason="user_cancel",
             )
             cancel_call_completed = True
+            if request.channel_id == "video_tool":
+                from jiuwenswarm.runtime.tasks.checkpoint import close_task_output
+
+                await close_task_output(self._stream_event_rail, request)
             logger.info(
                 "[JiuWenSwarmDeepAdapter] interrupt(%s): interaction round cancel "
                 "cancelled=%s session=%s",
@@ -14832,7 +14841,12 @@ class JiuWenSwarmDeepAdapter:
         """Bind trusted host identity and command execution for one request."""
         async with self._permission_request_admission(request, inputs):
             self.validate_auto_permission_workspace_request(request)
-            with self._bind_permission_request_context(request):
+            from jiuwenswarm.runtime.tasks.checkpoint import bind_task_execution
+
+            with (
+                self._bind_permission_request_context(request),
+                bind_task_execution(request, self, inputs),
+            ):
                 return await self._process_message_impl(request, inputs)
 
     async def _process_message_impl(
@@ -15419,7 +15433,12 @@ class JiuWenSwarmDeepAdapter:
         """Bind trusted host identity and command execution for one stream."""
         async with self._permission_request_admission(request, inputs):
             self.validate_auto_permission_workspace_request(request)
-            with self._bind_permission_request_context(request):
+            from jiuwenswarm.runtime.tasks.checkpoint import bind_task_execution
+
+            with (
+                self._bind_permission_request_context(request),
+                bind_task_execution(request, self, inputs),
+            ):
                 async with aclosing(self._process_message_stream_impl(request, inputs)) as stream:
                     async for chunk in stream:
                         yield chunk
@@ -16337,6 +16356,9 @@ class JiuWenSwarmDeepAdapter:
             # A previous consumer may have stopped mid-round; this stream must
             # sample the run kind again on its own first chunk.
             self._reset_round_kind_latch()
+            from jiuwenswarm.runtime.tasks.checkpoint import bind_task_output
+
+            await bind_task_output(self._stream_event_rail, request, interaction_stream)
             async for chunk in interaction_stream:
                 first_chunk_seen, run_failure = observe_runner_stream_chunk(
                     chunk,
