@@ -45,12 +45,14 @@ _HEADER = _b64(json.dumps({"alg": "HS256", "typ": "BBDOC"}, separators=(",", ":"
 
 
 def mint_doc_token(claims: dict[str, Any], secret: str, ttl_seconds: int = 3600) -> str:
-    """Token for the document service: ``{uid, ws, doc, role}`` plus ``exp``.
+    """Token for the document service: ``{uid, ws, doc, role}`` plus ``iat`` and ``exp``.
 
-    The same format is verified in Node by the document service (milestone 3).
+    The same format is verified in Node by the document service.
     """
+    now = int(time.time())
     body = dict(claims)
-    body["exp"] = int(time.time()) + ttl_seconds
+    body["iat"] = now
+    body["exp"] = now + ttl_seconds
     payload = _b64(json.dumps(body, separators=(",", ":")).encode())
     signature = hmac.new(secret.encode(), f"{_HEADER}.{payload}".encode(), hashlib.sha256).digest()
     return f"{_HEADER}.{payload}.{_b64(signature)}"

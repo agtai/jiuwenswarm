@@ -66,7 +66,7 @@ test('start loads the hosts, picks the default host and its workspaces', async (
   assert.equal(s.hostId, 'h1');
   assert.deepEqual(s.workspaces.map((w) => w.id), ['ws1', 'ws2']);
   assert.equal(s.workspaceId, null);
-  assert.equal(f.handlers.size, 6);
+  assert.equal(f.handlers.size, 8);
   c.stop();
   assert.equal(f.handlers.size, 0);
 });

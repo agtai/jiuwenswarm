@@ -1,5 +1,5 @@
 import type { Plugin } from 'vite'
-import { defineConfig, searchForWorkspaceRoot } from 'vite'
+import { defineConfig, normalizePath, searchForWorkspaceRoot } from 'vite'
 import react from '@vitejs/plugin-react'
 import svgr from 'vite-plugin-svgr'
 import { spawn, spawnSync, type ChildProcess } from 'child_process'
@@ -7,6 +7,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import type { ServerResponse } from 'http'
 import path from 'path'
+import { pathToFileURL } from 'url'
 import fs from 'fs'
 import os from 'os'
 
@@ -1416,6 +1417,36 @@ function devFileContentApi(): Plugin {
   }
 }
 
+const extensionsDir = normalizePath(path.resolve(__dirname, '../../../extensions')) + '/'
+
+// Plugin frontends under extensions/ have no node_modules of their own: their bare imports
+// resolve from this package, as if the importing file lived in src/.
+function extensionBareImports(): Plugin {
+  const anchor = path.resolve(__dirname, 'src/main.tsx')
+  return {
+    name: 'jiuwenswarm:extension-bare-imports',
+    enforce: 'pre',
+    resolveId(source, importer, options) {
+      if (!importer || !normalizePath(importer).startsWith(extensionsDir)) return null
+      if (source.startsWith('.') || source.startsWith('/') || source.startsWith('\0') || path.isAbsolute(source)) return null
+      return this.resolve(source, anchor, { ...options, skipSelf: true })
+    },
+  }
+}
+
+// Blackboard's document service runs in Node on the host. Its packages are this app's, and
+// `npm run build` / `npm run dev` bundle it too, so a checkout needs no extra install step.
+function blackboardDocService(): Plugin {
+  const script = path.resolve(__dirname, '../../../extensions/blackboard/host/docservice/build.mjs')
+  return {
+    name: 'jiuwenswarm:blackboard-docservice',
+    async buildStart() {
+      const { buildDocService } = await import(pathToFileURL(script).href)
+      await buildDocService()
+    },
+  }
+}
+
 // https://vitejs.dev/config/
 function portFromEnv(name: string, fallback: number): number {
   const value = Number.parseInt(process.env[name] ?? '', 10)
@@ -1433,7 +1464,15 @@ const isElectronBuild = process.env.ELECTRON === 'true'
 
 export default defineConfig({
   base: isElectronBuild ? './' : '/',
-  plugins: [suppressWsProxySocketErrors(), devWsTrafficLogger(), devFileContentApi(), react(), svgr()],
+  plugins: [
+    suppressWsProxySocketErrors(),
+    devWsTrafficLogger(),
+    devFileContentApi(),
+    extensionBareImports(),
+    blackboardDocService(),
+    react(),
+    svgr(),
+  ],
   optimizeDeps: {
     include: ['exceljs', 'jszip', 'saxes', 'ssf', 'onnxruntime-web/wasm'],
   },
@@ -1445,6 +1484,9 @@ export default defineConfig({
       react: path.resolve(__dirname, './node_modules/react'),
       'react-dom': path.resolve(__dirname, './node_modules/react-dom'),
       'react-i18next': path.resolve(__dirname, './node_modules/react-i18next'),
+      // Blackboard keeps node marks (author, suggestions) in Yjs with a patched y-tiptap that its
+      // document service shares; the editor must use the same copy.
+      '@tiptap/y-tiptap': path.resolve(__dirname, '../../../extensions/blackboard/host/docservice/vendor/y-tiptap-nodemarks.js'),
     },
   },
   server: {

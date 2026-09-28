@@ -23,6 +23,21 @@ INVITE_LIST = "blackboard.invite.list"
 INVITE_REVOKE = "blackboard.invite.revoke"
 INVITE_ACCEPT = "blackboard.invite.accept"
 
+# Host methods (milestone 3): documents and references.
+DOC_LIST = "blackboard.doc.list"
+DOC_CREATE = "blackboard.doc.create"
+DOC_RENAME = "blackboard.doc.rename"
+DOC_ARCHIVE = "blackboard.doc.archive"
+DOC_SET_INSTRUCTIONS = "blackboard.doc.set_instructions"
+DOC_PIN = "blackboard.doc.pin"
+DOC_IMPORT_MARKDOWN = "blackboard.doc.import_markdown"
+DOC_TOKEN = "blackboard.doc.token"
+DOC_READ = "blackboard.doc.read"
+REFERENCE_LIST = "blackboard.reference.list"
+REFERENCE_REMOVE = "blackboard.reference.remove"
+REFERENCE_URL = "blackboard.reference.url"
+REFERENCE_SET_NOTE = "blackboard.reference.set_note"
+
 HOST_METHODS: tuple[str, ...] = (
     ME,
     ME_SET_NAME,
@@ -38,6 +53,19 @@ HOST_METHODS: tuple[str, ...] = (
     INVITE_CREATE,
     INVITE_LIST,
     INVITE_REVOKE,
+    DOC_LIST,
+    DOC_CREATE,
+    DOC_RENAME,
+    DOC_ARCHIVE,
+    DOC_SET_INSTRUCTIONS,
+    DOC_PIN,
+    DOC_IMPORT_MARKDOWN,
+    DOC_TOKEN,
+    DOC_READ,
+    REFERENCE_LIST,
+    REFERENCE_REMOVE,
+    REFERENCE_URL,
+    REFERENCE_SET_NOTE,
 )
 
 # Methods the host serves without a member token.
@@ -50,6 +78,8 @@ HOSTS_REMOVE = "blackboard.hosts.remove"
 HOSTS_SET_DEFAULT = "blackboard.hosts.set_default"
 HOST_STATUS = "blackboard.host.status"
 HOST_SET_SETTINGS = "blackboard.host.set_settings"
+# The browser sends a file here; the client part posts it to the host as multipart.
+REFERENCE_UPLOAD = "blackboard.reference.upload"
 
 # Events pushed by the host (and forwarded to browsers with a `host` field).
 EV_WORKSPACE_UPDATED = "blackboard.workspace.updated"
@@ -58,12 +88,22 @@ EV_ME_UPDATED = "blackboard.me.updated"
 EV_MEMBER_ROLE_CHANGED = "blackboard.member.role_changed"
 # The host's name changed; sent to every connected member.
 EV_HOST_UPDATED = "blackboard.host.updated"
+EV_DOC_UPDATED = "blackboard.doc.updated"
+EV_REFERENCE_UPDATED = "blackboard.reference.updated"
 # Events of the client part.
 EV_HOSTS_UPDATED = "blackboard.hosts.updated"
 EV_HOST_STATUS = "blackboard.host.status_changed"
 
 HOST_EVENTS = frozenset(
-    {EV_WORKSPACE_UPDATED, EV_MEMBER_UPDATED, EV_ME_UPDATED, EV_MEMBER_ROLE_CHANGED, EV_HOST_UPDATED}
+    {
+        EV_WORKSPACE_UPDATED,
+        EV_MEMBER_UPDATED,
+        EV_ME_UPDATED,
+        EV_MEMBER_ROLE_CHANGED,
+        EV_HOST_UPDATED,
+        EV_DOC_UPDATED,
+        EV_REFERENCE_UPDATED,
+    }
 )
 
 # Paths on the host's HTTP server.
@@ -71,3 +111,4 @@ RPC_PATH = "/blackboard/rpc"
 EVENTS_PATH = "/blackboard/events"
 JOIN_PATH = "/blackboard/join/"
 HEALTH_PATH = "/blackboard/health"
+FILES_PATH = "/blackboard/files/"

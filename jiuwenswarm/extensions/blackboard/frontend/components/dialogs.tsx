@@ -10,7 +10,7 @@ import type { HostStatus, InviteRole, InviteView } from '../types';
 import { Field } from './Field';
 
 // Runs `action`, keeps the dialog open with the error if it throws.
-function useSubmit(onDone: () => void) {
+export function useSubmit(onDone: () => void) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -29,7 +29,7 @@ function useSubmit(onDone: () => void) {
   return { busy, error, setError, run };
 }
 
-function Status({ error }: { error: string | null }) {
+export function Status({ error }: { error: string | null }) {
   return error ? (
     <p className="bb-dialog-error" role="alert" data-testid="blackboard-dialog-error">
       {error}
@@ -161,11 +161,17 @@ export function NewWorkspaceDialog({
 export function RenameDialog({
   open,
   current,
+  heading,
+  testId = 'blackboard-rename',
   onRename,
   onClose,
 }: {
   open: boolean;
   current: string;
+  // Defaults to renaming the workspace.
+  heading?: string;
+  // Prefix of the dialog's test ids.
+  testId?: string;
   onRename: (title: string) => Promise<unknown>;
   onClose: () => void;
 }) {
@@ -182,19 +188,19 @@ export function RenameDialog({
   return (
     <FormDialog
       open={open}
-      title={t('blackboard.rename.title')}
+      title={heading ?? t('blackboard.rename.title')}
       confirmLabel={t('blackboard.rename.submit')}
       cancelLabel={t('common.cancel')}
       confirmLoading={busy}
       submitting={busy}
       confirmDisabled={!title.trim() || title.trim() === current}
       status={<Status error={error} />}
-      testIdPrefix="blackboard-rename-dialog"
+      testIdPrefix={`${testId}-dialog`}
       onConfirm={() => void run(() => onRename(title.trim()))}
       onCancel={onClose}
     >
       <Field label={t('blackboard.newWorkspace.titleLabel')} htmlFor={inputId}>
-        <Input id={inputId} value={title} maxLength={120} data-testid="blackboard-rename-input" onChange={setTitle} />
+        <Input id={inputId} value={title} maxLength={120} data-testid={`${testId}-input`} onChange={setTitle} />
       </Field>
     </FormDialog>
   );

@@ -73,7 +73,9 @@
       "role": "{{name}} 的角色",
       "remove": "移出工作区",
       "removeConfirm": "将 {{name}} 移出 {{title}}？",
-      "disabled": "已停用"
+      "disabled": "已停用",
+      "count_one": "{{count}} 位成员",
+      "count_other": "{{count}} 位成员"
     },
     "invites": {
       "title": "邀请链接",
@@ -148,6 +150,112 @@
       "unavailable": "无法连接到主机。",
       "internal": "主机无法完成此请求。",
       "generic": "出了点问题。"
+    },
+    "docs": {
+      "title": "文档",
+      "new": "新建文档",
+      "newTitle": "新建文档",
+      "create": "创建",
+      "titleLabel": "标题",
+      "startFrom": "内容",
+      "startFromHint": "从空白开始，或从 Markdown 文件开始。",
+      "emptyDocument": "空白文档",
+      "chooseFile": "选择文件",
+      "pick": "在左侧选择一个文档。",
+      "menu": "文档操作",
+      "rename": "重命名",
+      "renameTitle": "重命名文档",
+      "pin": "置顶",
+      "unpin": "取消置顶",
+      "pinned": "已置顶",
+      "instructions": "说明",
+      "makeInstructions": "设为说明文档",
+      "import": "导入 Markdown",
+      "importTitle": "将 Markdown 导入 {{title}}",
+      "importSubmit": "替换内容",
+      "importWarning": "这会替换整个文档，所有打开此文档的人都会看到新内容。",
+      "markdownLabel": "Markdown",
+      "viewMarkdown": "以 Markdown 查看",
+      "markdownTitle": "{{title}} 的 Markdown",
+      "markdownHint": "这是智能体读取的内容。每个顶层块以其 id 开头。",
+      "copy": "复制",
+      "copied": "已复制。",
+      "archive": "归档",
+      "archiveConfirm": "归档 {{title}}？它会从所有人的列表中消失。"
+    },
+    "editor": {
+      "status": {
+        "connecting": "连接中",
+        "syncing": "保存中",
+        "saved": "已保存",
+        "offline": "离线",
+        "unavailable": "不可用",
+        "closed": "已关闭"
+      },
+      "readOnly": "只读",
+      "archived": "已归档",
+      "authors": "作者",
+      "noAuthors": "暂无文字。",
+      "agent": "（智能体）",
+      "toolbar": "格式",
+      "tools": {
+        "undo": "撤销",
+        "redo": "重做",
+        "h1": "一级标题",
+        "h2": "二级标题",
+        "h3": "三级标题",
+        "bold": "加粗",
+        "italic": "斜体",
+        "strike": "删除线",
+        "code": "行内代码",
+        "bulletList": "无序列表",
+        "orderedList": "有序列表",
+        "taskList": "待办清单",
+        "blockquote": "引用",
+        "codeBlock": "代码块",
+        "table": "表格"
+      },
+      "suggested": {
+        "insertion": "建议添加此内容。",
+        "deletion": "建议删除此内容。"
+      },
+      "reason": {
+        "not_member": "你已不是此工作区的成员。",
+        "not_found": "此文档已不存在。",
+        "doc_not_found": "此文档已不存在。",
+        "forbidden": "你的角色无权打开此文档。",
+        "unauthorized": "主机不接受此成员的令牌。",
+        "disabled": "你在此主机上的账号已被停用。",
+        "access_revoked": "你已无权访问此文档。",
+        "unavailable": "主机上的文档服务未运行。",
+        "internal": "无法打开此文档。"
+      }
+    },
+    "docservice": {
+      "down": "文档暂时不可用。",
+      "stopped": "文档服务已停止。",
+      "starting": "文档服务正在启动。",
+      "restarting": "文档服务正在重启。",
+      "not_built": "文档不可用：主机上的文档服务尚未构建。",
+      "node_missing": "文档不可用：主机上没有 Node.js。请安装 Node.js 22.5 或更高版本。",
+      "node_too_old": "文档不可用：主机上的 Node.js 低于 22.5。",
+      "start_failed": "文档服务未能启动。请查看主机数据目录中的 docservice.log。",
+      "exited": "文档服务已停止，正在重启。",
+      "not_configured": "此主机未运行文档服务。"
+    },
+    "references": {
+      "tab": "参考资料",
+      "limit": "每个文件最大 {{mb}} MB",
+      "upload": "上传",
+      "drop": "将文件拖到此处即可添加。",
+      "empty": "暂无参考资料。",
+      "note": "备注",
+      "addNote": "添加备注",
+      "editNote": "编辑备注",
+      "remove": "移除",
+      "removeConfirm": "移除 {{name}}？指向它的链接将失效。",
+      "tooBig": "{{name}} 超过 {{mb}} MB。",
+      "uploaded": "已上传 {{name}}。"
     }
   },
   "common": {

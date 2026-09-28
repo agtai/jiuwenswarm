@@ -34,7 +34,11 @@ if symphony_root not in sys.path:
     sys.path.insert(0, symphony_root)
 
 DATA_FILE_PATTERNS = ["**/*.yaml", "**/*.yml", "**/*.json", "**/*.md"]
-EXTENSION_DATA_FILE_PATTERNS = ["**/*.py", *DATA_FILE_PATTERNS]
+# Blackboard's document service ships as its Node bundle (built by the web app's `npm run build`);
+# its TypeScript sources and tests stay out.
+DOCSERVICE_BUNDLE = ["blackboard/host/docservice/dist/server.mjs", "blackboard/host/docservice/dist/THIRD_PARTY_NOTICES.txt"]
+EXTENSION_DATA_FILE_PATTERNS = ["**/*.py", *DATA_FILE_PATTERNS, *DOCSERVICE_BUNDLE]
+EXTENSION_DATA_EXCLUDES = ["blackboard/host/docservice/test/**/*", "blackboard/host/docservice/tsconfig.json"]
 DISPATCH_PACKAGE_ROOTS = ("indexing", "models", "orchestration", "retrieval", "shared")
 EXCLUDED_RESOURCE_DIRS = (
     os.path.join("agent", "workspace", "skills", "project-maintainer"),
@@ -141,6 +145,14 @@ if not os.path.isdir(web_dist) or not os.listdir(web_dist):
     raise SystemExit(
         "错误: 请先构建前端。执行: cd jiuwenswarm/channels/web/frontend && npm install && npm run build"
     )
+# The web app's build also writes Blackboard's document service bundle.
+docservice_bundle = os.path.join(
+    project_root, "jiuwenswarm", "extensions", "blackboard", "host", "docservice", "dist", "server.mjs"
+)
+if not os.path.isfile(docservice_bundle):
+    raise SystemExit(
+        "错误: 缺少 Blackboard 文档服务。执行: cd jiuwenswarm/channels/web/frontend && npm install && npm run build"
+    )
 
 # 数据文件：resources（含 agent 模板）、前端构建产物
 datas = webview_datas + [
@@ -207,6 +219,7 @@ datas += collect_data_files(
     "jiuwenswarm.extensions",
     include_py_files=True,
     includes=EXTENSION_DATA_FILE_PATTERNS,
+    excludes=EXTENSION_DATA_EXCLUDES,
 )
 datas += collect_data_files(
     "jiuwenswarm.symphony",

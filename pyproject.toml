@@ -177,6 +177,9 @@ jiuwenswarm = [
     "extensions/**/*.yaml",
     "extensions/**/*.yml",
     "extensions/**/*.md",
+    # Blackboard's document service: the Node bundle built by the web app's `npm run build`.
+    "extensions/blackboard/host/docservice/dist/server.mjs",
+    "extensions/blackboard/host/docservice/dist/THIRD_PARTY_NOTICES.txt",
 ]
 jiuwenbox = [
     "configs/**/*",
@@ -189,6 +192,8 @@ jiuwenswarm = [
     "channels/web/frontend/node_modules/*",
     "resources/agent/workspace/skills/project-maintainer/**/*",
     "resources/agent/workspace/skills/project-maintainer/*",
+    "extensions/blackboard/host/docservice/test/**/*",
+    "extensions/blackboard/host/docservice/test/*",
 ]
 
 [tool.uv]

@@ -1449,7 +1449,7 @@ blackboard:
     name: ""               # what members see; empty means "<operator>'s Blackboard"
     bind: 127.0.0.1        # 0.0.0.0 lets other machines connect
     port: 19011            # member API and invite links
-    doc_port: 19010        # document service for browsers (milestone 3)
+    doc_port: 19010        # document service for browsers
     doc_api_port: 19012    # document service internal API, loopback only
     public_url: ""         # the address members use, e.g. https://bb.example.com
     doc_public_url: ""

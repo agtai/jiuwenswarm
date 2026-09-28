@@ -76,5 +76,47 @@ export interface HostStatus {
   reachable_from_other_machines: boolean;
 }
 
+export interface DocView {
+  id: string;
+  workspace_id: string;
+  title: string;
+  is_instructions: boolean;
+  is_pinned: boolean;
+  created_by: string;
+  created_at: string;
+  archived: boolean;
+}
+
+export type DocServiceState = 'stopped' | 'starting' | 'running' | 'restarting' | 'unavailable';
+
+export interface DocServiceStatus {
+  status: DocServiceState;
+  // not_built | node_missing | node_too_old | start_failed | exited | not_configured
+  reason?: string | null;
+  detail?: string;
+}
+
+export interface ReferenceView {
+  id: string;
+  workspace_id: string;
+  kind: 'file' | 'image';
+  name: string;
+  mime: string;
+  size: number;
+  note: string;
+  uploaded_by: string;
+  uploaded_by_name: string | null;
+  uploaded_at: string;
+}
+
+export interface DocToken {
+  token: string;
+  url: string;
+  role: Role;
+  // The document or its workspace is archived: it opens read-only.
+  frozen: boolean;
+  expires_in: number;
+}
+
 export type Rpc = <T = unknown>(method: string, params?: Record<string, unknown>) => Promise<T>;
 export type Subscribe = (event: string, handler: (payload: Record<string, unknown>) => void) => () => void;

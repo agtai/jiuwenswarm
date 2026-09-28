@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -55,7 +56,7 @@ class HostController:
     async def start(self) -> None:
         if self.running:
             return
-        runtime = HostRuntime(lambda: self._settings, self._data_dir, self._version)
+        runtime = HostRuntime(lambda: self._settings, self._data_dir, self._version, self._docs_changed)
         try:
             ctx = await runtime.start()
             operator = await runtime.operator(default_operator_name(self._settings))
@@ -78,6 +79,10 @@ class HostController:
             self.runtime = runtime
             self.error = None
         await self._broadcast(p.EV_HOST_STATUS, self.status())
+
+    def _docs_changed(self) -> None:
+        with contextlib.suppress(RuntimeError):  # no running loop: the Gateway is shutting down
+            asyncio.get_running_loop().create_task(self._broadcast(p.EV_HOST_STATUS, self.status()))
 
     async def _operator_token(self, runtime: HostRuntime, host_uid: str, operator_id: str) -> str:
         """Reuse the operator's token if this instance still holds it; otherwise issue a new one."""
@@ -111,6 +116,9 @@ class HostController:
         else:
             if new.name != old.name:
                 await self._announce_name()
+            if (new.doc_port, new.doc_api_port, new.node_path) != (old.doc_port, old.doc_api_port, old.node_path):
+                assert self.runtime is not None
+                await self.runtime.restart_docs()
             await self._broadcast(p.EV_HOST_STATUS, self.status())
         return self.status()
 

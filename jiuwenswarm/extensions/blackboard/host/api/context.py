@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Callable
+from pathlib import Path
+from typing import TYPE_CHECKING, Callable
 
 from jiuwenswarm.extensions.blackboard.common.config import HostSettings
-from jiuwenswarm.extensions.blackboard.common.errors import DISABLED, UNAUTHORIZED, BlackboardError
+from jiuwenswarm.extensions.blackboard.common.errors import DISABLED, UNAUTHORIZED, UNAVAILABLE, BlackboardError
 from jiuwenswarm.extensions.blackboard.common.tokens import hash_token
 from jiuwenswarm.extensions.blackboard.host.api.events import EventHub
 from jiuwenswarm.extensions.blackboard.host.secrets import HostSecrets
 from jiuwenswarm.extensions.blackboard.host.store import Store, users
 from jiuwenswarm.extensions.blackboard.host.store.models import User
+
+if TYPE_CHECKING:
+    from jiuwenswarm.extensions.blackboard.host.docservice_manager import DocServiceClient, DocServiceManager
 
 _TOUCH_INTERVAL_S = 60.0
 
@@ -25,11 +29,23 @@ class HostContext:
     host_uid: str
     version: str
     get_settings: Callable[[], HostSettings]
+    # The document service (milestone 3); None where only milestone 2 features run.
+    docs: "DocServiceManager | None" = None
+    # Where reference files are kept: <files_dir>/<workspace id>/<reference id><ext>.
+    files_dir: Path | None = None
     _last_touch: dict[str, float] = field(default_factory=dict)
 
     @property
     def settings(self) -> HostSettings:
         return self.get_settings()
+
+    def doc_client(self) -> "DocServiceClient":
+        if self.docs is None:
+            raise BlackboardError(UNAVAILABLE, "this host runs without a document service")
+        return self.docs.require_client()
+
+    def docservice_status(self) -> dict:
+        return self.docs.status() if self.docs is not None else {"status": "unavailable", "reason": "not_configured"}
 
     def invite_url(self, code: str) -> str:
         return f"{self.settings.base_url()}/blackboard/join/{code}"

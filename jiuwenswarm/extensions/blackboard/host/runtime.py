@@ -1,4 +1,4 @@
-"""Starts and stops the host: store, secrets, operator user and the HTTP server."""
+"""Starts and stops the host: store, secrets, operator user, the HTTP server and the document service."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from jiuwenswarm.extensions.blackboard.common.tokens import hash_token, new_memb
 from jiuwenswarm.extensions.blackboard.host.api.app import build_app
 from jiuwenswarm.extensions.blackboard.host.api.context import HostContext
 from jiuwenswarm.extensions.blackboard.host.api.events import EventHub
+from jiuwenswarm.extensions.blackboard.host.docservice_manager import DocServiceManager
 from jiuwenswarm.extensions.blackboard.host.secrets import load_or_create
 from jiuwenswarm.extensions.blackboard.host.store import Store, meta, users, workspaces
 from jiuwenswarm.extensions.blackboard.host.store.models import User
@@ -61,8 +62,15 @@ def _bind(host: str, port: int) -> socket.socket:
 class HostRuntime:
     """One running host. Create a new one to apply changed bind or port settings."""
 
-    def __init__(self, get_settings: Callable[[], HostSettings], data_dir: Path, version: str) -> None:
+    def __init__(
+        self,
+        get_settings: Callable[[], HostSettings],
+        data_dir: Path,
+        version: str,
+        on_docs_change: Callable[[], None] = lambda: None,
+    ) -> None:
         self._get_settings = get_settings
+        self._on_docs_change = on_docs_change
         self._data_dir = Path(data_dir)
         self._version = version
         self.store: Store | None = None
@@ -70,6 +78,7 @@ class HostRuntime:
         self.listening: tuple[str, int] | None = None
         self._server: _Server | None = None
         self._task: asyncio.Task | None = None
+        self.docs: DocServiceManager | None = None
 
     @property
     def running(self) -> bool:
@@ -93,6 +102,14 @@ class HostRuntime:
                 host_uid=host_uid,
                 version=self._version,
                 get_settings=self._get_settings,
+                docs=DocServiceManager(
+                    data_dir=self._data_dir,
+                    get_settings=self._get_settings,
+                    secrets=secrets,
+                    version=self._version,
+                    on_change=self._on_docs_change,
+                ),
+                files_dir=self._data_dir / "references",
             )
             try:
                 sock = _bind(settings.bind, settings.port)
@@ -121,9 +138,18 @@ class HostRuntime:
             await store.close()
             raise
         self.store, self.ctx, self._server, self._task = store, ctx, server, task
+        self.docs = ctx.docs
         self.listening = sock.getsockname()[:2]
         logger.info("blackboard: host listening on %s:%s (members use %s)", *self.listening, settings.base_url())
+        # The host serves members without the document service too; documents wait for it.
+        assert self.docs is not None
+        self.docs.start()
         return ctx
+
+    async def restart_docs(self) -> None:
+        if self.docs is not None:
+            await self.docs.stop()
+            self.docs.start()
 
     @staticmethod
     async def _serve(server: _Server, sock: socket.socket) -> None:
@@ -136,6 +162,8 @@ class HostRuntime:
             sock.close()
 
     async def stop(self) -> None:
+        if self.docs is not None:
+            await self.docs.stop()
         if self.ctx is not None:
             await self.ctx.hub.close_all()
         if self._server is not None:
@@ -145,7 +173,7 @@ class HostRuntime:
                 await asyncio.wait_for(self._task, timeout=5.0)
         if self.store is not None:
             await self.store.close()
-        self.store = self.ctx = self._server = self._task = None
+        self.store = self.ctx = self._server = self._task = self.docs = None
         self.listening = None
 
     async def operator(self, display_name: str) -> User:
@@ -182,7 +210,7 @@ class HostRuntime:
             "base_url": settings.base_url(),
             "host_uid": self.ctx.host_uid if self.ctx else None,
             "connections": self.ctx.hub.connection_count if self.ctx else 0,
-            "docservice": {"status": "not_configured"},
+            "docservice": self.ctx.docservice_status() if self.ctx else {"status": "stopped", "reason": None},
         }
 
 

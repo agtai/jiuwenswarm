@@ -16,11 +16,12 @@ from jiuwenswarm.extensions.blackboard.common.errors import (
     UNAVAILABLE,
     BlackboardError,
 )
-from jiuwenswarm.extensions.blackboard.common.protocol import EVENTS_PATH, RPC_PATH
+from jiuwenswarm.extensions.blackboard.common.protocol import EVENTS_PATH, FILES_PATH, RPC_PATH
 
 logger = logging.getLogger(__name__)
 
 HTTP_TIMEOUT_S = 15.0
+UPLOAD_TIMEOUT_S = 300.0
 RETRIES = 3
 BACKOFF_MAX_S = 30.0
 AUTH_FAILED_RETRY_S = 300.0
@@ -61,19 +62,39 @@ async def call_host(
             continue
         except httpx.TimeoutException as exc:
             raise BlackboardError(UNAVAILABLE, f"the host did not answer in {timeout:.0f} s", {"url": base_url}) from exc
-        try:
-            data = response.json()
-        except ValueError as exc:
-            raise BlackboardError(
-                UNAVAILABLE, f"the host answered with HTTP {response.status_code}", {"url": base_url}
-            ) from exc
-        if isinstance(data, dict) and data.get("ok") is True:
-            payload = data.get("payload")
-            return payload if isinstance(payload, dict) else {}
-        if isinstance(data, dict) and isinstance(data.get("error"), dict):
-            raise BlackboardError.from_dict(data["error"])
-        raise BlackboardError(UNAVAILABLE, f"the host answered with HTTP {response.status_code}", {"url": base_url})
+        return _payload(response, base_url)
     raise BlackboardError(UNAVAILABLE, f"cannot reach the host at {base_url}", {"url": base_url, "error": str(last)})
+
+
+def _payload(response: httpx.Response, base_url: str) -> dict[str, Any]:
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise BlackboardError(UNAVAILABLE, f"the host answered with HTTP {response.status_code}", {"url": base_url}) from exc
+    if isinstance(data, dict) and data.get("ok") is True:
+        payload = data.get("payload")
+        return payload if isinstance(payload, dict) else {}
+    if isinstance(data, dict) and isinstance(data.get("error"), dict):
+        raise BlackboardError.from_dict(data["error"])
+    raise BlackboardError(UNAVAILABLE, f"the host answered with HTTP {response.status_code}", {"url": base_url})
+
+
+async def upload_to_host(
+    base_url: str, token: str, workspace_id: str, *, name: str, content: bytes, mime: str, note: str = ""
+) -> dict[str, Any]:
+    """One reference file to a host, as multipart; not retried, the browser shows the error."""
+    url = f"{base_url.rstrip('/')}{FILES_PATH}{workspace_id}"
+    try:
+        async with httpx.AsyncClient(timeout=UPLOAD_TIMEOUT_S) as client:
+            response = await client.post(
+                url,
+                headers={"Authorization": f"Bearer {token}"},
+                files={"file": (name, content, mime)},
+                data={"note": note},
+            )
+    except httpx.HTTPError as exc:
+        raise BlackboardError(UNAVAILABLE, f"cannot reach the host at {base_url}", {"url": base_url, "error": str(exc)}) from exc
+    return _payload(response, base_url)
 
 
 class HostLink:
@@ -103,6 +124,9 @@ class HostLink:
 
     async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         return await call_host(self.base_url, method, params, token=self._token)
+
+    async def upload(self, workspace_id: str, **file: Any) -> dict[str, Any]:
+        return await upload_to_host(self.base_url, self._token, workspace_id, **file)
 
     def start(self) -> None:
         if self._task is None or self._task.done():

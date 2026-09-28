@@ -20,7 +20,15 @@ from jiuwenswarm.extensions.registry import ExtensionRegistry
 from jiuwenswarm.extensions.sdk import ApplicationPluginServices
 
 PLUGIN_DIR = Path(extension.__file__).parent
-LOCAL_METHODS = {p.HOSTS_LIST, p.HOSTS_JOIN, p.HOSTS_REMOVE, p.HOSTS_SET_DEFAULT, p.HOST_STATUS, p.HOST_SET_SETTINGS}
+LOCAL_METHODS = {
+    p.HOSTS_LIST,
+    p.HOSTS_JOIN,
+    p.HOSTS_REMOVE,
+    p.HOSTS_SET_DEFAULT,
+    p.HOST_STATUS,
+    p.HOST_SET_SETTINGS,
+    p.REFERENCE_UPLOAD,
+}
 
 
 async def test_the_loader_registers_the_plugin_and_its_page():

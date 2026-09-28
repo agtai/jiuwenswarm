@@ -128,3 +128,85 @@ class Invite:
         if self.max_uses is not None and self.uses >= self.max_uses:
             return "used_up"
         return "active"
+
+
+@dataclass(frozen=True)
+class Doc:
+    id: str
+    workspace_id: str
+    title: str
+    is_instructions: bool
+    is_pinned: bool
+    created_by: str
+    created_at: str
+    archived_at: str | None
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> "Doc":
+        return cls(
+            id=row["id"],
+            workspace_id=row["workspace_id"],
+            title=row["title"],
+            is_instructions=bool(row["is_instructions"]),
+            is_pinned=bool(row["is_pinned"]),
+            created_by=row["created_by"],
+            created_at=row["created_at"],
+            archived_at=row["archived_at"],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "workspace_id": self.workspace_id,
+            "title": self.title,
+            "is_instructions": self.is_instructions,
+            "is_pinned": self.is_pinned,
+            "created_by": self.created_by,
+            "created_at": self.created_at,
+            "archived": self.archived_at is not None,
+        }
+
+
+@dataclass(frozen=True)
+class Reference:
+    id: str
+    workspace_id: str
+    kind: str
+    name: str
+    mime: str
+    size: int
+    stored_path: str
+    note: str
+    uploaded_by: str
+    uploaded_at: str
+    removed_at: str | None
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> "Reference":
+        return cls(
+            id=row["id"],
+            workspace_id=row["workspace_id"],
+            kind=row["kind"],
+            name=row["name"],
+            mime=row["mime"],
+            size=int(row["size"]),
+            stored_path=row["stored_path"],
+            note=row["note"],
+            uploaded_by=row["uploaded_by"],
+            uploaded_at=row["uploaded_at"],
+            removed_at=row["removed_at"],
+        )
+
+    def to_dict(self, uploader_name: str | None = None) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "workspace_id": self.workspace_id,
+            "kind": self.kind,
+            "name": self.name,
+            "mime": self.mime,
+            "size": self.size,
+            "note": self.note,
+            "uploaded_by": self.uploaded_by,
+            "uploaded_by_name": uploader_name,
+            "uploaded_at": self.uploaded_at,
+        }

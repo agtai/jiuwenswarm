@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from fastapi import FastAPI, Request, WebSocket
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from jiuwenswarm.extensions.blackboard.common import protocol as p
+from jiuwenswarm.extensions.blackboard.host.api import documents as _documents  # noqa: F401 - registers methods
+from jiuwenswarm.extensions.blackboard.host.api import references
 from jiuwenswarm.extensions.blackboard.host.api.context import HostContext
 from jiuwenswarm.extensions.blackboard.host.api.pages import join_page
 from jiuwenswarm.extensions.blackboard.host.api.rpc import handle_rpc
@@ -40,16 +42,18 @@ def build_app(ctx: HostContext) -> FastAPI:
         title, role, state = await ctx.store.read(lookup)
         return HTMLResponse(join_page(ctx.invite_url(code), title, role, state))
 
+    @app.post(p.FILES_PATH + "{workspace_id}")
+    async def upload(workspace_id: str, request: Request) -> JSONResponse:
+        return await references.upload(ctx, workspace_id, request)
+
+    @app.get(p.FILES_PATH + "{workspace_id}/{reference_id}")
+    async def download(workspace_id: str, reference_id: str, t: str | None = None) -> Response:
+        return await references.download(ctx, workspace_id, reference_id, t)
+
     @app.get(p.HEALTH_PATH)
     async def health() -> JSONResponse:
         return JSONResponse(
-            {
-                "ok": True,
-                "version": ctx.version,
-                "host_uid": ctx.host_uid,
-                # The document service arrives in milestone 3.
-                "docservice": {"status": "not_configured"},
-            }
+            {"ok": True, "version": ctx.version, "host_uid": ctx.host_uid, "docservice": ctx.docservice_status()}
         )
 
     return app

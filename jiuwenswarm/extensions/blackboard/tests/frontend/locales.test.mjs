@@ -38,12 +38,15 @@ test('zh and en have the same blackboard keys', () => {
   assert.deepEqual([...en].filter((k) => !zh.has(k)).sort(), []);
 });
 
+// A plural key (t('x', { count })) exists as x_one and x_other.
+const has = (keys, key) => keys.has(key) || (keys.has(`${key}_one`) && keys.has(`${key}_other`));
+
 test('every static blackboard key used in the frontend exists', () => {
   const missing = [];
   for (const file of sources(PLUGIN_FRONTEND)) {
     const text = readFileSync(file, 'utf8');
     for (const match of text.matchAll(/\bt\(\s*'(blackboard\.[A-Za-z0-9_.]+)'/g)) {
-      if (!zh.has(match[1]) || !en.has(match[1])) missing.push(`${path.basename(file)}: ${match[1]}`);
+      if (!has(zh, match[1]) || !has(en, match[1])) missing.push(`${path.basename(file)}: ${match[1]}`);
     }
   }
   assert.deepEqual(missing, []);
@@ -62,5 +65,16 @@ test('the keys built at runtime exist for every value they take', () => {
   }
   for (const value of ['none', '1', '5', '10', '25', '50', '100']) {
     assert.ok(en.has(`blackboard.invites.usesOptions.${value}`), value);
+  }
+  for (const status of ['connecting', 'syncing', 'saved', 'offline', 'unavailable', 'closed']) {
+    assert.ok(en.has(`blackboard.editor.status.${status}`), status);
+  }
+  const tools = ['undo', 'redo', 'h1', 'h2', 'h3', 'bold', 'italic', 'strike', 'code'];
+  for (const tool of [...tools, 'bulletList', 'orderedList', 'taskList', 'blockquote', 'codeBlock', 'table']) {
+    assert.ok(en.has(`blackboard.editor.tools.${tool}`), tool);
+  }
+  for (const kind of ['insertion', 'deletion']) assert.ok(en.has(`blackboard.editor.suggested.${kind}`), kind);
+  for (const reason of ['not_built', 'node_missing', 'node_too_old', 'start_failed', 'exited', 'not_configured', 'stopped', 'starting']) {
+    assert.ok(en.has(`blackboard.docservice.${reason}`), reason);
   }
 });

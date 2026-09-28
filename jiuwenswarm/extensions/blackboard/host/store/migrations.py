@@ -52,6 +52,39 @@ MIGRATIONS: list[tuple[int, tuple[str, ...]]] = [
             "CREATE INDEX invites_workspace ON invites(workspace_id)",
         ),
     ),
+    (
+        2,
+        (
+            # Documents: the id is also the document service's document name.
+            """CREATE TABLE docs (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                title TEXT NOT NULL,
+                is_instructions INTEGER NOT NULL DEFAULT 0,
+                is_pinned INTEGER NOT NULL DEFAULT 0,
+                created_by TEXT NOT NULL REFERENCES users(id),
+                created_at TEXT NOT NULL,
+                archived_at TEXT
+            )""",
+            "CREATE INDEX docs_workspace ON docs(workspace_id)",
+            "CREATE UNIQUE INDEX docs_one_instructions ON docs(workspace_id) WHERE is_instructions = 1",
+            # Files members upload to a workspace; stored under references/<workspace id>/.
+            """CREATE TABLE references_ (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL CHECK (kind IN ('file', 'image')),
+                name TEXT NOT NULL,
+                mime TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                stored_path TEXT NOT NULL,
+                note TEXT NOT NULL DEFAULT '',
+                uploaded_by TEXT NOT NULL REFERENCES users(id),
+                uploaded_at TEXT NOT NULL,
+                removed_at TEXT
+            )""",
+            "CREATE INDEX references_workspace ON references_(workspace_id)",
+        ),
+    ),
 ]
 
 LATEST_VERSION = MIGRATIONS[-1][0]

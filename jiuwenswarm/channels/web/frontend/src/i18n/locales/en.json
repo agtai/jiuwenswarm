@@ -73,7 +73,9 @@
       "role": "Role of {{name}}",
       "remove": "Remove from workspace",
       "removeConfirm": "Remove {{name}} from {{title}}?",
-      "disabled": "disabled"
+      "disabled": "disabled",
+      "count_one": "{{count}} member",
+      "count_other": "{{count}} members"
     },
     "invites": {
       "title": "Invite links",
@@ -148,6 +150,112 @@
       "unavailable": "Cannot reach the host.",
       "internal": "The host could not complete the request.",
       "generic": "Something went wrong."
+    },
+    "docs": {
+      "title": "Documents",
+      "new": "New document",
+      "newTitle": "New document",
+      "create": "Create",
+      "titleLabel": "Title",
+      "startFrom": "Content",
+      "startFromHint": "Start empty, or from a Markdown file.",
+      "emptyDocument": "Empty document",
+      "chooseFile": "Choose file",
+      "pick": "Pick a document on the left.",
+      "menu": "Document actions",
+      "rename": "Rename",
+      "renameTitle": "Rename document",
+      "pin": "Pin",
+      "unpin": "Unpin",
+      "pinned": "Pinned",
+      "instructions": "Instructions",
+      "makeInstructions": "Use as instructions",
+      "import": "Import Markdown",
+      "importTitle": "Import Markdown into {{title}}",
+      "importSubmit": "Replace content",
+      "importWarning": "This replaces the whole document for everyone who has it open.",
+      "markdownLabel": "Markdown",
+      "viewMarkdown": "View as Markdown",
+      "markdownTitle": "{{title}} as Markdown",
+      "markdownHint": "This is what agents read. Each top-level block starts with its id.",
+      "copy": "Copy",
+      "copied": "Copied.",
+      "archive": "Archive",
+      "archiveConfirm": "Archive {{title}}? It disappears from the list for everyone."
+    },
+    "editor": {
+      "status": {
+        "connecting": "Connecting",
+        "syncing": "Saving",
+        "saved": "Saved",
+        "offline": "Offline",
+        "unavailable": "Unavailable",
+        "closed": "Closed"
+      },
+      "readOnly": "Read-only",
+      "archived": "Archived",
+      "authors": "Authors",
+      "noAuthors": "No text yet.",
+      "agent": "(agent)",
+      "toolbar": "Formatting",
+      "tools": {
+        "undo": "Undo",
+        "redo": "Redo",
+        "h1": "Heading 1",
+        "h2": "Heading 2",
+        "h3": "Heading 3",
+        "bold": "Bold",
+        "italic": "Italic",
+        "strike": "Strikethrough",
+        "code": "Inline code",
+        "bulletList": "Bulleted list",
+        "orderedList": "Numbered list",
+        "taskList": "Checklist",
+        "blockquote": "Quote",
+        "codeBlock": "Code block",
+        "table": "Table"
+      },
+      "suggested": {
+        "insertion": "Suggests adding this.",
+        "deletion": "Suggests removing this."
+      },
+      "reason": {
+        "not_member": "You are no longer a member of this workspace.",
+        "not_found": "This document no longer exists.",
+        "doc_not_found": "This document no longer exists.",
+        "forbidden": "Your role does not allow opening this document.",
+        "unauthorized": "The host did not accept this member's token.",
+        "disabled": "Your account is disabled on this host.",
+        "access_revoked": "You no longer have access to this document.",
+        "unavailable": "The document service is not running on the host.",
+        "internal": "The document could not be opened."
+      }
+    },
+    "docservice": {
+      "down": "Documents are unavailable right now.",
+      "stopped": "The document service is stopped.",
+      "starting": "The document service is starting.",
+      "restarting": "The document service is restarting.",
+      "not_built": "Documents are unavailable: the document service is not built on the host.",
+      "node_missing": "Documents are unavailable: the host has no Node.js. Install Node.js 22.5 or later.",
+      "node_too_old": "Documents are unavailable: the host's Node.js is older than 22.5.",
+      "start_failed": "The document service did not start. See docservice.log in the host's data folder.",
+      "exited": "The document service stopped and is restarting.",
+      "not_configured": "This host runs without a document service."
+    },
+    "references": {
+      "tab": "References",
+      "limit": "Up to {{mb}} MB per file",
+      "upload": "Upload",
+      "drop": "Drop files here to add them.",
+      "empty": "No references yet.",
+      "note": "Note",
+      "addNote": "Add note",
+      "editNote": "Edit note",
+      "remove": "Remove",
+      "removeConfirm": "Remove {{name}}? Links to it stop working.",
+      "tooBig": "{{name}} is larger than {{mb}} MB.",
+      "uploaded": "Uploaded {{name}}."
     }
   },
   "common": {

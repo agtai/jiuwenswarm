@@ -1,17 +1,67 @@
+import { Suspense, lazy, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Archive, ArchiveRestore, FileText, Pencil, Trash2 } from 'lucide-react';
+import {
+  Archive,
+  ArchiveRestore,
+  BookMarked,
+  FileCode2,
+  FileInput,
+  FilePlus2,
+  FileText,
+  MoreHorizontal,
+  Pencil,
+  Pin,
+  PinOff,
+  Trash2,
+} from 'lucide-react';
 
-import { Button, Tag } from '../../../../channels/web/frontend/src/components/ui';
-import type { WorkspaceView } from '../types';
+import {
+  Button,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+  Tag,
+} from '../../../../channels/web/frontend/src/components/ui';
+import type { DocServiceStatus, DocToken, DocView, WorkspaceView } from '../types';
+
+const DocumentEditor = lazy(() => import('../editor/DocumentEditor'));
+
+export interface DocActions {
+  rename: (doc: DocView) => void;
+  setPinned: (doc: DocView, pinned: boolean) => void;
+  setInstructions: (doc: DocView) => void;
+  importMarkdown: (doc: DocView) => void;
+  viewMarkdown: (doc: DocView) => void;
+  archive: (doc: DocView) => void;
+}
 
 export function WorkspacePane({
   workspace,
+  doc,
+  hasDocs,
+  canEdit,
+  docservice,
+  me,
+  names,
+  fetchToken,
+  docActions,
+  onNewDoc,
   onRename,
   onArchive,
   onUnarchive,
   onDelete,
 }: {
   workspace: WorkspaceView;
+  doc: DocView | null;
+  hasDocs: boolean;
+  canEdit: boolean;
+  docservice: DocServiceStatus | null;
+  me: { id: string; name: string } | null;
+  names: ReadonlyMap<string, string>;
+  fetchToken: (docId: string) => Promise<DocToken>;
+  docActions: DocActions;
+  onNewDoc: () => void;
   onRename: () => void;
   onArchive: () => void;
   onUnarchive: () => void;
@@ -19,6 +69,7 @@ export function WorkspacePane({
 }) {
   const { t } = useTranslation();
   const owner = workspace.role === 'owner';
+  const serviceDown = docservice !== null && docservice.status !== 'running';
   return (
     <section className="bb-workspace" data-testid="blackboard-workspace">
       <header className="bb-workspace__head">
@@ -64,10 +115,96 @@ export function WorkspacePane({
           {t('blackboard.workspace.archivedNotice')}
         </p>
       ) : null}
-      <div className="bb-empty" data-testid="blackboard-documents-empty">
-        <FileText aria-hidden="true" />
-        <p>{t('blackboard.workspace.documentsEmpty')}</p>
-      </div>
+      {serviceDown ? (
+        <p className="bb-notice bb-notice--error" role="alert" data-testid="blackboard-docservice-notice" data-variant={docservice.reason ?? docservice.status}>
+          {t(`blackboard.docservice.${docservice.reason ?? docservice.status}`, { defaultValue: t('blackboard.docservice.down') })}
+        </p>
+      ) : null}
+      {doc && me ? (
+        <Suspense fallback={<div className="bb-doc__loading" data-testid="blackboard-doc-loading" />}>
+          <DocumentEditor
+            key={doc.id}
+            docId={doc.id}
+            fetchToken={fetchToken}
+            me={me}
+            names={names}
+            header={<DocHeader doc={doc} canEdit={canEdit} actions={docActions} />}
+          />
+        </Suspense>
+      ) : (
+        <div className="bb-empty" data-testid="blackboard-documents-empty">
+          <FileText aria-hidden="true" />
+          <p>{hasDocs ? t('blackboard.docs.pick') : t('blackboard.workspace.documentsEmpty')}</p>
+          {canEdit && !serviceDown ? (
+            <Button size="sm" variant="primary" icon={<FilePlus2 size={14} />} data-testid="blackboard-empty-new-doc-btn" onClick={onNewDoc}>
+              {t('blackboard.docs.new')}
+            </Button>
+          ) : null}
+        </div>
+      )}
     </section>
+  );
+}
+
+function DocHeader({ doc, canEdit, actions }: { doc: DocView; canEdit: boolean; actions: DocActions }) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const items: Array<{ key: string; icon: ReactNode; label: string; run: () => void; danger?: boolean; show: boolean }> = [
+    { key: 'rename', icon: <Pencil size={14} />, label: t('blackboard.docs.rename'), run: () => actions.rename(doc), show: canEdit },
+    {
+      key: 'pin',
+      icon: doc.is_pinned ? <PinOff size={14} /> : <Pin size={14} />,
+      label: doc.is_pinned ? t('blackboard.docs.unpin') : t('blackboard.docs.pin'),
+      run: () => actions.setPinned(doc, !doc.is_pinned),
+      show: canEdit,
+    },
+    {
+      key: 'instructions',
+      icon: <BookMarked size={14} />,
+      label: t('blackboard.docs.makeInstructions'),
+      run: () => actions.setInstructions(doc),
+      show: canEdit && !doc.is_instructions,
+    },
+    { key: 'import', icon: <FileInput size={14} />, label: t('blackboard.docs.import'), run: () => actions.importMarkdown(doc), show: canEdit },
+    { key: 'markdown', icon: <FileCode2 size={14} />, label: t('blackboard.docs.viewMarkdown'), run: () => actions.viewMarkdown(doc), show: true },
+    {
+      key: 'archive',
+      icon: <Archive size={14} />,
+      label: t('blackboard.docs.archive'),
+      run: () => actions.archive(doc),
+      danger: true,
+      show: canEdit && !doc.is_instructions,
+    },
+  ];
+  return (
+    <div className="bb-doc__title">
+      <h3 data-testid="blackboard-doc-title">{doc.title}</h3>
+      {doc.is_instructions ? (
+        <Tag variant="info" data-testid="blackboard-doc-instructions-tag">
+          {t('blackboard.docs.instructions')}
+        </Tag>
+      ) : null}
+      <DropdownMenu open={open} onOpenChange={setOpen}>
+        <DropdownMenuTrigger asChild>
+          <Button size="sm" variant="quiet" icon={<MoreHorizontal size={16} />} aria-label={t('blackboard.docs.menu')} data-testid="blackboard-doc-menu-btn" />
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" data-testid="blackboard-doc-menu">
+          {items
+            .filter((item) => item.show)
+            .map((item) => (
+              <DropdownMenuItem
+                key={item.key}
+                icon={item.icon}
+                danger={item.danger}
+                data-testid="blackboard-doc-menu-item"
+                data-variant={item.key}
+                onSelect={item.run}
+              >
+                {item.label}
+              </DropdownMenuItem>
+            ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
   );
 }

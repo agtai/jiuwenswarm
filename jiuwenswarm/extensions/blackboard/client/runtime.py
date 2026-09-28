@@ -99,6 +99,11 @@ class ClientRuntime:
         link = self._links.get(entry.id) or self._open_link(entry)
         return await link.call(method, params)
 
+    async def upload(self, host_id: str | None, workspace_id: str, **file: Any) -> dict[str, Any]:
+        entry = self._entry(host_id)
+        link = self._links.get(entry.id) or self._open_link(entry)
+        return await link.upload(workspace_id, **file)
+
     # ---- changes ----
 
     async def join(self, link_text: str, display_name: str | None = None) -> dict[str, Any]:

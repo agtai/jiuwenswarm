@@ -1,14 +1,16 @@
 import { useTranslation } from 'react-i18next';
-import { Link2, Plus, Settings2 } from 'lucide-react';
+import { BookMarked, FileText, Link2, Pin, Plus, Settings2 } from 'lucide-react';
 
 import { Button, Select } from '../../../../channels/web/frontend/src/components/ui';
-import type { BlackboardState } from '../controller';
-import type { WorkspaceView } from '../types';
+import { canEdit, type BlackboardState } from '../controller';
+import type { DocView, WorkspaceView } from '../types';
 
 export function Sidebar({
   state,
   onSelectHost,
   onSelectWorkspace,
+  onSelectDoc,
+  onNewDoc,
   onJoin,
   onNewWorkspace,
   onSettings,
@@ -16,6 +18,8 @@ export function Sidebar({
   state: BlackboardState;
   onSelectHost: (hostId: string) => void;
   onSelectWorkspace: (workspaceId: string) => void;
+  onSelectDoc: (docId: string) => void;
+  onNewDoc: () => void;
   onJoin: () => void;
   onNewWorkspace: () => void;
   onSettings: () => void;
@@ -81,13 +85,13 @@ export function Sidebar({
             {t('blackboard.workspaces.empty')}
           </p>
         ) : null}
-        <WorkspaceList items={active} selected={state.workspaceId} onSelect={onSelectWorkspace} />
+        <WorkspaceList items={active} state={state} onSelect={onSelectWorkspace} onSelectDoc={onSelectDoc} onNewDoc={onNewDoc} />
         {archived.length > 0 ? (
           <>
             <h4 className="bb-sidebar__subhead" data-testid="blackboard-workspaces-archived-title">
               {t('blackboard.workspaces.archived')}
             </h4>
-            <WorkspaceList items={archived} selected={state.workspaceId} onSelect={onSelectWorkspace} />
+            <WorkspaceList items={archived} state={state} onSelect={onSelectWorkspace} onSelectDoc={onSelectDoc} onNewDoc={onNewDoc} />
           </>
         ) : null}
       </div>
@@ -97,14 +101,19 @@ export function Sidebar({
 
 function WorkspaceList({
   items,
-  selected,
+  state,
   onSelect,
+  onSelectDoc,
+  onNewDoc,
 }: {
   items: WorkspaceView[];
-  selected: string | null;
+  state: BlackboardState;
   onSelect: (workspaceId: string) => void;
+  onSelectDoc: (docId: string) => void;
+  onNewDoc: () => void;
 }) {
   const { t } = useTranslation();
+  const selected = state.workspaceId;
   if (items.length === 0) return null;
   return (
     <ul className="bb-workspace-list" data-testid="blackboard-workspace-list">
@@ -121,8 +130,69 @@ function WorkspaceList({
             <span className="bb-workspace-item__title">{w.title}</span>
             <span className="bb-workspace-item__role">{t(`blackboard.roles.${w.role}`)}</span>
           </button>
+          {w.id === selected ? (
+            <DocList
+              docs={state.docs}
+              selected={state.docId}
+              canCreate={canEdit(state) && state.docservice?.status === 'running'}
+              onSelect={onSelectDoc}
+              onNew={onNewDoc}
+            />
+          ) : null}
         </li>
       ))}
     </ul>
+  );
+}
+
+function DocList({
+  docs,
+  selected,
+  canCreate,
+  onSelect,
+  onNew,
+}: {
+  docs: DocView[];
+  selected: string | null;
+  canCreate: boolean;
+  onSelect: (docId: string) => void;
+  onNew: () => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="bb-doc-list" data-testid="blackboard-doc-list">
+      <div className="bb-doc-list__head">
+        <span>{t('blackboard.docs.title')}</span>
+        {canCreate ? (
+          <Button
+            variant="quiet"
+            size="sm"
+            icon={<Plus size={14} />}
+            aria-label={t('blackboard.docs.new')}
+            title={t('blackboard.docs.new')}
+            data-testid="blackboard-new-doc-btn"
+            onClick={onNew}
+          />
+        ) : null}
+      </div>
+      <ul>
+        {docs.map((d) => (
+          <li key={d.id}>
+            <button
+              type="button"
+              className={`bb-doc-item${d.id === selected ? ' is-selected' : ''}`}
+              aria-pressed={d.id === selected}
+              data-testid="blackboard-doc-item"
+              data-variant={d.title}
+              onClick={() => onSelect(d.id)}
+            >
+              {d.is_instructions ? <BookMarked size={14} aria-hidden="true" /> : <FileText size={14} aria-hidden="true" />}
+              <span className="bb-doc-item__title">{d.title}</span>
+              {d.is_pinned && !d.is_instructions ? <Pin size={12} aria-label={t('blackboard.docs.pinned')} /> : null}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }

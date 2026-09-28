@@ -63,7 +63,9 @@ class Listener:
 async def test_health(host):
     async with httpx.AsyncClient() as client:
         body = (await client.get(host.base + p.HEALTH_PATH)).json()
-    assert body == {"ok": True, "version": "0.1.0", "host_uid": host.ctx.host_uid, "docservice": {"status": "not_configured"}}
+    assert body["ok"] is True and body["version"] == "0.1.0" and body["host_uid"] == host.ctx.host_uid
+    # The fixture runs without a built document service.
+    assert body["docservice"]["status"] == "unavailable" and body["docservice"]["reason"] == "not_built"
 
 
 async def test_rpc_needs_a_member_token(host):

@@ -19,6 +19,64 @@ The browser-free runtime archive contains the following production packages reso
 | playwright-core | 1.62.0-alpha-1783623505000 | Apache-2.0 | npm package `playwright-core` |
 | fsevents (optional; omitted from the cross-platform archive) | 2.3.2 | MIT | npm package `fsevents` |
 
+### Bundled Blackboard document service
+
+`jiuwenswarm/extensions/blackboard/host/docservice/dist/server.mjs` is a single-file Node bundle built from the web app's tracked npm lockfile. It contains the following packages; `dist/THIRD_PARTY_NOTICES.txt`, generated with the bundle, holds each package's license text. `@tiptap/y-tiptap` is included as a patched copy (`host/docservice/vendor/y-tiptap-nodemarks.js`).
+
+| Software | Version | License | Provenance |
+|---|---:|---|---|
+| @handlewithcare/prosemirror-suggest-changes | 0.1.8 | MIT | npm package `@handlewithcare/prosemirror-suggest-changes` |
+| @hocuspocus/common | 4.7.0 | MIT | npm package `@hocuspocus/common` |
+| @hocuspocus/extension-database | 4.7.0 | MIT | npm package `@hocuspocus/extension-database` |
+| @hocuspocus/server | 4.7.0 | MIT | npm package `@hocuspocus/server` |
+| @tiptap/core | 3.31.3 | MIT | npm package `@tiptap/core` |
+| @tiptap/extension-blockquote | 3.31.3 | MIT | npm package `@tiptap/extension-blockquote` |
+| @tiptap/extension-bold | 3.31.3 | MIT | npm package `@tiptap/extension-bold` |
+| @tiptap/extension-code | 3.31.3 | MIT | npm package `@tiptap/extension-code` |
+| @tiptap/extension-code-block | 3.31.3 | MIT | npm package `@tiptap/extension-code-block` |
+| @tiptap/extension-document | 3.31.3 | MIT | npm package `@tiptap/extension-document` |
+| @tiptap/extension-hard-break | 3.31.3 | MIT | npm package `@tiptap/extension-hard-break` |
+| @tiptap/extension-heading | 3.31.3 | MIT | npm package `@tiptap/extension-heading` |
+| @tiptap/extension-horizontal-rule | 3.31.3 | MIT | npm package `@tiptap/extension-horizontal-rule` |
+| @tiptap/extension-image | 3.31.3 | MIT | npm package `@tiptap/extension-image` |
+| @tiptap/extension-italic | 3.31.3 | MIT | npm package `@tiptap/extension-italic` |
+| @tiptap/extension-link | 3.31.3 | MIT | npm package `@tiptap/extension-link` |
+| @tiptap/extension-list | 3.31.3 | MIT | npm package `@tiptap/extension-list` |
+| @tiptap/extension-paragraph | 3.31.3 | MIT | npm package `@tiptap/extension-paragraph` |
+| @tiptap/extension-strike | 3.31.3 | MIT | npm package `@tiptap/extension-strike` |
+| @tiptap/extension-table | 3.31.3 | MIT | npm package `@tiptap/extension-table` |
+| @tiptap/extension-text | 3.31.3 | MIT | npm package `@tiptap/extension-text` |
+| @tiptap/extension-underline | 3.31.3 | MIT | npm package `@tiptap/extension-underline` |
+| @tiptap/extension-unique-id | 3.31.3 | MIT | npm package `@tiptap/extension-unique-id` |
+| @tiptap/extensions | 3.31.3 | MIT | npm package `@tiptap/extensions` |
+| @tiptap/markdown | 3.31.3 | MIT | npm package `@tiptap/markdown` |
+| @tiptap/pm | 3.31.3 | MIT | npm package `@tiptap/pm` |
+| @tiptap/starter-kit | 3.31.3 | MIT | npm package `@tiptap/starter-kit` |
+| @tiptap/y-tiptap | 3.0.9 | MIT | npm package `@tiptap/y-tiptap` |
+| async-mutex | 0.5.0 | MIT | npm package `async-mutex` |
+| crossws | 0.4.12 | MIT | npm package `crossws` |
+| kleur | 4.1.5 | MIT | npm package `kleur` |
+| lib0 | 0.2.118 | MIT | npm package `lib0` |
+| linkifyjs | 4.3.3 | MIT | npm package `linkifyjs` |
+| marked | 17.0.6 | MIT | npm package `marked` |
+| orderedmap | 2.1.1 | MIT | npm package `orderedmap` |
+| prosemirror-commands | 1.7.2 | MIT | npm package `prosemirror-commands` |
+| prosemirror-dropcursor | 1.8.4 | MIT | npm package `prosemirror-dropcursor` |
+| prosemirror-gapcursor | 1.4.1 | MIT | npm package `prosemirror-gapcursor` |
+| prosemirror-history | 1.5.0 | MIT | npm package `prosemirror-history` |
+| prosemirror-keymap | 1.2.3 | MIT | npm package `prosemirror-keymap` |
+| prosemirror-model | 1.25.12 | MIT | npm package `prosemirror-model` |
+| prosemirror-schema-list | 1.5.1 | MIT | npm package `prosemirror-schema-list` |
+| prosemirror-state | 1.4.4 | MIT | npm package `prosemirror-state` |
+| prosemirror-tables | 1.8.5 | MIT | npm package `prosemirror-tables` |
+| prosemirror-transform | 1.12.2 | MIT | npm package `prosemirror-transform` |
+| prosemirror-view | 1.42.6 | MIT | npm package `prosemirror-view` |
+| rope-sequence | 1.3.4 | MIT | npm package `rope-sequence` |
+| uuid | 8.3.2 | MIT | npm package `uuid` |
+| w3c-keyname | 2.2.8 | MIT | npm package `w3c-keyname` |
+| y-protocols | 1.0.6 | MIT | npm package `y-protocols` |
+| yjs | 13.6.33 | MIT | npm package `yjs` |
+
 ### Bundled GitCode CLI
 
 The frozen executable bundles the current platform's pre-compiled native binary from the `gitcode-cli` Python distribution (`gc_cli/bin/`), installed as the `gitcode` command.
@@ -127,7 +185,7 @@ You may add Your own copyright statement to Your modifications and may provide a
 
 ### License: MIT License
 
-**Software:** fsevents, json_repair, rapidfuzz, markdown-it-py, beautifulsoup4, python-docx, fastapi, pydantic, pydantic-settings, sqlalchemy, pytest, pytest-cov, pytest-mock, PyYAML, charset-normalizer, exceptiongroup, h11, httpx-sse, iniconfig, jsonschema, mdurl, more-itertools, platformdirs, pluggy, pydantic-core, redis, referencing, rich, typing-inspection, urllib3, zipp, aioitertools, attrs, beartype, cacheout, cachetools, cffi, docstring-parser, filelock, greenlet, humanfriendly, jaraco.classes, jaraco.context, jaraco.functools, jiter, keyring, langchain-core, langgraph, langsmith, pysbd, pytz, rpds-py, shellingham, six, slack-bolt, slack-sdk, tomli, typer, typer-slim, watchfiles, wsproto
+**Software:** @handlewithcare/prosemirror-suggest-changes, @hocuspocus/common, @hocuspocus/extension-database, @hocuspocus/server, @tiptap/core, @tiptap/extension-blockquote, @tiptap/extension-bold, @tiptap/extension-code, @tiptap/extension-code-block, @tiptap/extension-document, @tiptap/extension-hard-break, @tiptap/extension-heading, @tiptap/extension-horizontal-rule, @tiptap/extension-image, @tiptap/extension-italic, @tiptap/extension-link, @tiptap/extension-list, @tiptap/extension-paragraph, @tiptap/extension-strike, @tiptap/extension-table, @tiptap/extension-text, @tiptap/extension-underline, @tiptap/extension-unique-id, @tiptap/extensions, @tiptap/markdown, @tiptap/pm, @tiptap/starter-kit, @tiptap/y-tiptap, async-mutex, crossws, kleur, lib0, linkifyjs, marked, orderedmap, prosemirror-commands, prosemirror-dropcursor, prosemirror-gapcursor, prosemirror-history, prosemirror-keymap, prosemirror-model, prosemirror-schema-list, prosemirror-state, prosemirror-tables, prosemirror-transform, prosemirror-view, rope-sequence, uuid, w3c-keyname, y-protocols, yjs, fsevents, json_repair, rapidfuzz, markdown-it-py, beautifulsoup4, python-docx, fastapi, pydantic, pydantic-settings, sqlalchemy, pytest, pytest-cov, pytest-mock, PyYAML, charset-normalizer, exceptiongroup, h11, httpx-sse, iniconfig, jsonschema, mdurl, more-itertools, platformdirs, pluggy, pydantic-core, redis, referencing, rich, typing-inspection, urllib3, zipp, aioitertools, attrs, beartype, cacheout, cachetools, cffi, docstring-parser, filelock, greenlet, humanfriendly, jaraco.classes, jaraco.context, jaraco.functools, jiter, keyring, langchain-core, langgraph, langsmith, pysbd, pytz, rpds-py, shellingham, six, slack-bolt, slack-sdk, tomli, typer, typer-slim, watchfiles, wsproto
 
 **The MIT License**
 

@@ -37,6 +37,16 @@ class HostSettings:
         """The address members use; this machine's loopback when none is set."""
         return self.public_url.rstrip("/") if self.public_url else self.local_url()
 
+    def doc_url(self) -> str:
+        """The WebSocket address browsers use for live documents."""
+        if self.doc_public_url:
+            return self.doc_public_url.rstrip("/")
+        if self.public_url:
+            parsed = urlparse(self.public_url)
+            scheme = "wss" if parsed.scheme == "https" else "ws"
+            return f"{scheme}://{parsed.hostname}:{self.doc_port}"
+        return f"ws://127.0.0.1:{self.doc_port}"
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 

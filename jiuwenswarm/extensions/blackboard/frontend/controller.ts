@@ -1,6 +1,9 @@
 // State and actions of the Blackboard page, without React, so the logic can be
 // tested in Node with a fake RPC client and a fake event source.
 import type {
+  DocServiceStatus,
+  DocToken,
+  DocView,
   HostStatus,
   HostsPayload,
   HostView,
@@ -8,6 +11,7 @@ import type {
   InviteView,
   MeView,
   MemberView,
+  ReferenceView,
   Role,
   Rpc,
   Subscribe,
@@ -23,6 +27,11 @@ export interface BlackboardState {
   workspaceId: string | null;
   members: MemberView[];
   invites: InviteView[];
+  docs: DocView[];
+  docId: string | null;
+  docservice: DocServiceStatus | null;
+  references: ReferenceView[];
+  maxUploadMb: number;
   hostStatus: HostStatus | null;
   loaded: boolean;
   loadError: string | null;
@@ -37,10 +46,18 @@ export const INITIAL_STATE: BlackboardState = {
   workspaceId: null,
   members: [],
   invites: [],
+  docs: [],
+  docId: null,
+  docservice: null,
+  references: [],
+  maxUploadMb: 25,
   hostStatus: null,
   loaded: false,
   loadError: null,
 };
+
+// What belongs to the selected workspace; cleared whenever the selection changes.
+const WORKSPACE_CONTENT = { members: [], invites: [], docs: [], docId: null, docservice: null, references: [] };
 
 const HOST_EVENTS = [
   'blackboard.hosts.updated',
@@ -49,6 +66,8 @@ const HOST_EVENTS = [
   'blackboard.member.updated',
   'blackboard.me.updated',
   'blackboard.member.role_changed',
+  'blackboard.doc.updated',
+  'blackboard.reference.updated',
 ] as const;
 
 export function currentWorkspace(state: BlackboardState): WorkspaceView | null {
@@ -59,8 +78,18 @@ export function currentHost(state: BlackboardState): HostView | null {
   return state.hosts.find((h) => h.id === state.hostId) ?? null;
 }
 
+export function currentDoc(state: BlackboardState): DocView | null {
+  return state.docs.find((d) => d.id === state.docId) ?? null;
+}
+
 export function isOwner(state: BlackboardState): boolean {
   return currentWorkspace(state)?.role === 'owner';
+}
+
+// Editors and owners change documents and references, unless the workspace is archived.
+export function canEdit(state: BlackboardState): boolean {
+  const workspace = currentWorkspace(state);
+  return Boolean(workspace && !workspace.archived && (workspace.role === 'owner' || workspace.role === 'editor'));
 }
 
 export function errorText(error: unknown): string {
@@ -123,7 +152,7 @@ export class BlackboardController {
       const hostChanged = hostId !== this.state.hostId;
       this.set({ hosts, defaultHost: payload.default_host ?? '', hostId, loadError: null });
       if (hostChanged) {
-        this.set({ me: null, workspaces: [], workspaceId: null, members: [], invites: [] });
+        this.set({ me: null, workspaces: [], workspaceId: null, ...WORKSPACE_CONTENT });
         if (hostId) await this.refreshWorkspaces();
       }
     } catch (error) {
@@ -150,8 +179,8 @@ export class BlackboardController {
       const keep = workspaces.some((w) => w.id === this.state.workspaceId);
       const workspaceId = keep ? this.state.workspaceId : null;
       this.set({ me, workspaces, workspaceId, loadError: null });
-      if (!keep) this.set({ members: [], invites: [] });
-      else await this.refreshMembers();
+      if (!keep) this.set(WORKSPACE_CONTENT);
+      else await this.refreshWorkspaceContent();
     } catch (error) {
       if (hostId === this.state.hostId) this.set({ loadError: errorText(error), me: null, workspaces: [] });
     }
@@ -175,17 +204,59 @@ export class BlackboardController {
     }
   }
 
+  async refreshWorkspaceContent(): Promise<void> {
+    await Promise.all([this.refreshMembers(), this.refreshDocs(), this.refreshReferences()]);
+  }
+
+  async refreshDocs(): Promise<void> {
+    const { hostId, workspaceId } = this.state;
+    if (!hostId || !workspaceId) return;
+    try {
+      const result = await this.rpc<{ docs: DocView[]; docservice: DocServiceStatus }>('blackboard.doc.list', {
+        host: hostId,
+        workspace_id: workspaceId,
+      });
+      if (hostId !== this.state.hostId || workspaceId !== this.state.workspaceId) return;
+      const docs = result.docs ?? [];
+      // An archived or deleted document closes; otherwise the first one opens.
+      const keep = docs.some((d) => d.id === this.state.docId);
+      this.set({ docs, docservice: result.docservice ?? null, docId: keep ? this.state.docId : (docs[0]?.id ?? null) });
+    } catch (error) {
+      this.set({ loadError: errorText(error) });
+    }
+  }
+
+  async refreshReferences(): Promise<void> {
+    const { hostId, workspaceId } = this.state;
+    if (!hostId || !workspaceId) return;
+    try {
+      const result = await this.rpc<{ references: ReferenceView[]; max_upload_mb: number }>('blackboard.reference.list', {
+        host: hostId,
+        workspace_id: workspaceId,
+      });
+      if (hostId !== this.state.hostId || workspaceId !== this.state.workspaceId) return;
+      this.set({ references: result.references ?? [], maxUploadMb: result.max_upload_mb ?? this.state.maxUploadMb });
+    } catch (error) {
+      this.set({ loadError: errorText(error) });
+    }
+  }
+
   // ---- selection ----
 
   async selectHost(hostId: string): Promise<void> {
     if (hostId === this.state.hostId) return;
-    this.set({ hostId, me: null, workspaces: [], workspaceId: null, members: [], invites: [], loadError: null });
+    this.set({ hostId, me: null, workspaces: [], workspaceId: null, ...WORKSPACE_CONTENT, loadError: null });
     await this.refreshWorkspaces();
   }
 
   async selectWorkspace(workspaceId: string | null): Promise<void> {
-    this.set({ workspaceId, members: [], invites: [] });
-    if (workspaceId) await this.refreshMembers();
+    if (workspaceId === this.state.workspaceId) return;
+    this.set({ workspaceId, ...WORKSPACE_CONTENT });
+    if (workspaceId) await this.refreshWorkspaceContent();
+  }
+
+  selectDoc(docId: string | null): void {
+    this.set({ docId });
   }
 
   // ---- events ----
@@ -206,9 +277,13 @@ export class BlackboardController {
     if (!host || host !== this.state.hostId) return;
     if (event === 'blackboard.workspace.updated') {
       if ((payload.deleted || payload.removed) && workspaceId === this.state.workspaceId) {
-        this.set({ workspaceId: null, members: [], invites: [] });
+        this.set({ workspaceId: null, ...WORKSPACE_CONTENT });
       }
       await this.refreshWorkspaces();
+    } else if (event === 'blackboard.doc.updated') {
+      if (workspaceId === this.state.workspaceId) await this.refreshDocs();
+    } else if (event === 'blackboard.reference.updated') {
+      if (workspaceId === this.state.workspaceId) await this.refreshReferences();
     } else if (event === 'blackboard.member.updated' || event === 'blackboard.member.role_changed') {
       if (event === 'blackboard.member.role_changed') await this.refreshWorkspaces();
       else if (workspaceId === this.state.workspaceId) await this.refreshMembers();
@@ -264,7 +339,7 @@ export class BlackboardController {
 
   async deleteWorkspace(): Promise<void> {
     await this.rpc('blackboard.workspace.delete', this.requireWorkspace());
-    this.set({ workspaceId: null, members: [], invites: [] });
+    this.set({ workspaceId: null, ...WORKSPACE_CONTENT });
     await this.refreshWorkspaces();
   }
 
@@ -277,7 +352,7 @@ export class BlackboardController {
     const target = this.requireWorkspace();
     await this.rpc('blackboard.member.remove', { ...target, user_id: userId });
     if (userId === this.state.me?.user_id) {
-      this.set({ workspaceId: null, members: [], invites: [] });
+      this.set({ workspaceId: null, ...WORKSPACE_CONTENT });
       await this.refreshWorkspaces();
     } else {
       await this.refreshMembers();
@@ -299,6 +374,79 @@ export class BlackboardController {
   async revokeInvite(code: string): Promise<void> {
     await this.rpc('blackboard.invite.revoke', { ...this.requireWorkspace(), code });
     await this.refreshMembers();
+  }
+
+  // ---- documents ----
+
+  async createDoc(title: string, markdown?: string): Promise<{ doc: DocView; raw_html: boolean }> {
+    const result = await this.rpc<{ doc: DocView; raw_html: boolean }>('blackboard.doc.create', {
+      ...this.requireWorkspace(),
+      title,
+      ...(markdown !== undefined ? { markdown } : {}),
+    });
+    await this.refreshDocs();
+    this.selectDoc(result.doc.id);
+    return result;
+  }
+
+  async renameDoc(docId: string, title: string): Promise<void> {
+    await this.rpc('blackboard.doc.rename', { host: this.requireHost(), doc_id: docId, title });
+    await this.refreshDocs();
+  }
+
+  async archiveDoc(docId: string): Promise<void> {
+    await this.rpc('blackboard.doc.archive', { host: this.requireHost(), doc_id: docId });
+    await this.refreshDocs();
+  }
+
+  async setDocPinned(docId: string, pinned: boolean): Promise<void> {
+    await this.rpc('blackboard.doc.pin', { host: this.requireHost(), doc_id: docId, pinned });
+    await this.refreshDocs();
+  }
+
+  async setInstructions(docId: string): Promise<void> {
+    await this.rpc('blackboard.doc.set_instructions', { host: this.requireHost(), doc_id: docId });
+    await this.refreshDocs();
+  }
+
+  async importMarkdown(docId: string, markdown: string): Promise<{ raw_html: boolean }> {
+    return this.rpc<{ raw_html: boolean }>('blackboard.doc.import_markdown', { host: this.requireHost(), doc_id: docId, markdown });
+  }
+
+  // The agent view: Markdown with a block id comment before every top-level block.
+  async readDoc(docId: string): Promise<string> {
+    const result = await this.rpc<{ markdown: string }>('blackboard.doc.read', { host: this.requireHost(), doc_id: docId });
+    return result.markdown ?? '';
+  }
+
+  docToken = (docId: string): Promise<DocToken> =>
+    this.rpc<DocToken>('blackboard.doc.token', { host: this.requireHost(), doc_id: docId });
+
+  // ---- references ----
+
+  async uploadReference(file: { name: string; mime: string; data: string }, note = ''): Promise<ReferenceView> {
+    const result = await this.rpc<{ reference: ReferenceView }>('blackboard.reference.upload', {
+      ...this.requireWorkspace(),
+      ...file,
+      note,
+    });
+    await this.refreshReferences();
+    return result.reference;
+  }
+
+  async removeReference(referenceId: string): Promise<void> {
+    await this.rpc('blackboard.reference.remove', { host: this.requireHost(), reference_id: referenceId });
+    await this.refreshReferences();
+  }
+
+  async setReferenceNote(referenceId: string, note: string): Promise<void> {
+    await this.rpc('blackboard.reference.set_note', { host: this.requireHost(), reference_id: referenceId, note });
+    await this.refreshReferences();
+  }
+
+  async referenceUrl(referenceId: string): Promise<string> {
+    const result = await this.rpc<{ url: string }>('blackboard.reference.url', { host: this.requireHost(), reference_id: referenceId });
+    return result.url;
   }
 
   async setDisplayName(displayName: string): Promise<void> {

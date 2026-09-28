@@ -21,7 +21,7 @@ from jiuwenswarm.extensions.blackboard.common.tokens import hash_token, new_memb
 from jiuwenswarm.extensions.blackboard.host import validation as v
 from jiuwenswarm.extensions.blackboard.host.api.access import require_member
 from jiuwenswarm.extensions.blackboard.host.api.context import HostContext
-from jiuwenswarm.extensions.blackboard.host.store import invites, users, workspaces
+from jiuwenswarm.extensions.blackboard.host.store import docs, invites, users, workspaces
 from jiuwenswarm.extensions.blackboard.host.store.models import Invite, User
 from jiuwenswarm.extensions.blackboard.common.clock import now_iso
 
@@ -56,6 +56,13 @@ def method(name: str) -> Callable[[Handler], Handler]:
 
 def _workspace_id(params: dict[str, Any]) -> str:
     return v.required_str(params, "workspace_id")
+
+
+def _documents():
+    # documents.py registers its methods through this module, so it is imported late.
+    from jiuwenswarm.extensions.blackboard.host.api import documents
+
+    return documents
 
 
 def _invite_dict(ctx: HostContext, invite: Invite, now: str) -> dict[str, Any]:
@@ -122,6 +129,7 @@ async def workspace_create(call: Call) -> dict[str, Any]:
         return workspaces.create(conn, name=name, title=title, created_by=call.uid)
 
     workspace = await call.ctx.store.transact(work)
+    await _documents().ensure_instructions(call.ctx, workspace.id)
     await call.ctx.hub.publish(p.EV_WORKSPACE_UPDATED, {"workspace_id": workspace.id}, workspace_id=workspace.id)
     return {"workspace": workspace.to_dict("owner")}
 
@@ -148,6 +156,7 @@ async def _set_archived(call: Call, archived: bool) -> dict[str, Any]:
         workspaces.set_archived(conn, workspace_id, archived)
 
     await call.ctx.store.transact(work)
+    await _documents().recheck_docs(call.ctx, workspace_id)
     await call.ctx.hub.publish(p.EV_WORKSPACE_UPDATED, {"workspace_id": workspace_id}, workspace_id=workspace_id)
     return {"workspace_id": workspace_id, "archived": archived}
 
@@ -166,15 +175,17 @@ async def workspace_unarchive(call: Call) -> dict[str, Any]:
 async def workspace_delete(call: Call) -> dict[str, Any]:
     workspace_id = _workspace_id(call.params)
 
-    def work(conn: sqlite3.Connection) -> list[str]:
+    def work(conn: sqlite3.Connection) -> tuple[list[str], list[str]]:
         workspace, _ = require_member(conn, call.uid, workspace_id, "owner")
         if workspace.archived_at is None:
             raise BlackboardError(CONFLICT, "archive the workspace before deleting it", {"workspace_id": workspace_id})
         member_ids = workspaces.member_user_ids(conn, workspace_id)
+        doc_ids = docs.ids_for_workspace(conn, workspace_id)
         workspaces.delete(conn, workspace_id)
-        return member_ids
+        return member_ids, doc_ids
 
-    member_ids = await call.ctx.store.transact(work)
+    member_ids, doc_ids = await call.ctx.store.transact(work)
+    await _documents().delete_workspace_content(call.ctx, workspace_id, doc_ids)
     await call.ctx.hub.publish(
         p.EV_WORKSPACE_UPDATED, {"workspace_id": workspace_id, "deleted": True}, user_ids=member_ids
     )
@@ -218,6 +229,7 @@ async def member_set_role(call: Call) -> dict[str, Any]:
 
     changed = await call.ctx.store.transact(work)
     if changed:
+        await _documents().recheck_docs(call.ctx, workspace_id, target_id, role=role)
         await call.ctx.hub.publish(p.EV_MEMBER_UPDATED, {"workspace_id": workspace_id}, workspace_id=workspace_id)
         await call.ctx.hub.publish(
             p.EV_MEMBER_ROLE_CHANGED,
@@ -246,6 +258,7 @@ async def member_remove(call: Call) -> dict[str, Any]:
         workspaces.remove_member(conn, workspace_id, target_id)
 
     await call.ctx.store.transact(work)
+    await _documents().recheck_docs(call.ctx, workspace_id, target_id, revoke=True)
     await call.ctx.hub.publish(p.EV_MEMBER_UPDATED, {"workspace_id": workspace_id}, workspace_id=workspace_id)
     await call.ctx.hub.publish(
         p.EV_WORKSPACE_UPDATED, {"workspace_id": workspace_id, "removed": True}, user_ids=[target_id]

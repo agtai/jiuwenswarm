@@ -6,6 +6,8 @@ chosen host (``params.host``, else the default host) with the member token.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -52,6 +54,36 @@ def _proxy(client: "ClientRuntime", method: str) -> Operation:
     return run
 
 
+def _reference_upload(client: "ClientRuntime") -> Operation:
+    """``{host?, workspace_id, name, mime?, note?, data}`` with the file as base64, sent on as multipart."""
+
+    async def run(params: dict[str, Any]) -> dict[str, Any]:
+        host_id = params.get("host")
+        workspace_id, name, data = params.get("workspace_id"), params.get("name"), params.get("data")
+        if not isinstance(workspace_id, str) or not workspace_id:
+            raise invalid("workspace_id is required", field="workspace_id")
+        if not isinstance(name, str) or not name.strip():
+            raise invalid("name is required", field="name")
+        if not isinstance(data, str):
+            raise invalid("data must be the file as base64", field="data")
+        try:
+            content = base64.b64decode(data, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise invalid("data must be the file as base64", field="data") from exc
+        mime = params.get("mime") if isinstance(params.get("mime"), str) and params.get("mime") else "application/octet-stream"
+        note = params.get("note") if isinstance(params.get("note"), str) else ""
+        return await client.upload(
+            host_id if isinstance(host_id, str) and host_id else None,
+            workspace_id,
+            name=name.strip(),
+            content=content,
+            mime=mime,
+            note=note,
+        )
+
+    return run
+
+
 def register_rpcs(channel: Any, client: "ClientRuntime", host: "HostController") -> list[str]:
     registered: list[str] = []
 
@@ -91,6 +123,7 @@ def register_rpcs(channel: Any, client: "ClientRuntime", host: "HostController")
     add(p.HOSTS_SET_DEFAULT, hosts_set_default)
     add(p.HOST_STATUS, host_status)
     add(p.HOST_SET_SETTINGS, host_set_settings)
+    add(p.REFERENCE_UPLOAD, _reference_upload(client))
     for method in p.HOST_METHODS:
         add(method, _proxy(client, method))
     return registered

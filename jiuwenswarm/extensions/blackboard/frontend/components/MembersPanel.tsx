@@ -35,9 +35,11 @@ export function MembersPanel({
   const liveInvites = invites.filter((i) => i.state === 'active');
 
   return (
-    <aside className="bb-rail" data-testid="blackboard-members-panel">
+    <div className="bb-rail__panel" data-testid="blackboard-members-panel">
       <div className="bb-rail__head">
-        <h3 data-testid="blackboard-members-title">{t('blackboard.members.tab')}</h3>
+        <span className="bb-muted" data-testid="blackboard-members-count">
+          {t('blackboard.members.count', { count: members.length })}
+        </span>
         {canChange ? (
           <Button size="sm" icon={<UserPlus size={14} />} data-testid="blackboard-invite-btn" onClick={onInvite}>
             {t('blackboard.invites.create')}
@@ -151,6 +153,6 @@ export function MembersPanel({
           {t('blackboard.workspace.leave')}
         </Button>
       </div>
-    </aside>
+    </div>
   );
 }
