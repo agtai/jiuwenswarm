@@ -12,6 +12,10 @@ _EXPORTS = {
         "jiuwenswarm.extensions.sdk.agent_server_client",
         "AgentServerClientExtension",
     ),
+    "AgentToolContext": (
+        _APPLICATION_PLUGIN_MODULE,
+        "AgentToolContext",
+    ),
     "ApplicationPluginExtension": (
         _APPLICATION_PLUGIN_MODULE,
         "ApplicationPluginExtension",

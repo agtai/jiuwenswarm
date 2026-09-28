@@ -1,4 +1,4 @@
-import type { ComponentType } from 'react';
+import type { ComponentType, SVGProps } from 'react';
 
 import type {
   ApplicationPluginContribution,
@@ -10,6 +10,7 @@ import './applicationPlugins.css';
 
 type BundledPluginModule = {
   applicationPluginId?: string;
+  applicationPluginNavIcon?: ComponentType<SVGProps<SVGSVGElement>>;
   applicationPluginSettings?: ComponentType<ApplicationPluginSettingsProps>;
   applicationPluginTaskInputAction?: ComponentType<ApplicationPluginTaskInputActionProps>;
   applicationPluginTaskRuntime?: ComponentType<ApplicationPluginTaskRuntimeProps>;
@@ -19,12 +20,16 @@ type BundledPluginModule = {
 const bundledModules = import.meta.glob<BundledPluginModule>('../../../../../extensions/*/frontend/index.tsx', { eager: true });
 
 const bundledComponents = new Map<string, ComponentType>();
+const bundledNavIcons = new Map<string, ComponentType<SVGProps<SVGSVGElement>>>();
 const bundledSettingsComponents = new Map<string, ComponentType<ApplicationPluginSettingsProps>>();
 const bundledTaskInputActions: ComponentType<ApplicationPluginTaskInputActionProps>[] = [];
 const bundledTaskRuntimes: ComponentType<ApplicationPluginTaskRuntimeProps>[] = [];
 for (const module of Object.values(bundledModules)) {
   if (module.applicationPluginId && module.default) {
     bundledComponents.set(module.applicationPluginId, module.default);
+  }
+  if (module.applicationPluginId && module.applicationPluginNavIcon) {
+    bundledNavIcons.set(module.applicationPluginId, module.applicationPluginNavIcon);
   }
   if (module.applicationPluginId && module.applicationPluginSettings) {
     bundledSettingsComponents.set(module.applicationPluginId, module.applicationPluginSettings);
@@ -35,6 +40,11 @@ for (const module of Object.values(bundledModules)) {
   if (module.applicationPluginTaskRuntime) {
     bundledTaskRuntimes.push(module.applicationPluginTaskRuntime);
   }
+}
+
+// The navigation icon a bundled plugin ships, if any; the rail falls back to the generic plugin icon.
+export function applicationPluginNavIcon(pluginId: string): ComponentType<SVGProps<SVGSVGElement>> | undefined {
+  return bundledNavIcons.get(pluginId);
 }
 
 export function applicationPluginSettingsComponent(

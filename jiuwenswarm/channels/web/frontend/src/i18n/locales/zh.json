@@ -1,4 +1,155 @@
 {
+  "blackboard": {
+    "nav": "Blackboard",
+    "welcome": {
+      "title": "与团队和智能体一起写作",
+      "body": "Blackboard 主机保存共享工作区。你可以通过邀请链接加入一台主机，也可以在本机为团队运行一台主机。",
+      "join": "通过链接加入",
+      "host": "在本机托管工作区"
+    },
+    "host": {
+      "label": "主机",
+      "self": "本机",
+      "join": "通过链接加入",
+      "settings": "设置",
+      "status": {
+        "connecting": "正在连接",
+        "connected": "已连接",
+        "offline": "离线，正在重试",
+        "unauthorized": "主机不接受此成员",
+        "stopped": "未连接"
+      }
+    },
+    "workspaces": {
+      "title": "工作区",
+      "new": "新建工作区",
+      "empty": "还没有工作区。",
+      "archived": "已归档",
+      "pick": "选择一个工作区，或新建一个。"
+    },
+    "roles": {
+      "owner": "所有者",
+      "editor": "编辑者",
+      "commenter": "评论者",
+      "viewer": "查看者"
+    },
+    "workspace": {
+      "handle": "@bb:{{name}}",
+      "rename": "重命名",
+      "archive": "归档",
+      "unarchive": "恢复",
+      "delete": "删除",
+      "deleteConfirm": "删除 {{title}} 及其全部内容？此操作无法撤销。",
+      "archivedNotice": "此工作区已归档。恢复后才能邀请成员或修改角色。",
+      "leave": "退出工作区",
+      "leaveConfirm": "退出 {{title}}？之后需要新的邀请链接才能重新加入。",
+      "documentsEmpty": "还没有文档。"
+    },
+    "join": {
+      "title": "通过邀请链接加入",
+      "description": "粘贴工作区所有者发给你的链接。",
+      "link": "邀请链接",
+      "linkPlaceholder": "https://host/blackboard/join/...",
+      "invalidLink": "这不是 Blackboard 邀请链接。",
+      "name": "你的名字",
+      "nameHint": "其他成员会看到这个名字。",
+      "submit": "加入"
+    },
+    "newWorkspace": {
+      "title": "新建工作区",
+      "titleLabel": "标题",
+      "nameLabel": "别名",
+      "nameHint": "成员和智能体用它提及此工作区。只能使用小写字母、数字和 '-'。",
+      "invalidName": "请使用 3 到 40 个小写字母、数字或 '-'，且不能以 '-' 开头或结尾。",
+      "submit": "创建"
+    },
+    "rename": {
+      "title": "重命名工作区",
+      "submit": "保存"
+    },
+    "members": {
+      "tab": "成员",
+      "you": "你",
+      "role": "{{name}} 的角色",
+      "remove": "移出工作区",
+      "removeConfirm": "将 {{name}} 移出 {{title}}？",
+      "disabled": "已停用"
+    },
+    "invites": {
+      "title": "邀请链接",
+      "create": "邀请",
+      "empty": "没有有效的邀请链接。",
+      "dialogTitle": "邀请成员加入 {{title}}",
+      "expires": "有效期",
+      "maxUses": "最多使用次数",
+      "copy": "复制链接",
+      "copied": "链接已复制",
+      "revoke": "撤销",
+      "revokeConfirm": "撤销此邀请链接？已加入的人仍是成员。",
+      "notReachable": "此主机只接受本机的连接，所以链接只能在本机使用。请在设置中允许其他机器连接。",
+      "joinAs": "邀请身份",
+      "byLink": "邀请链接",
+      "createLink": "创建并复制链接",
+      "linkSummary": "有效期：{{expiry}} · 最多使用次数：{{uses}}。",
+      "change": "修改",
+      "done": "完成",
+      "expiryOptions": {
+        "30": "30 分钟",
+        "60": "1 小时",
+        "360": "6 小时",
+        "720": "12 小时",
+        "1440": "1 天",
+        "10080": "7 天",
+        "never": "永不过期"
+      },
+      "usesOptions": {
+        "none": "不限",
+        "1": "1 次",
+        "5": "5 次",
+        "10": "10 次",
+        "25": "25 次",
+        "50": "50 次",
+        "100": "100 次"
+      },
+      "metaUses": "已使用 {{uses}} 次",
+      "metaUsesOf": "已使用 {{uses}}/{{max}} 次",
+      "metaExpires": "{{date}} 过期",
+      "metaNeverExpires": "永不过期"
+    },
+    "settings": {
+      "title": "Blackboard 设置",
+      "profile": "你在 {{host}} 上的名字",
+      "saveName": "保存名字",
+      "hosting": "在本机托管工作区",
+      "hostingHint": "团队成员的实例会连接到这台机器，成员工作期间请保持运行。",
+      "who": "谁可以连接",
+      "whoLocal": "仅本机",
+      "whoAll": "也允许其他机器",
+      "port": "端口",
+      "publicUrl": "公开地址",
+      "publicUrlHint": "成员使用的地址，例如 http://192.168.1.20:19011 或 https://bb.example.com。",
+      "apply": "应用",
+      "running": "正在运行：{{address}}",
+      "stopped": "未运行",
+      "startError": "无法启动：{{error}}",
+      "notReachable": "目前只有本机能访问此主机。要让其他机器上的成员加入，请把“谁可以连接”设为“也允许其他机器”，并填写公开地址。",
+      "plainHttp": "此地址使用 HTTP，成员与主机之间的通信未加密。",
+      "boardName": "Blackboard 名称",
+      "boardNameHint": "成员会在自己的 Blackboard 列表中看到这个名称。",
+      "boardNamePlaceholder": "留空则使用你的名字"
+    },
+    "errors": {
+      "unauthorized": "主机不接受此成员的令牌。",
+      "not_member": "你不是此工作区的成员。",
+      "forbidden": "你的角色不允许此操作。",
+      "not_found": "它已不存在。",
+      "expired": "此邀请链接已无法使用。",
+      "disabled": "你在此主机上的账号已停用。",
+      "unavailable": "无法连接到主机。",
+      "internal": "主机无法完成此请求。",
+      "generic": "出了点问题。"
+    }
+  },
   "common": {
     "noData": "暂无数据",
     "confirm": "确认",

@@ -150,6 +150,7 @@ from jiuwenswarm.server.runtime.agent_adapter.permission_dispatch import (
 from jiuwenswarm.server.runtime.agent_adapter.permission_runtime_state import (
     SessionPermissionState,
 )
+from jiuwenswarm.server.runtime.agent_adapter.plugin_tools import PluginToolAttacher
 
 from jiuwenswarm.server.runtime.agent_adapter.trusted_web_search import (
     TrustedWebFreeSearchTool,
@@ -2133,6 +2134,7 @@ class JiuWenSwarmDeepAdapter:
         self._dreaming_started = False
         self._dreaming_mode: str = "agent"
         self._send_file_toolkit: SendFileToolkit | None = None
+        self._plugin_tools = PluginToolAttacher()
         self._session_messaging_toolkit: SessionMessagingToolkit | None = None
         self._session_messaging_route_rail: SessionMessagingRouteRail | None = None
         self._runtime_state_write_task: asyncio.Task[None] | None = None
@@ -11802,6 +11804,32 @@ class JiuWenSwarmDeepAdapter:
                     require_execution_authorization=require_send_authorization,
                 )
 
+    def _update_plugin_tools(self, runtime_config: "JiuWenSwarmDeepAdapter._RuntimeConfig") -> None:
+        """Attach the tools that application plugins offer for this request."""
+        from jiuwenswarm.extensions.registry import ExtensionRegistry
+        from jiuwenswarm.extensions.sdk.application_plugin import AgentToolContext
+
+        try:
+            registry = ExtensionRegistry.get_instance()
+        except RuntimeError:
+            return
+        ctx = AgentToolContext(
+            session_id=runtime_config.session_id,
+            channel_id=runtime_config.channel_id,
+            request_id=runtime_config.request_id,
+            user_id=_CRON_TOOL_USER_ID.get(),
+            metadata=dict(runtime_config.request_metadata or {}),
+        )
+        try:
+            self._plugin_tools.update(
+                registry=registry,
+                ctx=ctx,
+                ability_manager=self._instance.ability_manager,
+                register=lambda tool: self._register_agent_owned_tool(tool, self._tool_owner_id()),
+            )
+        except Exception:  # noqa: BLE001 - a plugin's tools must not break the turn
+            logger.exception("[JiuWenSwarmDeepAdapter] attaching application plugin tools failed")
+
     def _refresh_acp_runtime_tools(
         self,
         session_id: str | None,
@@ -12261,6 +12289,12 @@ class JiuWenSwarmDeepAdapter:
             channel_id=runtime_config.channel_id,
         )
         stage_timer.mark("session_tools")
+
+        if bind_request:
+            # Plugin tools depend on the request's channel and metadata, so a
+            # warm-up without a request leaves them as they are.
+            self._update_plugin_tools(runtime_config)
+            stage_timer.mark("plugin_tools")
 
         if bind_request:
             self._refresh_acp_runtime_tools(

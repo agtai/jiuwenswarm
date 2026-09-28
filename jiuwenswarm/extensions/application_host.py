@@ -57,6 +57,8 @@ def application_plugin_manifest(registry: ExtensionRegistry | None) -> dict[str,
                 "component": contribution.component,
                 "position": contribution.position,
             }
+            if contribution.nav_after:
+                item["nav_after"] = contribution.nav_after
             if contribution.entrypoint:
                 item["entry_url"] = (
                     f"{APPLICATION_PLUGIN_API_PREFIX}/{plugin_id}/assets/"

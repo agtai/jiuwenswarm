@@ -17,6 +17,8 @@ export interface ApplicationPluginContribution {
   component?: string;
   entry_url?: string;
   position: number;
+  // Built-in navigation item this page follows, for example 'chat'.
+  nav_after?: string;
 }
 
 export interface ApplicationPluginManifest {

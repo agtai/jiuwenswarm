@@ -1,4 +1,155 @@
 {
+  "blackboard": {
+    "nav": "Blackboard",
+    "welcome": {
+      "title": "Write with your team and your agents",
+      "body": "A Blackboard host keeps shared workspaces. Join a host with an invite link, or run one on this machine for your team.",
+      "join": "Join with a link",
+      "host": "Host workspaces on this machine"
+    },
+    "host": {
+      "label": "Host",
+      "self": "this machine",
+      "join": "Join with a link",
+      "settings": "Settings",
+      "status": {
+        "connecting": "Connecting",
+        "connected": "Connected",
+        "offline": "Offline, retrying",
+        "unauthorized": "The host did not accept this member",
+        "stopped": "Not connected"
+      }
+    },
+    "workspaces": {
+      "title": "Workspaces",
+      "new": "New workspace",
+      "empty": "No workspaces yet.",
+      "archived": "Archived",
+      "pick": "Pick a workspace, or create one."
+    },
+    "roles": {
+      "owner": "Owner",
+      "editor": "Editor",
+      "commenter": "Commenter",
+      "viewer": "Viewer"
+    },
+    "workspace": {
+      "handle": "@bb:{{name}}",
+      "rename": "Rename",
+      "archive": "Archive",
+      "unarchive": "Restore",
+      "delete": "Delete",
+      "deleteConfirm": "Delete {{title}} and everything in it? This cannot be undone.",
+      "archivedNotice": "This workspace is archived. Restore it to invite people or change roles.",
+      "leave": "Leave workspace",
+      "leaveConfirm": "Leave {{title}}? You need a new invite link to come back.",
+      "documentsEmpty": "No documents yet."
+    },
+    "join": {
+      "title": "Join with an invite link",
+      "description": "Paste the link a workspace owner sent you.",
+      "link": "Invite link",
+      "linkPlaceholder": "https://host/blackboard/join/...",
+      "invalidLink": "This is not a Blackboard invite link.",
+      "name": "Your name",
+      "nameHint": "The other members see this name.",
+      "submit": "Join"
+    },
+    "newWorkspace": {
+      "title": "New workspace",
+      "titleLabel": "Title",
+      "nameLabel": "Handle",
+      "nameHint": "People and agents use it to mention the workspace. Lower-case letters, digits and '-'.",
+      "invalidName": "Use 3 to 40 lower-case letters, digits or '-', not starting or ending with '-'.",
+      "submit": "Create"
+    },
+    "rename": {
+      "title": "Rename workspace",
+      "submit": "Save"
+    },
+    "members": {
+      "tab": "Members",
+      "you": "you",
+      "role": "Role of {{name}}",
+      "remove": "Remove from workspace",
+      "removeConfirm": "Remove {{name}} from {{title}}?",
+      "disabled": "disabled"
+    },
+    "invites": {
+      "title": "Invite links",
+      "create": "Invite",
+      "empty": "No active invite links.",
+      "dialogTitle": "Invite people to {{title}}",
+      "expires": "Expire after",
+      "maxUses": "Max number of uses",
+      "copy": "Copy link",
+      "copied": "Link copied",
+      "revoke": "Revoke",
+      "revokeConfirm": "Revoke this invite link? People who already joined stay members.",
+      "notReachable": "This host only accepts connections from this machine, so the link works only here. Let other machines connect in Settings.",
+      "joinAs": "Invite as",
+      "byLink": "Invite link",
+      "createLink": "Create and copy link",
+      "linkSummary": "Expires after: {{expiry}} · Max uses: {{uses}}.",
+      "change": "Change",
+      "done": "Done",
+      "expiryOptions": {
+        "30": "30 minutes",
+        "60": "1 hour",
+        "360": "6 hours",
+        "720": "12 hours",
+        "1440": "1 day",
+        "10080": "7 days",
+        "never": "Never"
+      },
+      "usesOptions": {
+        "none": "No limit",
+        "1": "1 use",
+        "5": "5 uses",
+        "10": "10 uses",
+        "25": "25 uses",
+        "50": "50 uses",
+        "100": "100 uses"
+      },
+      "metaUses": "Uses: {{uses}}",
+      "metaUsesOf": "Uses: {{uses}}/{{max}}",
+      "metaExpires": "Expires {{date}}",
+      "metaNeverExpires": "Never expires"
+    },
+    "settings": {
+      "title": "Blackboard settings",
+      "profile": "Your name on {{host}}",
+      "saveName": "Save name",
+      "hosting": "Host workspaces on this machine",
+      "hostingHint": "Your team's instances connect to this machine, so keep it running while people work.",
+      "who": "Who can connect",
+      "whoLocal": "Only this machine",
+      "whoAll": "Other machines too",
+      "port": "Port",
+      "publicUrl": "Public address",
+      "publicUrlHint": "The address members use, for example http://192.168.1.20:19011 or https://bb.example.com.",
+      "apply": "Apply",
+      "running": "Running at {{address}}",
+      "stopped": "Not running",
+      "startError": "Could not start: {{error}}",
+      "notReachable": "Only this machine can reach this host. To add people on other machines, set Who can connect to Other machines too and enter a public address.",
+      "plainHttp": "This address uses plain HTTP, so traffic between members and the host is not encrypted.",
+      "boardName": "Blackboard name",
+      "boardNameHint": "Members see this name in their list of Blackboards.",
+      "boardNamePlaceholder": "Leave empty to use your name"
+    },
+    "errors": {
+      "unauthorized": "The host did not accept this member's token.",
+      "not_member": "You are not a member of this workspace.",
+      "forbidden": "Your role does not allow this.",
+      "not_found": "It no longer exists.",
+      "expired": "This invite link can no longer be used.",
+      "disabled": "Your account is disabled on this host.",
+      "unavailable": "Cannot reach the host.",
+      "internal": "The host could not complete the request.",
+      "generic": "Something went wrong."
+    }
+  },
   "common": {
     "noData": "No data",
     "confirm": "Confirm",

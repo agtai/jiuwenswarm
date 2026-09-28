@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { enabledApplicationPlugins, normalizeApplicationPluginManifest } from '../node_modules/.cache/application-plugins/manifest.js';
+import { placeNavItems } from '../node_modules/.cache/application-plugins/navPlacement.js';
 
 test('normalizes and orders application plugin contributions', () => {
   const plugins = normalizeApplicationPluginManifest({
@@ -88,4 +89,27 @@ test('does not add backend-only plugins to navigation', () => {
 
   assert.equal(plugins.length, 1);
   assert.deepEqual(enabledApplicationPlugins(plugins), []);
+});
+
+const builtInNav = ['chat', 'agents', 'skills', 'settings'].map(key => ({ key }));
+
+test('places plugin pages after the built-in item they name, in manifest order', () => {
+  const placed = placeNavItems(builtInNav, [
+    { item: { key: 'app:late' } },
+    { item: { key: 'app:board' }, after: 'chat' },
+    { item: { key: 'app:second' }, after: 'chat' },
+    { item: { key: 'app:unknown-place' }, after: 'nowhere' },
+  ]);
+
+  assert.deepEqual(
+    placed.map(item => item.key),
+    ['chat', 'app:board', 'app:second', 'agents', 'skills', 'settings', 'app:late', 'app:unknown-place'],
+  );
+});
+
+test('keeps plugin pages after the built-in items when none names a place', () => {
+  assert.deepEqual(
+    placeNavItems(builtInNav, [{ item: { key: 'app:plain' } }]).map(item => item.key),
+    ['chat', 'agents', 'skills', 'settings', 'app:plain'],
+  );
 });

@@ -1,0 +1,158 @@
+from __future__ import annotations
+
+import sqlite3
+
+import pytest
+
+from jiuwenswarm.extensions.blackboard.common.tokens import hash_token
+from jiuwenswarm.extensions.blackboard.host.store import Store, invites, meta, users, workspaces
+from jiuwenswarm.extensions.blackboard.host.store.migrations import LATEST_VERSION
+from jiuwenswarm.extensions.blackboard.host.store.models import Invite
+
+
+async def _user(store: Store, name: str):
+    return await store.transact(lambda c: users.create(c, display_name=name, token_hash=hash_token(name)))
+
+
+async def test_open_migrates_once_and_keeps_the_host_uid(tmp_path):
+    path = tmp_path / "blackboard.db"
+    store = Store(path)
+    assert await store.open() == LATEST_VERSION
+    uid = await store.transact(meta.ensure_host_uid)
+    assert uid.startswith("host_")
+    await _user(store, "Alice")
+    await store.close()
+
+    reopened = Store(path)
+    assert await reopened.open() == LATEST_VERSION
+    assert await reopened.transact(meta.ensure_host_uid) == uid
+    assert await reopened.read(lambda c: users.by_token_hash(c, hash_token("Alice"))) is not None
+    rows = await reopened.read(lambda c: c.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0])
+    assert rows == LATEST_VERSION
+    await reopened.close()
+
+
+async def test_a_closed_store_refuses_work(tmp_path):
+    store = Store(tmp_path / "blackboard.db")
+    with pytest.raises(RuntimeError):
+        await store.read(lambda c: None)
+    await store.open()
+    await store.close()
+    with pytest.raises(RuntimeError):
+        await store.transact(lambda c: None)
+
+
+async def test_a_failed_transaction_leaves_nothing_behind(store):
+    def work(conn):
+        users.create(conn, display_name="Alice", token_hash="h1")
+        raise ValueError("boom")
+
+    with pytest.raises(ValueError):
+        await store.transact(work)
+    assert await store.read(lambda c: users.by_token_hash(c, "h1")) is None
+
+
+async def test_creating_a_workspace_makes_its_creator_owner(store):
+    alice = await _user(store, "Alice")
+    ws = await store.transact(lambda c: workspaces.create(c, name="launch-plan", title="Launch plan", created_by=alice.id))
+    member = await store.read(lambda c: workspaces.membership(c, ws.id, alice.id))
+    assert member.role == "owner"
+    assert ws.to_dict("owner") == {
+        "id": ws.id,
+        "name": "launch-plan",
+        "title": "Launch plan",
+        "created_at": ws.created_at,
+        "archived": False,
+        "role": "owner",
+    }
+    with pytest.raises(sqlite3.IntegrityError):
+        await store.transact(lambda c: workspaces.create(c, name="launch-plan", title="Again", created_by=alice.id))
+
+
+async def test_workspaces_list_active_first_then_by_title(store):
+    alice = await _user(store, "Alice")
+    ids = {}
+    for name, title in [("zeta", "zeta"), ("alpha", "Alpha"), ("beta", "beta")]:
+        ws = await store.transact(lambda c, n=name, t=title: workspaces.create(c, name=n, title=t, created_by=alice.id))
+        ids[name] = ws.id
+    await store.transact(lambda c: workspaces.set_archived(c, ids["alpha"], True))
+    rows = await store.read(lambda c: workspaces.list_for_user(c, alice.id))
+    assert [w.name for w, _ in rows] == ["beta", "zeta", "alpha"]
+    assert rows[-1][0].archived_at is not None
+
+
+async def test_members_are_listed_by_role_then_name(store):
+    alice = await _user(store, "Alice")
+    ws = await store.transact(lambda c: workspaces.create(c, name="team", title="Team", created_by=alice.id))
+    for name, role in [("dave", "viewer"), ("Bob", "editor"), ("carol", "commenter"), ("adam", "editor")]:
+        user = await _user(store, name)
+        await store.transact(lambda c, u=user, r=role: workspaces.add_member(c, ws.id, u.id, r))
+    members = await store.read(lambda c: workspaces.members(c, ws.id))
+    assert [(m.display_name, m.role) for m in members] == [
+        ("Alice", "owner"),
+        ("adam", "editor"),
+        ("Bob", "editor"),
+        ("carol", "commenter"),
+        ("dave", "viewer"),
+    ]
+    assert await store.read(lambda c: workspaces.owner_count(c, ws.id)) == 1
+
+
+async def test_deleting_a_workspace_takes_memberships_and_invites_with_it(store):
+    alice = await _user(store, "Alice")
+    ws = await store.transact(lambda c: workspaces.create(c, name="team", title="Team", created_by=alice.id))
+    invite = await store.transact(
+        lambda c: invites.create(
+            c, workspace_id=ws.id, role="editor", created_by=alice.id, expires_at="2999-01-01T00:00:00.000Z", max_uses=1
+        )
+    )
+    await store.transact(lambda c: workspaces.delete(c, ws.id))
+    assert await store.read(lambda c: workspaces.member_user_ids(c, ws.id)) == []
+    assert await store.read(lambda c: invites.get(c, invite.code)) is None
+
+
+async def test_roles_outside_the_list_are_rejected_by_the_schema(store):
+    alice = await _user(store, "Alice")
+    bob = await _user(store, "Bob")
+    ws = await store.transact(lambda c: workspaces.create(c, name="team", title="Team", created_by=alice.id))
+    with pytest.raises(sqlite3.IntegrityError):
+        await store.transact(lambda c: workspaces.add_member(c, ws.id, bob.id, "admin"))
+    with pytest.raises(sqlite3.IntegrityError):
+        await store.transact(
+            lambda c: invites.create(
+                c, workspace_id=ws.id, role="owner", created_by=alice.id, expires_at="2999-01-01", max_uses=1
+            )
+        )
+
+
+def _invite(**overrides) -> Invite:
+    values = dict(
+        code="c" * 20,
+        workspace_id="ws_1",
+        role="editor",
+        created_by="u_1",
+        created_at="2026-01-01T00:00:00.000Z",
+        expires_at="2026-02-01T00:00:00.000Z",
+        max_uses=2,
+        uses=0,
+        revoked_at=None,
+    )
+    values.update(overrides)
+    return Invite(**values)
+
+
+@pytest.mark.parametrize(
+    "overrides,state",
+    [
+        ({}, "active"),
+        ({"uses": 2}, "used_up"),
+        ({"expires_at": "2026-01-10T00:00:00.000Z"}, "expired"),
+        ({"expires_at": "2026-01-10T00:00:00.000Z", "uses": 2}, "expired"),
+        ({"revoked_at": "2026-01-02T00:00:00.000Z", "uses": 2}, "revoked"),
+        ({"expires_at": None, "max_uses": None, "uses": 500}, "active"),
+        ({"expires_at": None, "uses": 2}, "used_up"),
+        ({"max_uses": None, "expires_at": "2026-01-10T00:00:00.000Z"}, "expired"),
+    ],
+)
+def test_invite_state(overrides, state):
+    assert _invite(**overrides).state("2026-01-15T00:00:00.000Z") == state

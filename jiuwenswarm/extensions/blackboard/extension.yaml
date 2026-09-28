@@ -1,0 +1,11 @@
+id: blackboard
+name: Blackboard
+version: 0.1.0
+description: "Shared workspaces where people and agents write documents together. A team runs one Blackboard host; every member's jiuwenswarm connects to it."
+author: JiuwenSwarm
+min_jiuwenswarm_version: "0.2.5"
+package_type: application
+dependencies: {}
+permissions:
+  - outbound_network
+  - agent_tools

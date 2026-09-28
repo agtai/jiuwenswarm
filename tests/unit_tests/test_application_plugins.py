@@ -205,3 +205,59 @@ frontend:
     response = TestClient(app).get(manifest["entry_url"])
     assert response.status_code == 200
     assert response.text == "<h1>Hello</h1>"
+
+
+class _PlacedTestPlugin(_TestPlugin):
+    plugin_id = "placed-plugin"
+
+    def frontend_contributions(self) -> tuple[FrontendContribution, ...]:
+        return (
+            FrontendContribution(
+                id="placed-page",
+                nav_key="app:placed-plugin",
+                title="Placed",
+                render_mode="bundled",
+                component="placed-plugin",
+                nav_after="chat",
+            ),
+        )
+
+
+def test_a_page_can_follow_a_built_in_navigation_item() -> None:
+    registry = _registry()
+    registry.register_application_plugin(_PlacedTestPlugin())
+    registry.register_application_plugin(_TestPlugin())
+
+    entries = {entry["plugin_id"]: entry for entry in application_plugin_manifest(registry)["plugins"]}
+
+    assert entries["placed-plugin"]["nav_after"] == "chat"
+    assert "nav_after" not in entries["example-plugin"]
+
+
+@pytest.mark.asyncio
+async def test_manifest_only_plugin_reads_its_navigation_place(tmp_path: Path) -> None:
+    root = tmp_path / "placed-app"
+    (root / "frontend" / "dist").mkdir(parents=True)
+    (root / "frontend" / "dist" / "index.html").write_text("<h1>Placed</h1>", encoding="utf-8")
+    (root / "extension.yaml").write_text(
+        """
+id: placed-app
+name: Placed app
+version: 1.0.0
+description: Iframe application placed after Tasks
+author: Example
+min_jiuwenswarm_version: 0.2.5
+package_type: application
+frontend:
+  - id: placed-app-page
+    title: Placed
+    nav_after: chat
+""".strip(),
+        encoding="utf-8",
+    )
+    registry = _registry()
+
+    assert await ExtensionLoader(registry).load_extension(root)
+
+    (entry,) = application_plugin_manifest(registry)["plugins"]
+    assert entry["nav_after"] == "chat"

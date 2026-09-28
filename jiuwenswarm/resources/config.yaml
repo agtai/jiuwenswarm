@@ -1438,6 +1438,26 @@ extensions:
   extension_dirs: ${EXTENSION_DIRS:-jiuwenswarm/extensions}
 
 # ============================================================
+# Blackboard: shared workspaces for people and agents.
+# One machine of a team runs the host; members' instances join it with an
+# invite link. Member tokens and host secrets live under
+# <data root>/blackboard/, never in this file.
+# ============================================================
+blackboard:
+  host:
+    enabled: false
+    name: ""               # what members see; empty means "<operator>'s Blackboard"
+    bind: 127.0.0.1        # 0.0.0.0 lets other machines connect
+    port: 19011            # member API and invite links
+    doc_port: 19010        # document service for browsers (milestone 3)
+    doc_api_port: 19012    # document service internal API, loopback only
+    public_url: ""         # the address members use, e.g. https://bb.example.com
+    doc_public_url: ""
+    node_path: ""
+    operator_name: ""      # display name of the person running the host
+    max_upload_mb: 25
+
+# ============================================================
 # Hooks 配置
 # 17 个事件类型，支持 command / prompt 两种 hook 类型
 # 字段说明：

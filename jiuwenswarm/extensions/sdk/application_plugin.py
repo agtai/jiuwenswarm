@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Mapping
 
 from jiuwenswarm.extensions.sdk.base import BaseExtension
 
@@ -49,11 +49,28 @@ class WebSocketRouteContribution:
 
 
 @dataclass(frozen=True)
+class AgentToolContext:
+    """The agent request a plugin is asked to equip with tools.
+
+    Built by the AgentServer adapter before each request; ``metadata`` is the
+    request's E2A metadata, so a plugin that dispatched the turn can recognize it.
+    """
+
+    session_id: str | None = None
+    channel_id: str | None = None
+    request_id: str | None = None
+    user_id: str | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class FrontendContribution:
     """A page contribution exposed to the web frontend.
 
     ``bundled`` entries are compiled with Jiuwen and resolved by ``component``.
     ``iframe`` entries are prebuilt assets shipped by an installable plugin.
+    ``nav_after`` names the built-in navigation item the page follows, for
+    example ``"chat"``; empty places it after the built-in items.
     """
 
     id: str
@@ -64,6 +81,7 @@ class FrontendContribution:
     component: str = ""
     entrypoint: str = ""
     position: int = 100
+    nav_after: str = ""
 
 
 class ApplicationPluginExtension(BaseExtension):
@@ -92,6 +110,18 @@ class ApplicationPluginExtension(BaseExtension):
 
     def websocket_routes(self) -> tuple[WebSocketRouteContribution, ...]:
         return ()
+
+    def agent_tools(self, ctx: AgentToolContext) -> list[Any]:
+        """Return openjiuwen tools to attach to the agent for this request.
+
+        Called in the AgentServer process before every request, so a plugin can
+        offer different tools per session or channel. Return the same tool
+        instances when nothing changed; the adapter removes the tools a plugin
+        stops returning.
+        """
+
+        del ctx
+        return []
 
     def frontend_contributions(self) -> tuple[FrontendContribution, ...]:
         return ()
@@ -148,6 +178,7 @@ class ManifestApplicationPlugin(ApplicationPluginExtension):
                     render_mode=render_mode,
                     entrypoint=entrypoint,
                     position=position,
+                    nav_after=str(raw.get("nav_after", "")).strip(),
                 )
             )
         return tuple(contributions)
