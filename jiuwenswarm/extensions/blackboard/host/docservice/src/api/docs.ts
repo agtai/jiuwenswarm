@@ -1,10 +1,15 @@
 // Routes for documents: create, delete, agent view, import, presence, token recheck.
 import type { Hocuspocus } from '@hocuspocus/server'
 import type { Node as PMNode } from '@tiptap/pm/model'
+import { applySuggestion, revertSuggestion } from '@handlewithcare/prosemirror-suggest-changes'
+import { EditorState } from '@tiptap/pm/state'
+import * as Y from 'yjs'
 import { ROLES, WRITE_ROLES } from '../auth.ts'
 import { blackboardSchema } from '../schema/extensions.ts'
+import { EditError, planEdit, readOps, type EditRequest } from '../docs/edits.ts'
 import { MarkdownError, agentView, hasRawHtml, importDoc, type View } from '../docs/markdown.ts'
-import type { DocPool } from '../docs/pool.ts'
+import { FIELD, readDoc, writeDoc, type DocPool } from '../docs/pool.ts'
+import { suggestionsIn, type SuggestionSummary } from '../docs/suggestions.ts'
 import type { DocStorage } from '../storage.ts'
 import { ApiError, type Route } from './http.ts'
 
@@ -55,6 +60,35 @@ function contentFor(markdown: string | null, author: Author): PMNode {
       detail: error instanceof Error ? error.message : String(error),
     })
   }
+}
+
+function readAllowed(value: any): EditRequest['allowed'] {
+  if (value === undefined || value === null) return null
+  if (typeof value.blockFrom !== 'string' || typeof value.blockTo !== 'string') {
+    throw new ApiError(400, 'invalid', 'allowed is {blockFrom, blockTo}', { field: 'allowed' })
+  }
+  return { blockFrom: value.blockFrom, blockTo: value.blockTo }
+}
+
+// A relative position at the start of a block's first text, or before the block when it has none.
+function blockStart(ydoc: Y.Doc, blockId: string): unknown {
+  const fragment = ydoc.getXmlFragment(FIELD)
+  const blocks = fragment.toArray()
+  const index = blocks.findIndex((b) => b instanceof Y.XmlElement && b.getAttribute('id') === blockId)
+  if (index < 0) return null
+  const firstText = (el: Y.XmlElement): Y.XmlText | null => {
+    for (const child of el.toArray()) {
+      if (child instanceof Y.XmlText) return child
+      if (child instanceof Y.XmlElement) {
+        const found = firstText(child)
+        if (found) return found
+      }
+    }
+    return null
+  }
+  const text = firstText(blocks[index] as Y.XmlElement)
+  const position = text ? Y.createRelativePositionFromTypeIndex(text, 0) : Y.createRelativePositionFromTypeIndex(fragment, index)
+  return Y.relativePositionToJSON(position)
 }
 
 export interface DocRoutesDeps {
@@ -168,6 +202,105 @@ export function docRoutes({ hocuspocus, pool, storage, version, shutdown }: DocR
           connection.requestToken()
         }
         return { rechecked: matching.length }
+      },
+    },
+    {
+      method: 'POST',
+      path: new RegExp(`^/api/docs/${DOC_ID}/edits$`),
+      handler: async ({ params: [docId], body }) => {
+        requireDoc(docId)
+        const author = readAuthor(body.author)
+        if (author.kind !== 'agent') throw new ApiError(400, 'invalid', 'edits are written by an agent', { field: 'author' })
+        const req: EditRequest = {
+          mandateId: typeof body.mandateId === 'string' ? body.mandateId : null,
+          author: { ...author, mandate: typeof body.mandateId === 'string' ? body.mandateId : null },
+          mode: body.mode === 'direct' ? 'direct' : 'suggest',
+          allowed: readAllowed(body.allowed),
+          ops: [],
+        }
+        try {
+          req.ops = readOps(body.ops)
+          return await pool.run(
+            docId,
+            (ydoc) => {
+              const { doc, result } = planEdit(readDoc(ydoc), req)
+              if (result.changed) writeDoc(ydoc, doc)
+              return result
+            },
+            { immediate: true },
+          )
+        } catch (error) {
+          if (error instanceof EditError) throw new ApiError(409, error.code, error.message, error.details)
+          throw error
+        }
+      },
+    },
+    {
+      method: 'GET',
+      path: new RegExp(`^/api/docs/${DOC_ID}/suggestions$`),
+      handler: async ({ params: [docId] }) => {
+        requireDoc(docId)
+        const doc = await pool.read(docId)
+        const byId = new Map<string, SuggestionSummary & { blockIds: string[] }>()
+        doc.forEach((node, offset) => {
+          for (const s of suggestionsIn(doc, offset, offset + node.nodeSize)) {
+            const entry = byId.get(s.id) ?? { ...s, inserted: '', deleted: '', blockIds: [] }
+            entry.inserted += s.inserted
+            entry.deleted += s.deleted
+            if (node.attrs.id) entry.blockIds.push(node.attrs.id)
+            byId.set(s.id, entry)
+          }
+        })
+        return { suggestions: [...byId.values()] }
+      },
+    },
+    {
+      method: 'POST',
+      path: new RegExp(`^/api/docs/${DOC_ID}/suggestions/([A-Za-z0-9_-]{1,64})$`),
+      handler: async ({ params: [docId, suggestionId], body }) => {
+        requireDoc(docId)
+        const action = body.action
+        if (action !== 'accept' && action !== 'reject') throw new ApiError(400, 'invalid', 'action is accept or reject', { field: 'action' })
+        const decided = await pool.run(
+          docId,
+          (ydoc) => {
+            const doc = readDoc(ydoc)
+            if (!suggestionsIn(doc).some((s) => s.id === suggestionId)) return false
+            let state = EditorState.create({ schema: blackboardSchema(), doc })
+            const command = action === 'accept' ? applySuggestion(suggestionId) : revertSuggestion(suggestionId)
+            command(state, (tr) => {
+              state = state.apply(tr)
+            })
+            writeDoc(ydoc, state.doc)
+            return true
+          },
+          { immediate: true },
+        )
+        if (!decided) throw new ApiError(404, 'not_found', 'no pending suggestion has this id', { suggestion_id: suggestionId })
+        return { suggestionId, action }
+      },
+    },
+    {
+      method: 'POST',
+      path: new RegExp(`^/api/docs/${DOC_ID}/presence$`),
+      // An agent's caret for the people with the document open. Only one agent writes a document at
+      // a time (the host's lock), so the service's own awareness state carries it.
+      handler: async ({ params: [docId], body }) => {
+        const document = hocuspocus.documents.get(docId)
+        if (!document) return { shown: false }
+        if (body.status === null || body.status === undefined) {
+          document.awareness.setLocalState(null)
+          return { shown: false }
+        }
+        if (typeof body.agentId !== 'string' || typeof body.label !== 'string' || !['reading', 'writing'].includes(body.status)) {
+          throw new ApiError(400, 'invalid', 'presence is {agentId, label, status: reading | writing, blockId?}')
+        }
+        const at = typeof body.blockId === 'string' ? blockStart(document, body.blockId) : null
+        document.awareness.setLocalState({
+          user: { id: `agent:${body.agentId}`, name: body.label, kind: 'agent', status: body.status },
+          cursor: at ? { anchor: at, head: at } : null,
+        })
+        return { shown: true }
       },
     },
     {

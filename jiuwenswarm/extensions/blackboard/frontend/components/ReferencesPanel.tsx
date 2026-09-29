@@ -112,7 +112,7 @@ export function ReferencesPanel({
             </button>
             <p className="bb-reference__meta">
               {formatSize(ref.size)}
-              {ref.uploaded_by_name ? ` · ${ref.uploaded_by_name}` : ''}
+              {ref.uploaded_by_name ? `, ${ref.uploaded_by_name}` : ''}
             </p>
             {editing?.id === ref.id ? (
               <div className="bb-inline">

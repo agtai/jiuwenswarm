@@ -11,6 +11,7 @@ from jiuwenswarm.extensions.blackboard.common.config import HostSettings
 from jiuwenswarm.extensions.blackboard.common.errors import DISABLED, UNAUTHORIZED, UNAVAILABLE, BlackboardError
 from jiuwenswarm.extensions.blackboard.common.tokens import hash_token
 from jiuwenswarm.extensions.blackboard.host.api.events import EventHub
+from jiuwenswarm.extensions.blackboard.host.api.locks import LockWaits
 from jiuwenswarm.extensions.blackboard.host.secrets import HostSecrets
 from jiuwenswarm.extensions.blackboard.host.store import Store, users
 from jiuwenswarm.extensions.blackboard.host.store.models import User
@@ -33,6 +34,7 @@ class HostContext:
     docs: "DocServiceManager | None" = None
     # Where reference files are kept: <files_dir>/<workspace id>/<reference id><ext>.
     files_dir: Path | None = None
+    lock_waits: LockWaits = field(default_factory=LockWaits)
     _last_touch: dict[str, float] = field(default_factory=dict)
 
     @property

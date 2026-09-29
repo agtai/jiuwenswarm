@@ -4,10 +4,11 @@ import { Link2, Server, Users } from 'lucide-react';
 
 import { Button, Tabs, toast } from '../../../channels/web/frontend/src/components/ui';
 import { FormDialog } from '../../../channels/web/frontend/src/components/form';
-import { canEdit, currentDoc, currentHost, currentWorkspace } from './controller';
+import { canEdit, currentDoc, currentHost, currentWorkspace, type RailTab } from './controller';
 import { describeError } from './errors';
-import type { DocView, InviteView, MemberView, ReferenceView } from './types';
+import type { DocView, InviteView, MandateView, MemberView, ReferenceView } from './types';
 import { useController } from './useController';
+import { AgentsPanel } from './components/AgentsPanel';
 import { MembersPanel } from './components/MembersPanel';
 import { ReferencePreview, ReferencesPanel } from './components/ReferencesPanel';
 import { Sidebar } from './components/Sidebar';
@@ -43,8 +44,7 @@ type Confirm = {
 };
 
 type Open = 'join' | 'new' | 'rename' | 'invite' | 'settings' | 'newDoc' | null;
-type DocDialog = { kind: 'rename' | 'import' | 'markdown'; doc: DocView } | null;
-type RailTab = 'members' | 'references';
+type DocDialog = { kind: 'import' | 'markdown'; doc: DocView } | null;
 
 export function BlackboardPage() {
   const { t } = useTranslation();
@@ -52,7 +52,7 @@ export function BlackboardPage() {
   const [open, setOpen] = useState<Open>(null);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [docDialog, setDocDialog] = useState<DocDialog>(null);
-  const [railTab, setRailTab] = useState<RailTab>('members');
+  const railTab = state.rail;
   const [preview, setPreview] = useState<{ reference: ReferenceView; url: string } | null>(null);
   const host = currentHost(state);
   const workspace = currentWorkspace(state);
@@ -62,8 +62,26 @@ export function BlackboardPage() {
   const names = useMemo(() => new Map(state.members.map((m) => [m.user_id, m.display_name])), [state.members]);
   const me = state.me ? { id: state.me.user_id, name: state.me.display_name } : null;
   const fetchToken = useCallback((docId: string) => controller.docToken(docId), [controller, state.hostId]);
+  const instructions = useMemo(() => new Map(state.mandates.map((m) => [m.id, m.instruction])), [state.mandates]);
+  const suggestionActions = useMemo(
+    () => ({
+      decide:
+        editable && doc
+          ? (ids: string[], action: 'accept' | 'reject') => controller.decideSuggestions(doc.id, ids, action).catch(report)
+          : null,
+      decideRun:
+        editable && doc
+          ? (mandateId: string, action: 'accept' | 'reject') =>
+              controller.decideMandate(doc.id, mandateId, action).then(() => undefined, report)
+          : null,
+      instructions,
+    }),
+    [controller, doc, editable, instructions],
+  );
 
-  const report = (error: unknown) => toast.open({ content: describeError(t, error), variant: 'error' });
+  const report = (error: unknown): void => {
+    toast.open({ content: describeError(t, error), variant: 'error' });
+  };
 
   const copy = async (invite: InviteView) => {
     try {
@@ -119,7 +137,11 @@ export function BlackboardPage() {
     });
 
   const docActions: DocActions = {
-    rename: (d) => setDocDialog({ kind: 'rename', doc: d }),
+    rename: (d, title) =>
+      controller.renameDoc(d.id, title).catch((error) => {
+        report(error);
+        throw error;
+      }),
     setPinned: (d, pinned) => void controller.setDocPinned(d.id, pinned).catch(report),
     setInstructions: (d) => void controller.setInstructions(d.id).catch(report),
     importMarkdown: (d) => setDocDialog({ kind: 'import', doc: d }),
@@ -166,6 +188,22 @@ export function BlackboardPage() {
       report(error);
     }
   };
+
+  const askCancelMandate = (mandate: MandateView) =>
+    setConfirm({
+      title: t('blackboard.agents.cancel'),
+      message: t('blackboard.agents.cancelConfirm', { name: mandate.requester_name ?? mandate.requester_id }),
+      confirmLabel: t('blackboard.agents.cancel'),
+      danger: true,
+      action: () => controller.cancelMandate(mandate.id),
+      testId: 'blackboard-cancel-mandate-dialog',
+    });
+
+  const decideRun = (mandate: MandateView, docId: string, action: 'accept' | 'reject') =>
+    void controller
+      .decideMandate(docId, mandate.id, action)
+      .then((count) => toast.open({ content: t(`blackboard.agents.decided.${action}`, { count }), variant: 'success' }))
+      .catch(report);
 
   const askRemoveReference = (reference: ReferenceView) =>
     setConfirm({
@@ -224,6 +262,7 @@ export function BlackboardPage() {
                 names={names}
                 fetchToken={fetchToken}
                 docActions={docActions}
+                suggestionActions={suggestionActions}
                 onNewDoc={() => setOpen('newDoc')}
                 onRename={() => setOpen('rename')}
                 onArchive={() => void controller.setArchived(true).catch(report)}
@@ -242,9 +281,10 @@ export function BlackboardPage() {
                 items={[
                   { value: 'members', label: t('blackboard.members.tab'), testId: 'blackboard-rail-tab-members' },
                   { value: 'references', label: t('blackboard.references.tab'), testId: 'blackboard-rail-tab-references' },
+                  { value: 'agents', label: t('blackboard.agents.tab'), testId: 'blackboard-rail-tab-agents' },
                 ]}
                 value={railTab}
-                onChange={setRailTab}
+                onChange={(tab) => controller.selectRail(tab)}
                 bordered
                 wrapperTestId="blackboard-rail-tabs"
               />
@@ -260,6 +300,21 @@ export function BlackboardPage() {
                   onInvite={() => setOpen('invite')}
                   onCopy={(invite) => void copy(invite)}
                   onRevoke={askRevoke}
+                />
+              ) : railTab === 'agents' ? (
+                <AgentsPanel
+                  mandates={state.mandates}
+                  sessions={state.sessions}
+                  docs={state.docs}
+                  meId={state.me?.user_id ?? null}
+                  canEdit={editable}
+                  onStart={() => controller.startAgentSession().then(() => undefined, report)}
+                  onLoadAttachable={() => controller.attachableSessions().catch((error) => (report(error), []))}
+                  onAttach={(sessionId) => controller.attachSession(sessionId).catch(report)}
+                  onOpen={(sessionId) => controller.openSession(sessionId)}
+                  onDetach={(sessionId) => void controller.detachSession(sessionId).catch(report)}
+                  onCancel={askCancelMandate}
+                  onDecide={decideRun}
                 />
               ) : (
                 <ReferencesPanel
@@ -307,14 +362,6 @@ export function BlackboardPage() {
         onClose={close}
       />
       <NewDocumentDialog open={open === 'newDoc'} onCreate={(title, markdown) => controller.createDoc(title, markdown)} onClose={close} />
-      <RenameDialog
-        open={docDialog?.kind === 'rename'}
-        current={docDialog?.doc.title ?? ''}
-        heading={t('blackboard.docs.renameTitle')}
-        testId="blackboard-rename-doc"
-        onRename={(title) => controller.renameDoc(docDialog!.doc.id, title)}
-        onClose={() => setDocDialog(null)}
-      />
       <ImportMarkdownDialog
         open={docDialog?.kind === 'import'}
         docTitle={docDialog?.doc.title ?? ''}

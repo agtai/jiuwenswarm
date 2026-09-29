@@ -74,6 +74,10 @@ test('the keys built at runtime exist for every value they take', () => {
     assert.ok(en.has(`blackboard.editor.tools.${tool}`), tool);
   }
   for (const kind of ['insertion', 'deletion']) assert.ok(en.has(`blackboard.editor.suggested.${kind}`), kind);
+  for (const status of ['queued', 'running', 'waiting_for_answer', 'done', 'failed', 'cancelled', 'refused', 'unknown']) {
+    assert.ok(en.has(`blackboard.agents.status.${status}`), status);
+  }
+  for (const action of ['accept', 'reject']) assert.ok(has(en, `blackboard.agents.decided.${action}`), action);
   for (const reason of ['not_built', 'node_missing', 'node_too_old', 'start_failed', 'exited', 'not_configured', 'stopped', 'starting']) {
     assert.ok(en.has(`blackboard.docservice.${reason}`), reason);
   }

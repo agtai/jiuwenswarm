@@ -24,6 +24,8 @@ import {
   Table,
   Undo2,
   Users,
+  Check,
+  X,
 } from 'lucide-react';
 
 import { Button, Tag, type TagVariant } from '../../../../channels/web/frontend/src/components/ui';
@@ -39,8 +41,19 @@ export interface DocumentEditorProps {
   me: { id: string; name: string };
   // user id -> display name, for the authors legend and suggestion cards.
   names: ReadonlyMap<string, string>;
-  // The header's title and menu, rendered by the page.
+  // The header's tags and menu, rendered by the page.
   header: ReactNode;
+  // The editable name above the content.
+  title: ReactNode;
+  suggestions: SuggestionActions;
+}
+
+export interface SuggestionActions {
+  // Null for people who cannot decide (viewers, archived documents).
+  decide: ((ids: string[], action: 'accept' | 'reject') => Promise<void>) | null;
+  decideRun: ((mandateId: string, action: 'accept' | 'reject') => Promise<void>) | null;
+  // Mandate id -> what the agent was asked to do.
+  instructions: ReadonlyMap<string, string>;
 }
 
 const STATUS_VARIANT: Record<SessionStatus, TagVariant> = {
@@ -94,7 +107,7 @@ function useSession(docId: string, fetchToken: DocumentEditorProps['fetchToken']
   return { live, state };
 }
 
-export default function DocumentEditor({ docId, fetchToken, me, names, header }: DocumentEditorProps) {
+export default function DocumentEditor({ docId, fetchToken, me, names, header, title, suggestions }: DocumentEditorProps) {
   const { t } = useTranslation();
   const { live, state } = useSession(docId, fetchToken);
   const [showAuthors, setShowAuthors] = useState(false);
@@ -145,6 +158,8 @@ export default function DocumentEditor({ docId, fetchToken, me, names, header }:
           me={me}
           names={names}
           showAuthors={showAuthors}
+          title={title}
+          suggestions={suggestions}
         />
       ) : (
         <div className="bb-doc__loading" data-testid="blackboard-doc-loading" />
@@ -160,6 +175,8 @@ function LiveEditor({
   me,
   names,
   showAuthors,
+  title,
+  suggestions,
 }: {
   ydoc: Y.Doc;
   provider: HocuspocusProvider;
@@ -167,6 +184,8 @@ function LiveEditor({
   me: { id: string; name: string };
   names: ReadonlyMap<string, string>;
   showAuthors: boolean;
+  title: ReactNode;
+  suggestions: SuggestionActions;
 }) {
   const meRef = useRef(me);
   meRef.current = me;
@@ -186,6 +205,10 @@ function LiveEditor({
               const label = document.createElement('span');
               label.className = 'collaboration-carets__label';
               label.textContent = String(user.name ?? '');
+              if (user.kind === 'agent') {
+                caret.classList.add('is-agent');
+                label.prepend(botIcon());
+              }
               caret.append(label);
               return caret;
             },
@@ -215,11 +238,37 @@ function LiveEditor({
     <div className={`bb-editor${showAuthors ? ' show-authors' : ''}`} data-testid="blackboard-editor" data-readonly={readOnly}>
       {editor && !readOnly ? <Toolbar editor={editor} /> : null}
       {editor && showAuthors ? <AuthorsLegend editor={editor} names={names} /> : null}
-      <SuggestionCards names={names}>
+      {title}
+      <SuggestionCards names={names} actions={readOnly ? { ...suggestions, decide: null, decideRun: null } : suggestions}>
         <EditorContent editor={editor} className="bb-editor__scroll" />
       </SuggestionCards>
     </div>
   );
+}
+
+// Lucide's "bot" glyph, for the label of an agent's caret (built by hand: carets are plain DOM).
+function botIcon(): SVGSVGElement {
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  for (const [key, value] of Object.entries({ viewBox: '0 0 24 24', width: '11', height: '11', fill: 'none', stroke: 'currentColor', 'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' })) {
+    svg.setAttribute(key, value);
+  }
+  svg.setAttribute('class', 'collaboration-carets__bot');
+  svg.setAttribute('aria-hidden', 'true');
+  const shapes: Array<[string, Record<string, string>]> = [
+    ['path', { d: 'M12 8V4H8' }],
+    ['rect', { width: '16', height: '12', x: '4', y: '8', rx: '2' }],
+    ['path', { d: 'M2 14h2' }],
+    ['path', { d: 'M20 14h2' }],
+    ['path', { d: 'M15 13v2' }],
+    ['path', { d: 'M9 13v2' }],
+  ];
+  for (const [tag, attrs] of shapes) {
+    const el = document.createElementNS(ns, tag);
+    for (const [key, value] of Object.entries(attrs)) el.setAttribute(key, value);
+    svg.append(el);
+  }
+  return svg;
 }
 
 function useEditorTick(editor: Editor, delayMs = 0): number {
@@ -310,43 +359,116 @@ function AuthorsLegend({ editor, names }: { editor: Editor; names: ReadonlyMap<s
   );
 }
 
-// A card over pending suggestions: who suggested it. Accepting and rejecting come with agent edits.
-function SuggestionCards({ names, children }: { names: ReadonlyMap<string, string>; children: ReactNode }) {
+// A card for a pending suggestion, opened by clicking it: who suggested what, and for editors Accept
+// and Reject, plus accepting or rejecting everything one agent run suggested in the document.
+function SuggestionCards({
+  names,
+  actions,
+  children,
+}: {
+  names: ReadonlyMap<string, string>;
+  actions: SuggestionActions;
+  children: ReactNode;
+}) {
   const { t } = useTranslation();
   const wrapper = useRef<HTMLDivElement | null>(null);
-  const [card, setCard] = useState<{ left: number; top: number; kind: string; name: string; agent: boolean } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [card, setCard] = useState<{
+    left: number;
+    top: number;
+    id: string;
+    kind: string;
+    name: string;
+    agent: boolean;
+    mandate: string | null;
+  } | null>(null);
 
-  const onMouseOver = (event: React.MouseEvent) => {
+  useEffect(() => {
+    if (!card) return;
+    const close = (event: Event) => {
+      if (event instanceof KeyboardEvent ? event.key === 'Escape' : !wrapper.current?.querySelector('.bb-suggestion-card')?.contains(event.target as Node)) {
+        setCard(null);
+      }
+    };
+    document.addEventListener('keydown', close);
+    document.addEventListener('mousedown', close);
+    return () => {
+      document.removeEventListener('keydown', close);
+      document.removeEventListener('mousedown', close);
+    };
+  }, [card]);
+
+  const onClick = (event: React.MouseEvent) => {
     const target = (event.target as HTMLElement).closest('ins[data-author], del[data-author]') as HTMLElement | null;
-    if (!target || !wrapper.current) {
-      setCard(null);
-      return;
-    }
-    let author: { id?: string; kind?: string } = {};
+    if (!target || !wrapper.current) return;
+    let author: { id?: string; kind?: string; mandate?: string | null } = {};
+    let id = '';
     try {
       author = JSON.parse(target.dataset.author ?? '{}');
+      id = JSON.parse(target.dataset.id ?? '""');
     } catch {
-      author = {};
+      return;
     }
     const box = target.getBoundingClientRect();
     const frame = wrapper.current.getBoundingClientRect();
+    const name = (author.id && names.get(author.id)) || author.id || '';
+    // A replacement is one suggestion id on both an ins and a del.
+    const tags = new Set(
+      [...wrapper.current.querySelectorAll<HTMLElement>('ins[data-id], del[data-id]')]
+        .filter((el) => el.dataset.id === target.dataset.id)
+        .map((el) => el.tagName),
+    );
     setCard({
-      left: box.left - frame.left,
+      left: Math.max(0, box.left - frame.left),
       top: box.bottom - frame.top + 4,
-      kind: target.tagName === 'INS' ? 'insertion' : 'deletion',
-      name: (author.id && names.get(author.id)) || author.id || '',
+      id: String(id),
+      kind: tags.size > 1 ? 'replacement' : target.tagName === 'INS' ? 'insertion' : 'deletion',
+      name: author.kind === 'agent' ? t('blackboard.editor.agentOf', { name }) : name,
       agent: author.kind === 'agent',
+      mandate: author.kind === 'agent' ? (author.mandate ?? null) : null,
     });
   };
 
+  const act = async (run: () => Promise<void>) => {
+    setBusy(true);
+    try {
+      await run();
+      setCard(null);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const instruction = card?.mandate ? actions.instructions.get(card.mandate) : undefined;
   return (
-    <div className="bb-suggestions" ref={wrapper} onMouseOver={onMouseOver} onMouseLeave={() => setCard(null)}>
+    <div className="bb-suggestions" ref={wrapper} onClick={onClick}>
       {children}
       {card ? (
         <div className="bb-suggestion-card" style={{ left: card.left, top: card.top }} data-testid="blackboard-suggestion-card" data-variant={card.kind}>
-          <strong>{card.name}</strong>
-          {card.agent ? <span className="bb-muted"> {t('blackboard.editor.agent')}</span> : null}
+          <strong data-testid="blackboard-suggestion-author">{card.name}</strong>
           <div className="bb-muted">{t(`blackboard.editor.suggested.${card.kind}`)}</div>
+          {instruction ? <div className="bb-suggestion-card__why">{instruction}</div> : null}
+          {actions.decide ? (
+            <div className="bb-suggestion-card__actions">
+              <Button size="sm" variant="primary" icon={<Check size={13} />} loading={busy} data-testid="blackboard-suggestion-accept-btn" onClick={() => void act(() => actions.decide!([card.id], 'accept'))}>
+                {t('blackboard.editor.accept')}
+              </Button>
+              <Button size="sm" icon={<X size={13} />} disabled={busy} data-testid="blackboard-suggestion-reject-btn" onClick={() => void act(() => actions.decide!([card.id], 'reject'))}>
+                {t('blackboard.editor.reject')}
+              </Button>
+              {card.mandate && actions.decideRun ? (
+                <Button
+                  size="sm"
+                  variant="quiet"
+                  disabled={busy}
+                  data-testid="blackboard-suggestion-accept-run-btn"
+                  onClick={() => void act(() => actions.decideRun!(card.mandate!, 'accept'))}
+                >
+                  {t('blackboard.editor.acceptRun')}
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
         </div>
       ) : null}
     </div>

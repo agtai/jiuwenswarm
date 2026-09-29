@@ -20,7 +20,7 @@ from jiuwenswarm.extensions.blackboard.common.tokens import hash_token, new_memb
 from jiuwenswarm.extensions.blackboard.host.api.context import HostContext
 from jiuwenswarm.extensions.blackboard.host.api.methods import METHODS, Call
 from jiuwenswarm.extensions.blackboard.host.controller import HostController
-from jiuwenswarm.extensions.blackboard.host.store import Store, invites, references, users, workspaces
+from jiuwenswarm.extensions.blackboard.host.store import Store, invites, mandates, references, users, workspaces
 from jiuwenswarm.extensions.blackboard.host.store.models import User
 
 
@@ -64,6 +64,9 @@ class FakeDocs:
     def __init__(self) -> None:
         self.docs: dict[str, str] = {}
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
+        # Set to a BlackboardError to make the next edits call fail with it.
+        self.edit_error: BlackboardError | None = None
+        self.pending: dict[str, set[str]] = {}
 
     def require_client(self) -> "FakeDocs":
         if not self.running:
@@ -96,6 +99,31 @@ class FakeDocs:
     ) -> dict:
         self.calls.append(("recheck", doc_id, {"user_id": user_id, "role": role, "revoke": revoke}))
         return {"rechecked": 0}
+
+    async def edits(self, doc_id: str, body: dict) -> dict:
+        self.calls.append(("edits", doc_id, body))
+        if self.edit_error is not None:
+            error, self.edit_error = self.edit_error, None
+            raise error
+        ids = [f"s{len(self.calls)}"]
+        self.pending.setdefault(doc_id, set()).update(ids)
+        before = [{"id": op["blockId"], "digest": "d0", "markdown": "old"} for op in body["ops"]]
+        after = [{"id": op["blockId"], "digest": "d1", "markdown": "new"} for op in body["ops"]]
+        return {"changed": True, "suggestionIds": ids, "before": before, "after": after}
+
+    async def suggestions(self, doc_id: str) -> dict:
+        return {"suggestions": [{"id": s, "blockIds": ["b1"]} for s in sorted(self.pending.get(doc_id, set()))]}
+
+    async def decide(self, doc_id: str, suggestion_id: str, action: str) -> dict:
+        self.calls.append(("decide", doc_id, {"suggestion_id": suggestion_id, "action": action}))
+        if suggestion_id not in self.pending.get(doc_id, set()):
+            raise BlackboardError("not_found", "no pending suggestion has this id")
+        self.pending[doc_id].discard(suggestion_id)
+        return {"suggestionId": suggestion_id, "action": action}
+
+    async def agent_presence(self, doc_id: str, body: dict) -> dict:
+        self.calls.append(("presence", doc_id, body))
+        return {"shown": body.get("status") is not None}
 
     def named(self, action: str) -> list[tuple[str, dict[str, Any]]]:
         return [(doc_id, extra) for name, doc_id, extra in self.calls if name == action]
@@ -146,6 +174,21 @@ class HostWorld:
     async def doc(self, user: User, workspace_id: str, title: str = "Notes", **params: Any) -> str:
         result = await self.call(user, p.DOC_CREATE, workspace_id=workspace_id, title=title, **params)
         return result["doc"]["id"]
+
+    async def mandate(self, user: User, workspace_id: str, **fields: Any) -> str:
+        values = {
+            "origin": "workspace_session",
+            "origin_ref": {"session_id": "sess-1", "turn_id": "t1"},
+            "session_id": "sess-1",
+            "instruction": "Tidy the plan",
+            "scope": {},
+            "reply_target": {"kind": "session", "id": "sess-1"},
+            **fields,
+        }
+        mandate = await self.store.transact(
+            lambda c: mandates.create(c, workspace_id=workspace_id, requester_id=user.id, **values)
+        )
+        return mandate.id
 
     async def reference(self, user: User, workspace_id: str, name: str = "brief.pdf") -> str:
         reference_id = new_id("r")

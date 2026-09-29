@@ -25,6 +25,7 @@ from jiuwenswarm.extensions.blackboard.host.store.models import User
 logger = logging.getLogger(__name__)
 
 STARTUP_TIMEOUT_S = 10.0
+SWEEP_INTERVAL_S = 30.0
 
 
 class _Server(uvicorn.Server):
@@ -79,6 +80,7 @@ class HostRuntime:
         self._server: _Server | None = None
         self._task: asyncio.Task | None = None
         self.docs: DocServiceManager | None = None
+        self._sweeper: asyncio.Task | None = None
 
     @property
     def running(self) -> bool:
@@ -144,7 +146,20 @@ class HostRuntime:
         # The host serves members without the document service too; documents wait for it.
         assert self.docs is not None
         self.docs.start()
+        self._sweeper = asyncio.create_task(self._sweep(ctx), name="blackboard.host.sweeper")
         return ctx
+
+    @staticmethod
+    async def _sweep(ctx: HostContext) -> None:
+        """End workspace-session mandates that have gone quiet."""
+        from jiuwenswarm.extensions.blackboard.host.api.mandates import sweep_idle_mandates
+
+        while True:
+            await asyncio.sleep(SWEEP_INTERVAL_S)
+            try:
+                await sweep_idle_mandates(ctx)
+            except Exception:  # noqa: BLE001 - the next round tries again
+                logger.exception("blackboard: sweeping idle mandates failed")
 
     async def restart_docs(self) -> None:
         if self.docs is not None:
@@ -162,6 +177,9 @@ class HostRuntime:
             sock.close()
 
     async def stop(self) -> None:
+        if self._sweeper is not None:
+            self._sweeper.cancel()
+            self._sweeper = None
         if self.docs is not None:
             await self.docs.stop()
         if self.ctx is not None:

@@ -117,7 +117,7 @@ export function MembersPanel({
                               timeStyle: 'short',
                             }),
                           }),
-                    ].join(' · ')}
+                    ].join(' - ')}
                   </p>
                   <div className="bb-invite__actions">
                     <Button

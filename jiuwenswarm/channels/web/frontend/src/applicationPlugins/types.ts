@@ -43,6 +43,24 @@ export interface ApplicationPluginTaskInputActionProps {
   };
 }
 
+// An item a plugin adds to the chat input's + menu. It may open its own panel next to the menu;
+// the menu shows one such panel at a time. sessionId is null until the conversation has a session;
+// ensureSession creates it.
+export interface ApplicationPluginTaskMenuItemProps {
+  sessionId: string | null;
+  ensureSession: (initialTitle?: string) => Promise<string | null>;
+  direction: 'up' | 'down';
+  teamMode: boolean;
+  panelOpen: boolean;
+  onPanelOpenChange: (open: boolean) => void;
+  closeMenu: () => void;
+}
+
+// A tag a plugin shows in the chat input's toolbar for the current session.
+export interface ApplicationPluginTaskInputTagProps {
+  sessionId: string | null;
+}
+
 export interface ApplicationPluginTaskRuntimeProps {
   sessionId: string | null;
   onConversationItem: (

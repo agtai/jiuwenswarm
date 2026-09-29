@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from typing import Any
@@ -209,4 +210,118 @@ class Reference:
             "uploaded_by": self.uploaded_by,
             "uploaded_by_name": uploader_name,
             "uploaded_at": self.uploaded_at,
+        }
+
+
+def _json(text: str | None, default: Any) -> Any:
+    return json.loads(text) if text else default
+
+
+@dataclass(frozen=True)
+class Mandate:
+    id: str
+    workspace_id: str
+    origin: str
+    origin_ref: dict[str, Any]
+    requester_id: str
+    session_id: str | None
+    instruction: str
+    scope: dict[str, Any]
+    permission_mode: str
+    reply_target: dict[str, Any]
+    status: str
+    status_reason: str | None
+    turn_count: int
+    created_at: str
+    started_at: str | None
+    finished_at: str | None
+    last_activity_at: str | None
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> "Mandate":
+        return cls(
+            id=row["id"],
+            workspace_id=row["workspace_id"],
+            origin=row["origin"],
+            origin_ref=_json(row["origin_ref"], {}),
+            requester_id=row["requester_id"],
+            session_id=row["session_id"],
+            instruction=row["instruction"],
+            scope=_json(row["scope"], {}),
+            permission_mode=row["permission_mode"],
+            reply_target=_json(row["reply_target"], {}),
+            status=row["status"],
+            status_reason=row["status_reason"],
+            turn_count=int(row["turn_count"]),
+            created_at=row["created_at"],
+            started_at=row["started_at"],
+            finished_at=row["finished_at"],
+            last_activity_at=row["last_activity_at"],
+        )
+
+    def to_dict(self, requester_name: str | None = None) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "workspace_id": self.workspace_id,
+            "origin": self.origin,
+            "requester_id": self.requester_id,
+            "requester_name": requester_name,
+            "instruction": self.instruction,
+            "scope": self.scope,
+            "permission_mode": self.permission_mode,
+            "status": self.status,
+            "status_reason": self.status_reason,
+            "created_at": self.created_at,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "last_activity_at": self.last_activity_at,
+        }
+
+
+@dataclass(frozen=True)
+class Receipt:
+    id: str
+    mandate_id: str
+    doc_id: str
+    status: str
+    ops: list[dict[str, Any]]
+    note: str
+    before: list[dict[str, Any]] | None
+    after: list[dict[str, Any]] | None
+    suggestion_ids: list[str]
+    error: dict[str, Any] | None
+    created_at: str
+    applied_at: str | None
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> "Receipt":
+        return cls(
+            id=row["id"],
+            mandate_id=row["mandate_id"],
+            doc_id=row["doc_id"],
+            status=row["status"],
+            ops=_json(row["ops"], []),
+            note=row["note"],
+            before=_json(row["before"], None),
+            after=_json(row["after"], None),
+            suggestion_ids=_json(row["suggestion_ids"], []),
+            error=_json(row["error"], None),
+            created_at=row["created_at"],
+            applied_at=row["applied_at"],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "mandate_id": self.mandate_id,
+            "doc_id": self.doc_id,
+            "status": self.status,
+            "ops": self.ops,
+            "note": self.note,
+            "before": self.before,
+            "after": self.after,
+            "suggestion_ids": self.suggestion_ids,
+            "error": self.error,
+            "created_at": self.created_at,
+            "applied_at": self.applied_at,
         }

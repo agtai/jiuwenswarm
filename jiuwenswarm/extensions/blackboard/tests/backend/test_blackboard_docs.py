@@ -22,7 +22,7 @@ async def test_every_workspace_gets_a_pinned_instructions_document(world):
     listed = (await world.call(alice, p.DOC_LIST, workspace_id=workspace_id))["docs"]
     assert [d["title"] for d in listed] == ["Instructions", "Zebra"]
     assert listed[0]["is_instructions"] and listed[0]["is_pinned"]
-    assert "What agents must not change" in world.ctx.docs.docs[listed[0]["id"]]
+    assert "Edit it to fit your team." in world.ctx.docs.docs[listed[0]["id"]]
 
     error = await world.fails(alice, p.DOC_ARCHIVE, doc_id=listed[0]["id"])
     assert error.code == CONFLICT

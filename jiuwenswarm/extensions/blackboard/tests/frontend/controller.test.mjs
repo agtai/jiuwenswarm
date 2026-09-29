@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { BlackboardController } from '../../../../channels/web/frontend/node_modules/.cache/blackboard/controller.js';
+import {
+  toggleAttachment,
+  workspaceChoices,
+} from '../../../../channels/web/frontend/node_modules/.cache/blackboard/sessionLink.js';
 
 const HOSTS = {
   hosts: [
@@ -42,6 +46,16 @@ function fakeWorld() {
         return { members: world.members[params.workspace_id] ?? [] };
       case 'blackboard.invite.list':
         return { invites: world.invites[params.workspace_id] ?? [] };
+      case 'blackboard.mandate.list':
+        return { mandates: world.mandates ?? [] };
+      case 'blackboard.session.list':
+        return { sessions: world.attached ?? [] };
+      case 'blackboard.suggestion.list':
+        return { suggestions: world.suggestions ?? [] };
+      case 'blackboard.doc.list':
+        return { docs: world.docs?.[params.workspace_id] ?? [], docservice: null };
+      case 'blackboard.session.attach':
+        return { session: { session_id: params.session_id, host: params.host, workspace_id: params.workspace_id, title: 'T' } };
       default:
         return {};
     }
@@ -66,7 +80,7 @@ test('start loads the hosts, picks the default host and its workspaces', async (
   assert.equal(s.hostId, 'h1');
   assert.deepEqual(s.workspaces.map((w) => w.id), ['ws1', 'ws2']);
   assert.equal(s.workspaceId, null);
-  assert.equal(f.handlers.size, 8);
+  assert.equal(f.handlers.size, 11);
   c.stop();
   assert.equal(f.handlers.size, 0);
 });
@@ -171,4 +185,110 @@ test('host status pushes replace the status', async () => {
   f.emit('blackboard.host.status_changed', { running: true, enabled: true, settings: {}, error: null, base_url: 'http://x' });
   await flush();
   assert.equal(c.getState().hostStatus.running, true);
+});
+
+test('an agent session is created, attached to the workspace and opened', async () => {
+  const f = fakeWorld();
+  const opened = [];
+  const port = {
+    create: async (title) => `sess-for-${title}`,
+    open: (id) => opened.push(id),
+    recent: async () => [{ session_id: 'a', title: 'A' }, { session_id: 'b', title: 'B' }],
+  };
+  const c = new BlackboardController(f.rpc, f.subscribe, port);
+  await c.start();
+  await c.selectWorkspace('ws1');
+  assert.equal(await c.startAgentSession(), 'sess-for-WS1');
+  const attach = f.calls.find(([method]) => method === 'blackboard.session.attach')[1];
+  assert.deepEqual(attach, { host: 'h1', workspace_id: 'ws1', session_id: 'sess-for-WS1' });
+  assert.deepEqual(opened, ['sess-for-WS1']);
+
+  f.world.attached = [{ session_id: 'a' }];
+  assert.deepEqual((await c.attachableSessions()).map((s) => s.session_id), ['b']);
+});
+
+test("deciding one run takes only that run's suggestions; mandate pushes refresh the list", async () => {
+  const f = fakeWorld();
+  const c = new BlackboardController(f.rpc, f.subscribe);
+  await c.start();
+  await c.selectWorkspace('ws1');
+  f.world.suggestions = [
+    { id: 's1', author: { id: 'u1', kind: 'agent', mandate: 'm1' } },
+    { id: 's2', author: { id: 'u2', kind: 'agent', mandate: 'm2' } },
+    { id: 's3', author: { id: 'u1', kind: 'agent', mandate: 'm1' } },
+  ];
+  assert.equal(await c.decideMandate('d1', 'm1', 'accept'), 2);
+  const decided = f.calls.find(([method]) => method === 'blackboard.suggestion.decide')[1];
+  assert.deepEqual(decided, { host: 'h1', doc_id: 'd1', suggestion_ids: ['s1', 's3'], action: 'accept' });
+
+  f.world.mandates = [{ id: 'm9', status: 'running', receipts: [] }];
+  f.emit('blackboard.mandate.updated', { host: 'h1', workspace_id: 'ws1', mandate_id: 'm9' });
+  await flush();
+  await flush();
+  assert.deepEqual(c.getState().mandates.map((m) => m.id), ['m9']);
+});
+
+function memoryOf(saved) {
+  const memory = { saved, load: () => memory.saved, save: (selection) => (memory.saved = selection) };
+  return memory;
+}
+
+test('the page opens where it was left, and coming back reloads it', async () => {
+  const f = fakeWorld();
+  f.world.docs = { ws2: [{ id: 'd1', title: 'One' }, { id: 'd2', title: 'Two' }] };
+  const memory = memoryOf({ hostId: 'h1', workspaceId: 'ws2', docId: 'd2', rail: 'agents' });
+  const c = new BlackboardController(f.rpc, f.subscribe, undefined, memory);
+  await c.start();
+  let s = c.getState();
+  assert.deepEqual([s.hostId, s.workspaceId, s.docId, s.rail], ['h1', 'ws2', 'd2', 'agents']);
+
+  c.selectDoc('d1');
+  c.selectRail('references');
+  assert.deepEqual(memory.saved, { hostId: 'h1', workspaceId: 'ws2', docId: 'd1', rail: 'references' });
+
+  // Leaving and coming back keeps the place and asks the host again.
+  c.stop();
+  const before = f.calls.filter(([method]) => method === 'blackboard.me').length;
+  await c.start();
+  s = c.getState();
+  assert.deepEqual([s.workspaceId, s.docId], ['ws2', 'd1']);
+  assert.equal(f.calls.filter(([method]) => method === 'blackboard.me').length, before + 1);
+
+  // A remembered workspace that is gone falls back to none.
+  const gone = new BlackboardController(f.rpc, f.subscribe, undefined, memoryOf({ hostId: 'h1', workspaceId: 'ws_gone', rail: 'bogus' }));
+  await gone.start();
+  assert.deepEqual([gone.getState().workspaceId, gone.getState().rail], [null, 'members']);
+});
+
+test("following a chat's tag opens that workspace on the Agents tab", async () => {
+  const f = fakeWorld();
+  const c = new BlackboardController(f.rpc, f.subscribe);
+  await c.start();
+  c.openWorkspace('h2', 'ws9');
+  await flush();
+  await flush();
+  const s = c.getState();
+  assert.deepEqual([s.hostId, s.workspaceId, s.rail], ['h2', 'ws9', 'agents']);
+  assert.deepEqual(s.workspaces.map((w) => w.id), ['ws9']);
+});
+
+test('the chat lists workspaces a person can edit and adds or takes them from a session', async () => {
+  const f = fakeWorld();
+  f.world.me.h1.workspaces.push(workspace('ws3', 'viewer'), workspace('ws4', 'editor', { archived: true }));
+  const choices = await workspaceChoices(f.rpc);
+  assert.deepEqual(
+    choices.map((c) => [c.host, c.workspaceId, c.hostName]),
+    [
+      ['h1', 'ws1', 'Team'],
+      ['h1', 'ws2', 'Team'],
+      ['h2', 'ws9', 'Mine'],
+    ],
+  );
+
+  const added = await toggleAttachment(f.rpc, 's1', choices[1], [{ host: 'h1', workspace_id: 'ws1' }]);
+  assert.deepEqual(added.map((a) => a.workspace_id), ['ws1', 'ws2']);
+  assert.equal(f.calls.at(-1)[0], 'blackboard.session.attach');
+  const left = await toggleAttachment(f.rpc, 's1', choices[0], added);
+  assert.deepEqual(left.map((a) => a.workspace_id), ['ws2']);
+  assert.deepEqual(f.calls.at(-1), ['blackboard.session.detach', { host: 'h1', workspace_id: 'ws1', session_id: 's1' }]);
 });

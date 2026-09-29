@@ -1,4 +1,4 @@
-import { Suspense, lazy, useState, type ReactNode } from 'react';
+import { Suspense, lazy, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   Archive,
@@ -23,12 +23,13 @@ import {
   DropdownMenuTrigger,
   Tag,
 } from '../../../../channels/web/frontend/src/components/ui';
+import type { SuggestionActions } from '../editor/DocumentEditor';
 import type { DocServiceStatus, DocToken, DocView, WorkspaceView } from '../types';
 
 const DocumentEditor = lazy(() => import('../editor/DocumentEditor'));
 
 export interface DocActions {
-  rename: (doc: DocView) => void;
+  rename: (doc: DocView, title: string) => Promise<void>;
   setPinned: (doc: DocView, pinned: boolean) => void;
   setInstructions: (doc: DocView) => void;
   importMarkdown: (doc: DocView) => void;
@@ -46,6 +47,7 @@ export function WorkspacePane({
   names,
   fetchToken,
   docActions,
+  suggestionActions,
   onNewDoc,
   onRename,
   onArchive,
@@ -61,6 +63,7 @@ export function WorkspacePane({
   names: ReadonlyMap<string, string>;
   fetchToken: (docId: string) => Promise<DocToken>;
   docActions: DocActions;
+  suggestionActions: SuggestionActions;
   onNewDoc: () => void;
   onRename: () => void;
   onArchive: () => void;
@@ -129,6 +132,8 @@ export function WorkspacePane({
             me={me}
             names={names}
             header={<DocHeader doc={doc} canEdit={canEdit} actions={docActions} />}
+            title={<DocTitle key={doc.id} doc={doc} canEdit={canEdit} onRename={docActions.rename} />}
+            suggestions={suggestionActions}
           />
         </Suspense>
       ) : (
@@ -146,11 +151,88 @@ export function WorkspacePane({
   );
 }
 
+// The document's name as its first line, as in Obsidian: editing it renames the document.
+function DocTitle({
+  doc,
+  canEdit,
+  onRename,
+}: {
+  doc: DocView;
+  canEdit: boolean;
+  onRename: (doc: DocView, title: string) => Promise<void>;
+}) {
+  const { t } = useTranslation();
+  const ref = useRef<HTMLTextAreaElement>(null);
+  const cancelled = useRef(false);
+  const [value, setValue] = useState(doc.title);
+  const [focused, setFocused] = useState(false);
+  // A rename on its way, so the old name does not flash back before the list reloads.
+  const [saving, setSaving] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (focused || (saving !== null && doc.title !== saving)) return;
+    setSaving(null);
+    setValue(doc.title);
+  }, [doc.title, focused, saving]);
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${el.scrollHeight}px`;
+  }, [value]);
+
+  if (!canEdit) {
+    return (
+      <h1 className="bb-doc-title" data-testid="blackboard-doc-title">
+        {doc.title}
+      </h1>
+    );
+  }
+  const commit = () => {
+    const next = value.replace(/\s+/g, ' ').trim();
+    if (!next || next === doc.title) {
+      setValue(doc.title);
+      return;
+    }
+    setSaving(next);
+    onRename(doc, next).catch(() => setSaving(null));
+  };
+  return (
+    <textarea
+      ref={ref}
+      className="bb-doc-title"
+      rows={1}
+      maxLength={200}
+      value={value}
+      aria-label={t('blackboard.docs.titleLabel')}
+      data-testid="blackboard-doc-title"
+      onChange={(event) => setValue(event.target.value.replace(/\n/g, ' '))}
+      onFocus={() => setFocused(true)}
+      onBlur={() => {
+        setFocused(false);
+        if (cancelled.current) {
+          cancelled.current = false;
+          setValue(doc.title);
+        } else {
+          commit();
+        }
+      }}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === 'Escape') {
+          event.preventDefault();
+          cancelled.current = event.key === 'Escape';
+          event.currentTarget.blur();
+        }
+      }}
+    />
+  );
+}
+
 function DocHeader({ doc, canEdit, actions }: { doc: DocView; canEdit: boolean; actions: DocActions }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const items: Array<{ key: string; icon: ReactNode; label: string; run: () => void; danger?: boolean; show: boolean }> = [
-    { key: 'rename', icon: <Pencil size={14} />, label: t('blackboard.docs.rename'), run: () => actions.rename(doc), show: canEdit },
     {
       key: 'pin',
       icon: doc.is_pinned ? <PinOff size={14} /> : <Pin size={14} />,
@@ -178,7 +260,6 @@ function DocHeader({ doc, canEdit, actions }: { doc: DocView; canEdit: boolean; 
   ];
   return (
     <div className="bb-doc__title">
-      <h3 data-testid="blackboard-doc-title">{doc.title}</h3>
       {doc.is_instructions ? (
         <Tag variant="info" data-testid="blackboard-doc-instructions-tag">
           {t('blackboard.docs.instructions')}

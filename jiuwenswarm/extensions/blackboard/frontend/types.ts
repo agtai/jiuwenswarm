@@ -118,5 +118,54 @@ export interface DocToken {
   expires_in: number;
 }
 
+export type MandateStatus = 'queued' | 'running' | 'waiting_for_answer' | 'done' | 'failed' | 'cancelled' | 'refused' | 'unknown';
+
+export interface ReceiptView {
+  id: string;
+  mandate_id: string;
+  doc_id: string;
+  status: 'pending' | 'applied' | 'aborted';
+  note: string;
+  suggestion_ids: string[];
+  error: { code: string; message: string } | null;
+  created_at: string;
+}
+
+export interface MandateView {
+  id: string;
+  workspace_id: string;
+  origin: 'comment' | 'workspace_chat' | 'workspace_session';
+  requester_id: string;
+  requester_name: string | null;
+  instruction: string;
+  status: MandateStatus;
+  status_reason: string | null;
+  created_at: string;
+  last_activity_at: string | null;
+  receipts: ReceiptView[];
+  // Doc id -> this run's suggestions nobody has decided on yet.
+  pending: Record<string, string[]>;
+}
+
+// A session of this person's that works on a workspace with an agent.
+export interface SessionAttachmentView {
+  session_id: string;
+  host: string;
+  workspace_id: string;
+  attached_at: string;
+  // The workspace's title when it was attached.
+  title: string;
+  host_name?: string;
+}
+
+export interface SuggestionView {
+  id: string;
+  types: string[];
+  author: { id: string; kind: 'person' | 'agent'; mandate?: string | null } | null;
+  inserted: string;
+  deleted: string;
+  blockIds: string[];
+}
+
 export type Rpc = <T = unknown>(method: string, params?: Record<string, unknown>) => Promise<T>;
 export type Subscribe = (event: string, handler: (payload: Record<string, unknown>) => void) => () => void;

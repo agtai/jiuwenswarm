@@ -632,7 +632,24 @@
   border-radius: 8px;
   background: var(--color-surface-panel);
   font-size: 13px;
-  pointer-events: none;
+}
+
+/* The document's name, edited in place above the content. */
+.bb-doc-title {
+  display: block;
+  width: 100%;
+  margin: 12px 0 0;
+  padding: 0 4px;
+  overflow: hidden;
+  border: 0;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: var(--color-text-primary);
+  font: inherit;
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1.3;
 }
 
 /* The document itself. */
@@ -881,3 +898,149 @@
 
 .bb-preview__image { display: block; max-width: 100%; max-height: 65vh; margin: 0 auto; }
 .bb-preview__frame { width: 100%; height: 65vh; border: 0; }
+
+/* ---- suggestion cards ---- */
+
+.bb-suggestion-card {
+  pointer-events: auto;
+  min-width: 220px;
+}
+
+.bb-suggestion-card__why {
+  margin-top: 4px;
+  color: var(--color-text-secondary);
+  font-style: italic;
+}
+
+.bb-suggestion-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.bb-editor__content ins[data-author],
+.bb-editor__content del[data-author] {
+  cursor: pointer;
+}
+
+/* An agent's caret: dashed, with a robot in its label. */
+.collaboration-carets__caret.is-agent {
+  border-right-style: dashed;
+}
+
+.collaboration-carets__caret.is-agent .collaboration-carets__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+/* ---- agents tab ---- */
+
+.bb-agents__start {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.bb-agents__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.bb-session-list,
+.bb-mandate-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.bb-session {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.bb-session__name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bb-mandate {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--color-border-default);
+}
+
+.bb-mandate__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.bb-mandate__who {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.bb-mandate__instruction {
+  margin: 0;
+  font-size: 13px;
+}
+
+.bb-mandate__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+}
+
+/* Blackboard in the chat input: the + menu panel and the tag */
+.bb-chat-panel__hint {
+  margin: 0 0 8px;
+  padding: 0 4px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--color-text-secondary);
+}
+
+.bb-chat-panel__error {
+  color: var(--color-feedback-danger);
+}
+
+.bb-chat-choice__icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  color: var(--color-text-secondary);
+}
+
+.bb-chat-choice__host {
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--color-text-tertiary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bb-chat-tag {
+  display: inline-flex;
+}

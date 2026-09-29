@@ -35,8 +35,8 @@ export function tableStart(src: string): number {
 
 // Placeholders while a table is serialized: cells escape every pipe (GFM requires it inside code
 // spans too) and keep hard breaks as <br>.
-export const PIPE = ''
-export const BREAK = ''
+export const PIPE = String.fromCharCode(0xe000)
+export const BREAK = String.fromCharCode(0xe001)
 
 // `<br>` becomes a hard break. On the server the Markdown parser has no DOMParser, so other HTML
 // stays literal text; <br> is the one tag the table serializer itself emits.

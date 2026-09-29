@@ -156,7 +156,7 @@
       "new": "New document",
       "newTitle": "New document",
       "create": "Create",
-      "titleLabel": "Title",
+      "titleLabel": "Document name",
       "startFrom": "Content",
       "startFromHint": "Start empty, or from a Markdown file.",
       "emptyDocument": "Empty document",
@@ -217,7 +217,8 @@
       },
       "suggested": {
         "insertion": "Suggests adding this.",
-        "deletion": "Suggests removing this."
+        "deletion": "Suggests removing this.",
+        "replacement": "Suggests replacing this."
       },
       "reason": {
         "not_member": "You are no longer a member of this workspace.",
@@ -229,7 +230,11 @@
         "access_revoked": "You no longer have access to this document.",
         "unavailable": "The document service is not running on the host.",
         "internal": "The document could not be opened."
-      }
+      },
+      "agentOf": "{{name}}'s agent",
+      "accept": "Accept",
+      "reject": "Reject",
+      "acceptRun": "Accept all from this run"
     },
     "docservice": {
       "down": "Documents are unavailable right now.",
@@ -256,6 +261,53 @@
       "removeConfirm": "Remove {{name}}? Links to it stop working.",
       "tooBig": "{{name}} is larger than {{mb}} MB.",
       "uploaded": "Uploaded {{name}}."
+    },
+    "agents": {
+      "tab": "Agents",
+      "intro": "Ask an agent to work on this workspace. Its changes arrive as suggestions that editors accept or reject.",
+      "start": "New agent session",
+      "attach": "Use an existing session",
+      "pickSession": "Choose a session",
+      "noSessions": "No other sessions to use.",
+      "editorsOnly": "Editors and owners can work with an agent here.",
+      "sessions": "Your sessions working here",
+      "sessionSince": "Since {{time}}",
+      "open": "Open",
+      "detach": "Stop working here",
+      "runs": "Agent runs",
+      "noRuns": "No agent has worked here yet.",
+      "agentOf": "{{name}}'s agent",
+      "status": {
+        "queued": "Queued",
+        "running": "Working",
+        "waiting_for_answer": "Waiting for an answer",
+        "done": "Done",
+        "failed": "Failed",
+        "cancelled": "Stopped",
+        "refused": "Refused",
+        "unknown": "Unknown"
+      },
+      "changes_one": "{{count}} change",
+      "changes_other": "{{count}} changes",
+      "acceptAll": "Accept all",
+      "rejectAll": "Reject all",
+      "cancel": "Stop",
+      "cancelConfirm": "Stop the run of {{name}}'s agent? Its suggestions stay until someone decides on them.",
+      "decided": {
+        "accept_one": "Accepted {{count}} suggestion.",
+        "accept_other": "Accepted {{count}} suggestions.",
+        "reject_one": "Rejected {{count}} suggestion.",
+        "reject_other": "Rejected {{count}} suggestions."
+      }
+    },
+    "chat": {
+      "menuItem": "Blackboard",
+      "hint": "The agent in this chat works on the workspaces you turn on; its edits arrive there as suggestions.",
+      "loading": "Loading workspaces...",
+      "empty": "No workspace you can edit yet. Create or join one in Blackboard.",
+      "openBlackboard": "Open Blackboard",
+      "attach": "Work on this workspace",
+      "detach": "Stop working on this workspace"
     }
   },
   "common": {

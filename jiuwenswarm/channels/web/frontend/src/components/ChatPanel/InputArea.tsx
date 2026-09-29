@@ -173,7 +173,11 @@ import { ContextUsageIndicator } from './ContextUsageIndicator';
 import { isImeCompositionKey } from './imeComposition';
 import { useTaskAsr } from '../../features/taskAsr/useTaskAsr';
 import { useTaskAsrEnabled } from '../../features/taskAsr/featureFlag';
-import { ApplicationPluginTaskInputActions } from '../../applicationPlugins/ApplicationPluginOutlet';
+import {
+  ApplicationPluginTaskInputActions,
+  ApplicationPluginTaskInputTags,
+  ApplicationPluginTaskMenuItems,
+} from '../../applicationPlugins/ApplicationPluginOutlet';
 
 /** 输入栏下拉所需的最小技能数据结构（与 SkillPanel 中的 SkillItem 保持一致） */
 type InputAreaSkillItem = {
@@ -808,6 +812,11 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const [attachMenuDirection, setAttachMenuDirection] = useState<'up' | 'down'>('down');
   const [extensionPanelOpen, setExtensionPanelOpen] = useState(false);
   const [skillPanelOpen, setSkillPanelOpen] = useState(false);
+  // Index of the application plugin + menu item whose panel is open.
+  const [pluginMenuPanel, setPluginMenuPanel] = useState<number | null>(null);
+  useEffect(() => {
+    if (!attachMenuOpen) setPluginMenuPanel(null);
+  }, [attachMenuOpen]);
   const [swarmflowConfigPanelOpen, setSwarmflowConfigPanelOpen] = useState(false);
   const [swarmflowConfigAnchor, setSwarmflowConfigAnchor] = useState<DOMRect | null>(null);
   const inputRef = useRef<HTMLDivElement>(null);
@@ -973,6 +982,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     return s.sessions.find((session) => session.session_id === activeSessionId) ?? null;
   });
   const canPersistAttachments = Boolean(activeSessionId && activeSessionId !== NEW_CONVERSATION_ID);
+  // Plugin menu items and tags see no session until the new conversation has one.
+  const pluginSessionId = activeSessionId && activeSessionId !== NEW_CONVERSATION_ID ? activeSessionId : null;
   const { workMode, projects, selectedProject, setSelectedProject, createProject } = useWorkspaceStore();
   const loadedMsgLen = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.messages?.length ?? 0);
   const hasHistory = (currentSession?.message_count ?? 0) > 0 || loadedMsgLen > 0;
@@ -3585,6 +3596,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                               setAgentPickerOpen((open) => !open);
                               setExtensionPanelOpen(false);
                               setSkillPanelOpen(false);
+                              setPluginMenuPanel(null);
                             }}
                           >
                                   <span className="chat-mode-select__option-main">
@@ -3845,6 +3857,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                               setSkillPanelOpen((open) => !open);
                               setAgentPickerOpen(false);
                               setExtensionPanelOpen(false);
+                              setPluginMenuPanel(null);
                             }}
                           >
                             <span className="chat-mode-select__option-main">
@@ -3886,6 +3899,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                                 setExtensionPanelOpen((open) => !open);
                                 setAgentPickerOpen(false);
                                 setSkillPanelOpen(false);
+                                setPluginMenuPanel(null);
                               }}
                             >
                               <span className="chat-mode-select__option-main">
@@ -3908,6 +3922,21 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                             )}
                           </div>
                         )}
+                        <ApplicationPluginTaskMenuItems
+                          sessionId={pluginSessionId}
+                          ensureSession={onEnsureSession}
+                          direction={attachMenuDirection}
+                          teamMode={isTeamMode}
+                          openPanel={pluginMenuPanel}
+                          onOpenPanel={(index) => {
+                            setPluginMenuPanel(index);
+                            if (index === null) return;
+                            setAgentPickerOpen(false);
+                            setSkillPanelOpen(false);
+                            setExtensionPanelOpen(false);
+                          }}
+                          closeMenu={() => setAttachMenuOpen(false)}
+                        />
                         <div className="chat-mode-select__divider" role="separator" />
                         {canUsePlanMenu &&
                           (() => {
@@ -4420,6 +4449,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     </button>
                   </div>
                 )}
+
+                <ApplicationPluginTaskInputTags sessionId={pluginSessionId} />
 
                 {evolutionLabel && (
                   <div

@@ -13,6 +13,7 @@ await build({
   entryPoints: [
     path.join(source, 'controller.ts'),
     path.join(source, 'inviteLink.ts'),
+    path.join(source, 'chat/sessionLink.ts'),
     path.join(source, 'editor/session.ts'),
     path.join(here, 'editorKit.ts'),
   ],

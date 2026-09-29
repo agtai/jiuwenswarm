@@ -6,8 +6,9 @@ An instance with ``blackboard.host.enabled`` also runs the host part: the store
 and the HTTP API that members' instances connect to.
 
 ``initialize()`` runs in the Gateway and in the AgentServer; ``bind_web_channel``
-only in the Gateway, which is where both parts live. ``shutdown()`` is not
-called by either process today, so nothing here depends on it.
+only in the Gateway, which is where both parts live. ``agent_tools`` runs in the
+AgentServer: a session attached to a workspace gets that workspace's tools.
+``shutdown()`` is not called by either process today, so nothing here depends on it.
 """
 
 from __future__ import annotations
@@ -17,10 +18,15 @@ import logging
 from typing import Any
 
 from jiuwenswarm.extensions.sdk import (
+    AgentToolContext,
     ApplicationPluginExtension,
     ApplicationPluginServices,
     FrontendContribution,
 )
+from jiuwenswarm.extensions.blackboard.client.hosts import HostRegistry
+from jiuwenswarm.extensions.blackboard.client.sessions import SessionAttachments
+from jiuwenswarm.extensions.blackboard.client.toolkit.bridge import to_openjiuwen
+from jiuwenswarm.extensions.blackboard.client.toolkit.tools import SessionTools, WorkspaceRef
 from jiuwenswarm.extensions.blackboard.client.rpc import register_rpcs
 from jiuwenswarm.extensions.blackboard.client.runtime import ClientRuntime
 from jiuwenswarm.extensions.blackboard.common.config import load_host_settings, save_host_settings
@@ -38,6 +44,9 @@ class BlackboardApplicationPlugin(ApplicationPluginExtension):
         self.client: ClientRuntime | None = None
         self.host: HostController | None = None
         self._tasks: set[asyncio.Task] = set()
+        # AgentServer side: per session, the toolkit and the tools handed to its agent.
+        self._toolsets: dict[str, tuple[SessionTools, list[Any]]] = {}
+        self._client_files: tuple[SessionAttachments, HostRegistry] | None = None
 
     async def initialize(self, config: Any) -> None:
         del config
@@ -90,6 +99,26 @@ class BlackboardApplicationPlugin(ApplicationPluginExtension):
         task = asyncio.get_running_loop().create_task(coro, name="blackboard.start")
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+
+    def agent_tools(self, ctx: AgentToolContext) -> list[Any]:
+        if not ctx.session_id:
+            return []
+        if self._client_files is None:
+            base = client_dir(blackboard_dir())
+            self._client_files = (SessionAttachments(base / "sessions.json"), HostRegistry(base / "hosts.json"))
+        attachments, registry = self._client_files
+        workspaces = [WorkspaceRef(a.host, a.workspace_id, a.title) for a in attachments.for_session(ctx.session_id)]
+        if not workspaces:
+            self._toolsets.pop(ctx.session_id, None)
+            return []
+        current = self._toolsets.get(ctx.session_id)
+        if current is None or current[0].workspaces != workspaces:
+            toolkit = SessionTools(registry=registry, session_id=ctx.session_id, workspaces=workspaces)
+            current = (toolkit, to_openjiuwen(toolkit.specs(), owner=ctx.session_id))
+            self._toolsets[ctx.session_id] = current
+        # Edits of one turn share a mandate; the next turn begins another.
+        current[0].turn_id = ctx.request_id or ""
+        return current[1]
 
     def frontend_contributions(self) -> tuple[FrontendContribution, ...]:
         return (

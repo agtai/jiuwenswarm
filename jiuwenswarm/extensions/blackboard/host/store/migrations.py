@@ -85,6 +85,58 @@ MIGRATIONS: list[tuple[int, tuple[str, ...]]] = [
             "CREATE INDEX references_workspace ON references_(workspace_id)",
         ),
     ),
+    (
+        3,
+        (
+            # An agent's mandate: who asked, from where, what for, within which scope, and its state.
+            """CREATE TABLE mandates (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                origin TEXT NOT NULL CHECK (origin IN ('comment', 'workspace_chat', 'workspace_session')),
+                origin_ref TEXT NOT NULL,
+                requester_id TEXT NOT NULL REFERENCES users(id),
+                session_id TEXT,
+                instruction TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                permission_mode TEXT NOT NULL DEFAULT 'suggest' CHECK (permission_mode IN ('suggest', 'direct')),
+                reply_target TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN (
+                    'queued', 'running', 'waiting_for_answer', 'done', 'failed', 'cancelled', 'refused', 'unknown'
+                )),
+                status_reason TEXT,
+                turn_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT,
+                last_activity_at TEXT
+            )""",
+            "CREATE INDEX mandates_workspace ON mandates(workspace_id, created_at)",
+            "CREATE INDEX mandates_session ON mandates(session_id, status)",
+            # One batch of edits a mandate sent to one document, applied or not.
+            """CREATE TABLE receipts (
+                id TEXT PRIMARY KEY,
+                mandate_id TEXT NOT NULL REFERENCES mandates(id) ON DELETE CASCADE,
+                doc_id TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('pending', 'applied', 'aborted')),
+                ops TEXT NOT NULL,
+                note TEXT NOT NULL DEFAULT '',
+                before TEXT,
+                after TEXT,
+                suggestion_ids TEXT,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                applied_at TEXT
+            )""",
+            "CREATE INDEX receipts_mandate ON receipts(mandate_id, created_at)",
+            # Which mandate may write a document; one at a time.
+            """CREATE TABLE doc_locks (
+                doc_id TEXT PRIMARY KEY REFERENCES docs(id) ON DELETE CASCADE,
+                mandate_id TEXT NOT NULL REFERENCES mandates(id) ON DELETE CASCADE,
+                acquired_at TEXT NOT NULL
+            )""",
+            "CREATE INDEX doc_locks_mandate ON doc_locks(mandate_id)",
+        ),
+    ),
 ]
 
 LATEST_VERSION = MIGRATIONS[-1][0]

@@ -156,7 +156,7 @@
       "new": "新建文档",
       "newTitle": "新建文档",
       "create": "创建",
-      "titleLabel": "标题",
+      "titleLabel": "文档名称",
       "startFrom": "内容",
       "startFromHint": "从空白开始，或从 Markdown 文件开始。",
       "emptyDocument": "空白文档",
@@ -217,7 +217,8 @@
       },
       "suggested": {
         "insertion": "建议添加此内容。",
-        "deletion": "建议删除此内容。"
+        "deletion": "建议删除此内容。",
+        "replacement": "建议替换此内容。"
       },
       "reason": {
         "not_member": "你已不是此工作区的成员。",
@@ -229,7 +230,11 @@
         "access_revoked": "你已无权访问此文档。",
         "unavailable": "主机上的文档服务未运行。",
         "internal": "无法打开此文档。"
-      }
+      },
+      "agentOf": "{{name}} 的智能体",
+      "accept": "接受",
+      "reject": "拒绝",
+      "acceptRun": "接受这次任务的全部建议"
     },
     "docservice": {
       "down": "文档暂时不可用。",
@@ -256,6 +261,53 @@
       "removeConfirm": "移除 {{name}}？指向它的链接将失效。",
       "tooBig": "{{name}} 超过 {{mb}} MB。",
       "uploaded": "已上传 {{name}}。"
+    },
+    "agents": {
+      "tab": "智能体",
+      "intro": "让智能体处理这个工作区。它的修改以建议的形式出现，由编辑者接受或拒绝。",
+      "start": "新建智能体会话",
+      "attach": "使用已有会话",
+      "pickSession": "选择会话",
+      "noSessions": "没有可用的其他会话。",
+      "editorsOnly": "编辑者和所有者才能在这里使用智能体。",
+      "sessions": "你在这里工作的会话",
+      "sessionSince": "自 {{time}} 起",
+      "open": "打开",
+      "detach": "停止在此工作",
+      "runs": "智能体任务",
+      "noRuns": "还没有智能体在这里工作过。",
+      "agentOf": "{{name}} 的智能体",
+      "status": {
+        "queued": "排队中",
+        "running": "进行中",
+        "waiting_for_answer": "等待回答",
+        "done": "已完成",
+        "failed": "失败",
+        "cancelled": "已停止",
+        "refused": "已拒绝",
+        "unknown": "未知"
+      },
+      "changes_one": "{{count}} 处修改",
+      "changes_other": "{{count}} 处修改",
+      "acceptAll": "全部接受",
+      "rejectAll": "全部拒绝",
+      "cancel": "停止",
+      "cancelConfirm": "停止 {{name}} 的智能体的任务？它的建议会保留，直到有人处理。",
+      "decided": {
+        "accept_one": "已接受 {{count}} 条建议。",
+        "accept_other": "已接受 {{count}} 条建议。",
+        "reject_one": "已拒绝 {{count}} 条建议。",
+        "reject_other": "已拒绝 {{count}} 条建议。"
+      }
+    },
+    "chat": {
+      "menuItem": "Blackboard",
+      "hint": "此对话中的智能体会处理你开启的工作区，它的修改会以建议的形式出现在那里。",
+      "loading": "正在加载工作区...",
+      "empty": "还没有你可以编辑的工作区。请在 Blackboard 中创建或加入一个。",
+      "openBlackboard": "打开 Blackboard",
+      "attach": "在此工作区工作",
+      "detach": "停止在此工作区工作"
     }
   },
   "common": {

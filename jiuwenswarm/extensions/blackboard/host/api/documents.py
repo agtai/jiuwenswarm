@@ -10,14 +10,14 @@ from pathlib import Path
 from typing import Any
 
 from jiuwenswarm.extensions.blackboard.common import protocol as p
-from jiuwenswarm.extensions.blackboard.common.errors import CONFLICT, BlackboardError, invalid, not_found
+from jiuwenswarm.extensions.blackboard.common.errors import BUSY, CONFLICT, BlackboardError, invalid, not_found
 from jiuwenswarm.extensions.blackboard.common.ids import new_id
 from jiuwenswarm.extensions.blackboard.common.tokens import mint_doc_token
 from jiuwenswarm.extensions.blackboard.host import validation as v
 from jiuwenswarm.extensions.blackboard.host.api.access import require_member
 from jiuwenswarm.extensions.blackboard.host.api.context import HostContext
 from jiuwenswarm.extensions.blackboard.host.api.methods import Call, method
-from jiuwenswarm.extensions.blackboard.host.store import docs, workspaces
+from jiuwenswarm.extensions.blackboard.host.store import docs, mandates, workspaces
 from jiuwenswarm.extensions.blackboard.host.store.models import Doc, Member, Workspace
 
 logger = logging.getLogger(__name__)
@@ -244,7 +244,13 @@ async def doc_import_markdown(call: Call) -> dict[str, Any]:
     doc_id = v.required_str(call.params, "doc_id")
     markdown = _markdown(call.params, required=True)
 
-    doc = await call.ctx.store.read(lambda c: _writable_doc(c, call.uid, doc_id))
+    def check(conn: sqlite3.Connection) -> Doc:
+        doc = _writable_doc(conn, call.uid, doc_id)
+        if mandates.lock_holder(conn, doc_id) is not None:
+            raise BlackboardError(BUSY, "an agent is editing this document; try again when it is done", {"doc_id": doc_id})
+        return doc
+
+    doc = await call.ctx.store.read(check)
     result = await call.ctx.doc_client().import_markdown(doc_id, markdown or "", _person(call.uid))
     await _publish(call.ctx, doc)
     return {"doc_id": doc_id, "blocks": len(result.get("blocks", [])), "raw_html": bool(result.get("rawHtml"))}

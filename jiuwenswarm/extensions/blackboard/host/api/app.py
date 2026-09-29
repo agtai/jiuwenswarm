@@ -7,6 +7,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from jiuwenswarm.extensions.blackboard.common import protocol as p
 from jiuwenswarm.extensions.blackboard.host.api import documents as _documents  # noqa: F401 - registers methods
+from jiuwenswarm.extensions.blackboard.host.api import mandates as _mandates  # noqa: F401 - registers methods
 from jiuwenswarm.extensions.blackboard.host.api import references
 from jiuwenswarm.extensions.blackboard.host.api.context import HostContext
 from jiuwenswarm.extensions.blackboard.host.api.pages import join_page

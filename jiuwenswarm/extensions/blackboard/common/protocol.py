@@ -37,6 +37,10 @@ REFERENCE_LIST = "blackboard.reference.list"
 REFERENCE_REMOVE = "blackboard.reference.remove"
 REFERENCE_URL = "blackboard.reference.url"
 REFERENCE_SET_NOTE = "blackboard.reference.set_note"
+MANDATE_LIST = "blackboard.mandate.list"
+MANDATE_CANCEL = "blackboard.mandate.cancel"
+SUGGESTION_LIST = "blackboard.suggestion.list"
+SUGGESTION_DECIDE = "blackboard.suggestion.decide"
 
 HOST_METHODS: tuple[str, ...] = (
     ME,
@@ -66,7 +70,16 @@ HOST_METHODS: tuple[str, ...] = (
     REFERENCE_REMOVE,
     REFERENCE_URL,
     REFERENCE_SET_NOTE,
+    MANDATE_LIST,
+    MANDATE_CANCEL,
+    SUGGESTION_LIST,
+    SUGGESTION_DECIDE,
 )
+
+# Methods a member's agent calls on the host with the member's token (the toolkit in the
+# AgentServer); they are not proxied for browsers.
+EDIT = "blackboard.edit"
+AGENT_METHODS: tuple[str, ...] = (EDIT,)
 
 # Methods the host serves without a member token.
 NO_AUTH_METHODS = frozenset({INVITE_ACCEPT})
@@ -80,6 +93,10 @@ HOST_STATUS = "blackboard.host.status"
 HOST_SET_SETTINGS = "blackboard.host.set_settings"
 # The browser sends a file here; the client part posts it to the host as multipart.
 REFERENCE_UPLOAD = "blackboard.reference.upload"
+# Sessions attached to a workspace, where the agent gets Blackboard's tools.
+SESSION_ATTACH = "blackboard.session.attach"
+SESSION_DETACH = "blackboard.session.detach"
+SESSION_LIST = "blackboard.session.list"
 
 # Events pushed by the host (and forwarded to browsers with a `host` field).
 EV_WORKSPACE_UPDATED = "blackboard.workspace.updated"
@@ -90,9 +107,12 @@ EV_MEMBER_ROLE_CHANGED = "blackboard.member.role_changed"
 EV_HOST_UPDATED = "blackboard.host.updated"
 EV_DOC_UPDATED = "blackboard.doc.updated"
 EV_REFERENCE_UPDATED = "blackboard.reference.updated"
+EV_MANDATE_UPDATED = "blackboard.mandate.updated"
+EV_SUGGESTIONS_CHANGED = "blackboard.doc.suggestions_changed"
 # Events of the client part.
 EV_HOSTS_UPDATED = "blackboard.hosts.updated"
 EV_HOST_STATUS = "blackboard.host.status_changed"
+EV_SESSIONS_UPDATED = "blackboard.sessions.updated"
 
 HOST_EVENTS = frozenset(
     {
@@ -103,6 +123,8 @@ HOST_EVENTS = frozenset(
         EV_HOST_UPDATED,
         EV_DOC_UPDATED,
         EV_REFERENCE_UPDATED,
+        EV_MANDATE_UPDATED,
+        EV_SUGGESTIONS_CHANGED,
     }
 )
 

@@ -123,6 +123,18 @@ class DocServiceClient:
     async def presence(self, doc_id: str) -> dict:
         return await self.request("GET", f"/api/docs/{doc_id}/presence")
 
+    async def edits(self, doc_id: str, body: dict) -> dict:
+        return await self.request("POST", f"/api/docs/{doc_id}/edits", json=body)
+
+    async def suggestions(self, doc_id: str) -> dict:
+        return await self.request("GET", f"/api/docs/{doc_id}/suggestions")
+
+    async def decide(self, doc_id: str, suggestion_id: str, action: str) -> dict:
+        return await self.request("POST", f"/api/docs/{doc_id}/suggestions/{suggestion_id}", json={"action": action})
+
+    async def agent_presence(self, doc_id: str, body: dict) -> dict:
+        return await self.request("POST", f"/api/docs/{doc_id}/presence", json=body)
+
     async def recheck(self, doc_id: str, user_id: str | None = None, *, role: str | None = None, revoke: bool = False) -> dict:
         body = {"userId": user_id, "role": role, "revoke": revoke}
         return await self.request("POST", f"/api/docs/{doc_id}/recheck", json=body)

@@ -3334,6 +3334,18 @@ function AppContent({
     [performSessionRestore],
   );
 
+  // Application plugin pages open a conversation by id, the same way a sidebar click does.
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ sessionId?: string; mode?: string }>).detail;
+      if (typeof detail?.sessionId === 'string' && detail.sessionId) {
+        void handleRestoreSession(detail.sessionId, detail.mode);
+      }
+    };
+    window.addEventListener('jiuwen:open-session', handler);
+    return () => window.removeEventListener('jiuwen:open-session', handler);
+  }, [handleRestoreSession]);
+
   const handleOpenContinuedFromSession = useCallback(
     (sourceSessionId: string): void => {
       const sessionStore = useSessionStore.getState();

@@ -34,6 +34,11 @@ WORKSPACE_METHODS = {
     p.REFERENCE_URL: ("viewer", {"reference_id": "<ref>"}),
     p.REFERENCE_REMOVE: ("editor", {"reference_id": "<ref>"}),
     p.REFERENCE_SET_NOTE: ("editor", {"reference_id": "<ref>", "note": "Read first"}),
+    p.MANDATE_LIST: ("viewer", {}),
+    # Someone else's mandate; its own requester may always cancel it.
+    p.MANDATE_CANCEL: ("editor", {"mandate_id": "<mandate>"}),
+    p.SUGGESTION_LIST: ("viewer", {"doc_id": "<doc>"}),
+    p.SUGGESTION_DECIDE: ("editor", {"doc_id": "<doc>", "suggestion_ids": ["s_x"], "action": "reject"}),
 }
 
 
@@ -56,12 +61,17 @@ async def _scene(world, role: str | None):
         "<code>": code,
         "<doc>": await world.doc(alice, workspace_id),
         "<ref>": await world.reference(alice, workspace_id),
+        "<mandate>": await world.mandate(alice, workspace_id),
     }
     return alice, bob, carol, workspace_id, fill
 
 
 def _params(extra: dict, workspace_id: str, fill: dict) -> dict:
     return {"workspace_id": workspace_id, **{k: fill.get(v, v) if isinstance(v, str) else v for k, v in extra.items()}}
+
+
+def test_agent_methods_are_not_offered_to_browsers():
+    assert not set(p.AGENT_METHODS) & set(p.HOST_METHODS)
 
 
 @pytest.mark.parametrize("role", [*ROLES, None])
@@ -95,7 +105,7 @@ async def test_anyone_may_leave(world, role):
 async def test_an_unknown_workspace_is_not_found(world, method):
     alice, _ = await world.user("Alice")
     _, extra = WORKSPACE_METHODS[method]
-    missing = {"<carol>": "u_missing", "<code>": "c" * 20, "<doc>": "d_missing", "<ref>": "r_missing"}
+    missing = {"<carol>": "u_missing", "<code>": "c" * 20, "<doc>": "d_missing", "<ref>": "r_missing", "<mandate>": "m_missing"}
     params = _params(extra, "ws_missing", missing)
     assert (await world.fails(alice, method, **params)).code == NOT_FOUND
 

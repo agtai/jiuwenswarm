@@ -124,6 +124,42 @@ def register_rpcs(channel: Any, client: "ClientRuntime", host: "HostController")
     add(p.HOST_STATUS, host_status)
     add(p.HOST_SET_SETTINGS, host_set_settings)
     add(p.REFERENCE_UPLOAD, _reference_upload(client))
+
+    async def session_attach(params: dict[str, Any]) -> dict[str, Any]:
+        session_id, workspace_id = params.get("session_id"), params.get("workspace_id")
+        if not isinstance(session_id, str) or not session_id:
+            raise invalid("session_id is required", field="session_id")
+        if not isinstance(workspace_id, str) or not workspace_id:
+            raise invalid("workspace_id is required", field="workspace_id")
+        host_id = params.get("host") if isinstance(params.get("host"), str) and params.get("host") else None
+        attachment = await client.attach_session(session_id, host_id, workspace_id)
+        return {"session": attachment.to_dict()}
+
+    async def session_detach(params: dict[str, Any]) -> dict[str, Any]:
+        session_id = params.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            raise invalid("session_id is required", field="session_id")
+        host_id = params.get("host") if isinstance(params.get("host"), str) and params.get("host") else None
+        workspace_id = params.get("workspace_id") if isinstance(params.get("workspace_id"), str) and params.get("workspace_id") else None
+        return {"session_id": session_id, "detached": await client.detach_session(session_id, host_id, workspace_id)}
+
+    async def session_list(params: dict[str, Any]) -> dict[str, Any]:
+        """Attached sessions, by host and workspace or for one session; each with its host's name."""
+        host = params.get("host") if isinstance(params.get("host"), str) and params.get("host") else None
+        workspace_id = params.get("workspace_id") if isinstance(params.get("workspace_id"), str) else None
+        session_id = params.get("session_id") if isinstance(params.get("session_id"), str) else None
+        attachments = client.sessions.list(host=host, workspace_id=workspace_id)
+        out = []
+        for a in attachments:
+            if session_id is not None and a.session_id != session_id:
+                continue
+            entry = client.registry.get(a.host)
+            out.append({**a.to_dict(), "host_name": entry.name if entry else ""})
+        return {"sessions": out}
+
+    add(p.SESSION_ATTACH, session_attach)
+    add(p.SESSION_DETACH, session_detach)
+    add(p.SESSION_LIST, session_list)
     for method in p.HOST_METHODS:
         add(method, _proxy(client, method))
     return registered

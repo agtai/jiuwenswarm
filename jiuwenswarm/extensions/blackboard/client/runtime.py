@@ -11,9 +11,11 @@ from typing import Any, Awaitable, Callable
 from jiuwenswarm.extensions.blackboard.client.hosts import HostEntry, HostRegistry
 from jiuwenswarm.extensions.blackboard.client.invite_link import parse_invite_link
 from jiuwenswarm.extensions.blackboard.client.link import HostLink, call_host
+from jiuwenswarm.extensions.blackboard.client.sessions import Attachment, SessionAttachments
 from jiuwenswarm.extensions.blackboard.common import protocol as p
 from jiuwenswarm.extensions.blackboard.common.clock import now_iso
-from jiuwenswarm.extensions.blackboard.common.errors import INVALID, BlackboardError, not_found
+from jiuwenswarm.extensions.blackboard.common.errors import CONFLICT, FORBIDDEN, INVALID, NOT_MEMBER, BlackboardError, not_found
+from jiuwenswarm.extensions.blackboard.common.roles import role_at_least
 from jiuwenswarm.extensions.blackboard.common.ids import new_id
 
 logger = logging.getLogger(__name__)
@@ -24,6 +26,7 @@ Broadcast = Callable[[str, dict[str, Any]], Awaitable[None]]
 class ClientRuntime:
     def __init__(self, hosts_file: Path, broadcast: Broadcast) -> None:
         self.registry = HostRegistry(hosts_file)
+        self.sessions = SessionAttachments(Path(hosts_file).parent / "sessions.json")
         self._broadcast = broadcast
         self._links: dict[str, HostLink] = {}
         self._join_lock = asyncio.Lock()
@@ -175,10 +178,35 @@ class ClientRuntime:
         if self.registry.get(host_id) is None:
             raise not_found("unknown host", host=host_id)
         await self.registry.remove(host_id)
+        await self.sessions.detach_host(host_id)
         link = self._links.pop(host_id, None)
         if link is not None:
             await link.stop()
         await self._broadcast(p.EV_HOSTS_UPDATED, {"host": host_id, "removed": True})
+
+    # ---- sessions attached to a workspace ----
+
+    async def attach_session(self, session_id: str, host_id: str | None, workspace_id: str) -> Attachment:
+        """Give a session's agent this workspace's tools, next to any it has; the person must be able to edit it."""
+        entry = self._entry(host_id)
+        me = await self.call(entry.id, p.ME, {})
+        workspace = next((w for w in me.get("workspaces", []) if w.get("id") == workspace_id), None)
+        if workspace is None:
+            raise BlackboardError(NOT_MEMBER, "you are not a member of this workspace", {"workspace_id": workspace_id})
+        if not role_at_least(str(workspace.get("role")), "editor"):
+            raise BlackboardError(FORBIDDEN, "only editors and owners can work on a workspace with an agent", {"workspace_id": workspace_id})
+        if workspace.get("archived"):
+            raise BlackboardError(CONFLICT, "the workspace is archived", {"workspace_id": workspace_id})
+        attachment = await self.sessions.attach(session_id, entry.id, workspace_id, str(workspace.get("title") or ""))
+        await self._broadcast(p.EV_SESSIONS_UPDATED, {"host": entry.id, "workspace_id": workspace_id})
+        return attachment
+
+    async def detach_session(self, session_id: str, host_id: str | None = None, workspace_id: str | None = None) -> bool:
+        """Take one workspace from the session, or all of them when none is named."""
+        removed = await self.sessions.detach(session_id, host_id, workspace_id)
+        for attachment in removed:
+            await self._broadcast(p.EV_SESSIONS_UPDATED, {"host": attachment.host, "workspace_id": attachment.workspace_id})
+        return bool(removed)
 
     async def set_default(self, host_id: str) -> None:
         if self.registry.get(host_id) is None:

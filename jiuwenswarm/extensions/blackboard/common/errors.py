@@ -13,6 +13,8 @@ CONFLICT = "conflict"
 EXPIRED = "expired"
 DISABLED = "disabled"
 UNAVAILABLE = "unavailable"
+# Another mandate holds the document.
+BUSY = "busy"
 INTERNAL = "internal"
 
 

@@ -31,7 +31,7 @@ export class MarkdownError extends Error {
 
 const BLOCK_COMMENT = /^<!-- block:([A-Za-z0-9_-]+) -->[ \t]*(?:\r?\n|$)/
 // prosemirror-suggest-changes anchors some suggestions on zero-width spaces.
-const ZWSP = /​/g
+const ZWSP = new RegExp(String.fromCharCode(0x200b), 'g')
 
 // Block-level tokenizer so `<!-- block:<id> -->` becomes a marker token instead of literal text.
 const BlockIdComments = Extension.create({
@@ -173,20 +173,22 @@ export function hasRawHtml(markdown: string): boolean {
 // Top-level blocks with the accepted Markdown and a digest. The digest covers the proposed view
 // too when a block has pending suggestions: adding a suggestion does not change the accepted view,
 // so a digest over it alone would let a second edit land on top of the first one's suggestions.
+export function blockInfo(node: PMNode): Block {
+  const json = node.toJSON() as Json
+  const pending = hasSuggestionMarks(json)
+  const acceptedNode = viewJSON(json, 'accepted')
+  const accepted = acceptedNode ? serializeBlock(acceptedNode) : ''
+  let digest = sha256(accepted)
+  if (pending) {
+    const proposedNode = viewJSON(json, 'proposed')
+    digest = sha256(`${accepted}\n\n${proposedNode ? serializeBlock(proposedNode) : ''}`)
+  }
+  return { id: node.attrs.id ?? null, type: node.type.name, markdown: accepted, hasPendingSuggestions: pending, digest }
+}
+
 export function blocksOf(doc: PMNode): Block[] {
   const out: Block[] = []
-  doc.forEach((node) => {
-    const json = node.toJSON() as Json
-    const pending = hasSuggestionMarks(json)
-    const acceptedNode = viewJSON(json, 'accepted')
-    const accepted = acceptedNode ? serializeBlock(acceptedNode) : ''
-    let digest = sha256(accepted)
-    if (pending) {
-      const proposedNode = viewJSON(json, 'proposed')
-      digest = sha256(`${accepted}\n\n${proposedNode ? serializeBlock(proposedNode) : ''}`)
-    }
-    out.push({ id: node.attrs.id ?? null, type: node.type.name, markdown: accepted, hasPendingSuggestions: pending, digest })
-  })
+  doc.forEach((node) => out.push(blockInfo(node)))
   return out
 }
 

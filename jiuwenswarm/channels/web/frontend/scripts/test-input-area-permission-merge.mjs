@@ -30,7 +30,9 @@ await build({
           contents: `import { createElement } from 'react';
             export function ApplicationPluginTaskInputActions(props) {
               return props.eligible ? createElement('button', { 'data-testid': 'test-duplex-action' }, 'Full-duplex') : props.fallback;
-            }`,
+            }
+            export function ApplicationPluginTaskMenuItems() { return null; }
+            export function ApplicationPluginTaskInputTags() { return null; }`,
           loader: 'js',
           resolveDir: root,
         }));
