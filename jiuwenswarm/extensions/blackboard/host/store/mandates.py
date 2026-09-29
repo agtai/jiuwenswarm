@@ -231,3 +231,79 @@ def receipts_for(conn: sqlite3.Connection, mandate_ids: list[str]) -> dict[str, 
     for row in rows:
         out[row["mandate_id"]].append(Receipt.from_row(row))
     return out
+
+
+# ---- dispatched turns (comment and chat mandates) ----
+
+DISPATCHED_ORIGINS = ("comment", "workspace_chat")
+
+
+def mark_dispatched(conn: sqlite3.Connection, mandate_id: str) -> None:
+    """A new turn is offered to the requester's jiuwenswarm; nothing has picked it up yet."""
+    conn.execute(
+        "UPDATE mandates SET dispatched_at = ?, claimed_at = NULL, turn_id = NULL WHERE id = ?",
+        (now_iso(), mandate_id),
+    )
+
+
+def claim(conn: sqlite3.Connection, mandate_id: str, session_id: str) -> str:
+    """The requester's jiuwenswarm starts the offered turn in `session_id`; returns the turn's id."""
+    turn_id = new_id("turn")
+    now = now_iso()
+    conn.execute(
+        "UPDATE mandates SET claimed_at = ?, turn_id = ?, session_id = ?, turn_count = turn_count + 1,"
+        " last_activity_at = ? WHERE id = ?",
+        (now, turn_id, session_id, now, mandate_id),
+    )
+    return turn_id
+
+
+def set_answer(conn: sqlite3.Connection, mandate_id: str, answer: dict[str, Any] | None) -> None:
+    conn.execute("UPDATE mandates SET answer = ? WHERE id = ?", (json.dumps(answer) if answer else None, mandate_id))
+
+
+def pending_for(conn: sqlite3.Connection, requester_id: str) -> list[Mandate]:
+    """Turns offered to this person's jiuwenswarm that it has not picked up."""
+    rows = conn.execute(
+        "SELECT * FROM mandates WHERE requester_id = ? AND status = 'running' AND origin IN ('comment', 'workspace_chat')"
+        " AND dispatched_at IS NOT NULL AND claimed_at IS NULL ORDER BY dispatched_at",
+        (requester_id,),
+    ).fetchall()
+    return [Mandate.from_row(r) for r in rows]
+
+
+def queued_for_doc(conn: sqlite3.Connection, doc_id: str) -> list[Mandate]:
+    """Comment mandates waiting for the document, first come first served."""
+    rows = conn.execute(
+        "SELECT * FROM mandates WHERE status = 'queued' AND origin = 'comment'"
+        " AND json_extract(scope, '$.doc_id') = ? ORDER BY rowid",
+        (doc_id,),
+    ).fetchall()
+    return [Mandate.from_row(r) for r in rows]
+
+
+def for_thread(conn: sqlite3.Connection, thread_id: str, statuses: tuple[str, ...]) -> list[Mandate]:
+    rows = conn.execute(
+        f"SELECT * FROM mandates WHERE origin = 'comment' AND json_extract(origin_ref, '$.thread_id') = ?"
+        f" AND status IN ({','.join('?' * len(statuses))}) ORDER BY rowid",
+        (thread_id, *statuses),
+    ).fetchall()
+    return [Mandate.from_row(r) for r in rows]
+
+
+def unclaimed_before(conn: sqlite3.Connection, cutoff: str) -> list[Mandate]:
+    rows = conn.execute(
+        "SELECT * FROM mandates WHERE status = 'running' AND origin IN ('comment', 'workspace_chat')"
+        " AND claimed_at IS NULL AND dispatched_at < ?",
+        (cutoff,),
+    ).fetchall()
+    return [Mandate.from_row(r) for r in rows]
+
+
+def claimed_before(conn: sqlite3.Connection, cutoff: str) -> list[Mandate]:
+    rows = conn.execute(
+        "SELECT * FROM mandates WHERE status = 'running' AND origin IN ('comment', 'workspace_chat')"
+        " AND claimed_at IS NOT NULL AND claimed_at < ?",
+        (cutoff,),
+    ).fetchall()
+    return [Mandate.from_row(r) for r in rows]

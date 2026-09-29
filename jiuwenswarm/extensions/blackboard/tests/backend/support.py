@@ -24,6 +24,18 @@ from jiuwenswarm.extensions.blackboard.host.store import Store, invites, mandate
 from jiuwenswarm.extensions.blackboard.host.store.models import User
 
 
+# A selection of the first words of block b1, as the browser sends it.
+ANCHOR = {
+    "block_id": "b1",
+    "digest": "d0",
+    "start": "AQID",
+    "end": "BAUG",
+    "quote": "the launch date",
+    "offset": 4,
+    "length": 15,
+}
+
+
 def free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -67,6 +79,8 @@ class FakeDocs:
         # Set to a BlackboardError to make the next edits call fail with it.
         self.edit_error: BlackboardError | None = None
         self.pending: dict[str, set[str]] = {}
+        # Per anchor quote, what resolve_anchors reports instead of an unchanged, ok anchor.
+        self.anchor_results: dict[str, dict[str, Any]] = {}
 
     def require_client(self) -> "FakeDocs":
         if not self.running:
@@ -87,7 +101,12 @@ class FakeDocs:
         return {"deleted": True}
 
     async def markdown(self, doc_id: str, *, view: str = "accepted", range_: str | None = None) -> dict:
+        self.calls.append(("markdown", doc_id, {"view": view, "range": range_}))
         return {"markdown": self.docs[doc_id], "view": view, "blocks": []}
+
+    async def resolve_anchors(self, doc_id: str, anchors: list[dict]) -> dict:
+        self.calls.append(("anchors", doc_id, {"count": len(anchors)}))
+        return {"anchors": [self.anchor_results.get(a["quote"], {"status": "ok"}) for a in anchors]}
 
     async def import_markdown(self, doc_id: str, markdown: str, author: dict) -> dict:
         self.calls.append(("import", doc_id, {"author": author}))
@@ -189,6 +208,15 @@ class HostWorld:
             lambda c: mandates.create(c, workspace_id=workspace_id, requester_id=user.id, **values)
         )
         return mandate.id
+
+    async def thread(self, user: User, doc_id: str, body: str = "Tighten this", **params: Any) -> dict[str, Any]:
+        """A comment thread on block b1; returns the create result."""
+        return await self.call(user, p.COMMENT_CREATE, doc_id=doc_id, anchor={**ANCHOR, **params.pop("anchor", {})}, body=body, **params)
+
+    async def ask(self, user: User, mandate_id: str, **params: Any) -> str:
+        """The agent's question in a running dispatched mandate; returns the decision id."""
+        values = {"question": "Which risks?", "options": [{"label": "A"}, {"label": "B"}, {"label": "C"}], "recommended": 1, **params}
+        return (await self.call(user, p.DECISION_CREATE, mandate_id=mandate_id, **values))["decision_id"]
 
     async def reference(self, user: User, workspace_id: str, name: str = "brief.pdf") -> str:
         reference_id = new_id("r")

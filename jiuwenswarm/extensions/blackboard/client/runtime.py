@@ -27,7 +27,10 @@ class ClientRuntime:
     def __init__(self, hosts_file: Path, broadcast: Broadcast) -> None:
         self.registry = HostRegistry(hosts_file)
         self.sessions = SessionAttachments(Path(hosts_file).parent / "sessions.json")
+        # Runs comment and chat tasks on this jiuwenswarm's agent; set where the agent client exists.
+        self.dispatcher: Any = None
         self._broadcast = broadcast
+        self._background: set[asyncio.Task] = set()
         self._links: dict[str, HostLink] = {}
         self._join_lock = asyncio.Lock()
 
@@ -36,6 +39,8 @@ class ClientRuntime:
             self._open_link(entry)
 
     async def stop(self) -> None:
+        if self.dispatcher is not None:
+            await self.dispatcher.close()
         links = list(self._links.values())
         self._links.clear()
         await asyncio.gather(*(link.stop() for link in links), return_exceptions=True)
@@ -56,6 +61,15 @@ class ClientRuntime:
         if event == p.EV_HOST_UPDATED:
             await self._rename_entry(host_id, payload.get("name"))
             return
+        # Turns of this person's tasks are for the dispatcher, not for browsers.
+        if event == p.EV_MANDATE_RUN:
+            if self.dispatcher is not None:
+                self.dispatcher.offer(host_id, payload)
+            return
+        if event == p.EV_MANDATE_STOP:
+            if self.dispatcher is not None:
+                self.dispatcher.stop(host_id, payload)
+            return
         await self._broadcast(event, {**payload, "host": host_id})
 
     async def _on_status(self, host_id: str, status: str) -> None:
@@ -64,6 +78,11 @@ class ClientRuntime:
     async def _on_ready(self, host_id: str, host: dict[str, Any]) -> None:
         # The host's current name, in case it was renamed while this link was down.
         await self._rename_entry(host_id, host.get("name"))
+        if self.dispatcher is not None:
+            # Tasks offered while the link was down; asked in the background so events keep flowing.
+            task = asyncio.get_running_loop().create_task(self.dispatcher.resume(host_id), name="blackboard.resume")
+            self._background.add(task)
+            task.add_done_callback(self._background.discard)
 
     async def _rename_entry(self, host_id: str, name: Any) -> None:
         entry = self.registry.get(host_id)

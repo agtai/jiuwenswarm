@@ -26,7 +26,8 @@ from jiuwenswarm.extensions.sdk import (
 from jiuwenswarm.extensions.blackboard.client.hosts import HostRegistry
 from jiuwenswarm.extensions.blackboard.client.sessions import SessionAttachments
 from jiuwenswarm.extensions.blackboard.client.toolkit.bridge import to_openjiuwen
-from jiuwenswarm.extensions.blackboard.client.toolkit.tools import SessionTools, WorkspaceRef
+from jiuwenswarm.extensions.blackboard.client.dispatcher import CHANNEL, MandateDispatcher
+from jiuwenswarm.extensions.blackboard.client.toolkit.tools import MandateRef, SessionTools, WorkspaceRef
 from jiuwenswarm.extensions.blackboard.client.rpc import register_rpcs
 from jiuwenswarm.extensions.blackboard.client.runtime import ClientRuntime
 from jiuwenswarm.extensions.blackboard.common.config import load_host_settings, save_host_settings
@@ -44,8 +45,9 @@ class BlackboardApplicationPlugin(ApplicationPluginExtension):
         self.client: ClientRuntime | None = None
         self.host: HostController | None = None
         self._tasks: set[asyncio.Task] = set()
-        # AgentServer side: per session, the toolkit and the tools handed to its agent.
-        self._toolsets: dict[str, tuple[SessionTools, list[Any]]] = {}
+        # AgentServer side: per session, the toolkit and the tools handed to its agent, without and
+        # with blackboard_ask (turns of a comment or chat task).
+        self._toolsets: dict[str, tuple[SessionTools, list[Any], list[Any]]] = {}
         self._client_files: tuple[SessionAttachments, HostRegistry] | None = None
 
     async def initialize(self, config: Any) -> None:
@@ -68,7 +70,6 @@ class BlackboardApplicationPlugin(ApplicationPluginExtension):
             return "0.1.0"
 
     def bind_web_channel(self, channel: Any, services: ApplicationPluginServices) -> None:
-        del services  # the agent client is used from milestone 4 on
         data_dir = blackboard_dir()
         setup_file_logging(data_dir)
 
@@ -87,6 +88,8 @@ class BlackboardApplicationPlugin(ApplicationPluginExtension):
             client=self.client,
             broadcast=broadcast,
         )
+        if services.agent_client is not None:
+            self.client.dispatcher = MandateDispatcher(self.client, services.agent_client)
         register_rpcs(channel, self.client, self.host)
         self._spawn(self._start())
 
@@ -108,17 +111,27 @@ class BlackboardApplicationPlugin(ApplicationPluginExtension):
             self._client_files = (SessionAttachments(base / "sessions.json"), HostRegistry(base / "hosts.json"))
         attachments, registry = self._client_files
         workspaces = [WorkspaceRef(a.host, a.workspace_id, a.title) for a in attachments.for_session(ctx.session_id)]
+        task = _dispatched(ctx)
+        if task is not None and not any((w.host_id, w.workspace_id) == (task.host_id, task.workspace_id) for w in workspaces):
+            title = str((ctx.metadata.get("blackboard") or {}).get("workspace_title") or "")
+            workspaces.append(WorkspaceRef(task.host_id, task.workspace_id, title))
         if not workspaces:
             self._toolsets.pop(ctx.session_id, None)
             return []
         current = self._toolsets.get(ctx.session_id)
         if current is None or current[0].workspaces != workspaces:
             toolkit = SessionTools(registry=registry, session_id=ctx.session_id, workspaces=workspaces)
-            current = (toolkit, to_openjiuwen(toolkit.specs(), owner=ctx.session_id))
+            plain = to_openjiuwen(toolkit.specs(), owner=ctx.session_id)
+            toolkit.mandate = MandateRef("", "", "")
+            asking = to_openjiuwen(toolkit.specs(), owner=ctx.session_id)
+            current = (toolkit, plain, asking)
             self._toolsets[ctx.session_id] = current
-        # Edits of one turn share a mandate; the next turn begins another.
-        current[0].turn_id = ctx.request_id or ""
-        return current[1]
+        toolkit = current[0]
+        # Edits of one turn share a mandate; the next turn begins another. A dispatched turn works
+        # under its task's mandate and may ask the workspace a question.
+        toolkit.turn_id = ctx.request_id or ""
+        toolkit.mandate = task
+        return current[2] if task is not None else current[1]
 
     def frontend_contributions(self) -> tuple[FrontendContribution, ...]:
         return (
@@ -139,3 +152,16 @@ async def register_extensions(registry: Any) -> list[BlackboardApplicationPlugin
     extension = BlackboardApplicationPlugin()
     registry.register_application_plugin(extension)
     return [extension]
+
+
+def _dispatched(ctx: AgentToolContext) -> MandateRef | None:
+    """The comment or chat task of a turn the dispatcher started, from the request's metadata."""
+    if ctx.channel_id != CHANNEL:
+        return None
+    meta = ctx.metadata.get("blackboard") if isinstance(ctx.metadata, dict) else None
+    if not isinstance(meta, dict):
+        return None
+    fields = [meta.get(k) for k in ("host", "workspace_id", "mandate_id")]
+    if not all(isinstance(f, str) and f for f in fields):
+        return None
+    return MandateRef(fields[0], fields[1], fields[2], str(meta.get("origin") or ""))

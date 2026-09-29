@@ -1475,6 +1475,9 @@ export default defineConfig({
   ],
   optimizeDeps: {
     include: ['exceljs', 'jszip', 'saxes', 'ssf', 'onnxruntime-web/wasm'],
+    // Pre-bundled, these would carry their own copy of the aliased y-tiptap below, with plugin keys
+    // that Blackboard's editor code (importing the alias directly) cannot see.
+    exclude: ['@tiptap/extension-collaboration', '@tiptap/extension-collaboration-caret'],
   },
   resolve: {
     dedupe: ['react', 'react-dom'],

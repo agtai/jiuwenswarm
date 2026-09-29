@@ -6,6 +6,10 @@ from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from jiuwenswarm.extensions.blackboard.common import protocol as p
+from jiuwenswarm.extensions.blackboard.host.api import chat as _chat  # noqa: F401 - registers methods
+from jiuwenswarm.extensions.blackboard.host.api import comments as _comments  # noqa: F401 - registers methods
+from jiuwenswarm.extensions.blackboard.host.api import decisions as _decisions  # noqa: F401 - registers methods
+from jiuwenswarm.extensions.blackboard.host.api import dispatch as _dispatch  # noqa: F401 - registers methods
 from jiuwenswarm.extensions.blackboard.host.api import documents as _documents  # noqa: F401 - registers methods
 from jiuwenswarm.extensions.blackboard.host.api import mandates as _mandates  # noqa: F401 - registers methods
 from jiuwenswarm.extensions.blackboard.host.api import references

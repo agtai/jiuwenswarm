@@ -736,9 +736,10 @@
 }
 
 .bb-editor__content del {
-  color: var(--color-feedback-danger-text);
+  color: var(--color-feedback-danger);
   background: var(--color-feedback-danger-subtle);
   text-decoration: line-through;
+  text-decoration-color: var(--color-feedback-danger);
 }
 
 /* Authors: the schema writes data-author-color (1 to 6) on author spans. */
@@ -1044,3 +1045,380 @@
 .bb-chat-tag {
   display: inline-flex;
 }
+
+/* ---- right rail: tabs as icons, the panel's title ---- */
+
+.bb-rail__tabs.tabs { justify-content: space-between; }
+
+.bb-rail__tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+}
+
+.bb-rail__badge {
+  position: absolute;
+  top: -6px;
+  right: -8px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  color: var(--color-action-primary-text);
+  background: var(--color-action-primary);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+  text-align: center;
+}
+
+.bb-rail__title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+/* The chat fills the rail: its list scrolls, the composer stays at the bottom. */
+.bb-rail.is-chat { overflow: hidden; }
+
+.bb-icon-button {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border: 0;
+  border-radius: 4px;
+  color: var(--color-text-secondary);
+  background: none;
+  cursor: pointer;
+}
+
+.bb-icon-button:hover { color: var(--color-text-primary); background: var(--color-surface-hover); }
+
+/* ---- the workspace chat ---- */
+
+.bb-chat { gap: 8px; }
+
+.bb-chat__list {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  padding-right: 4px;
+  overflow-y: auto;
+}
+
+.bb-chat__empty { margin: auto 0; text-align: center; }
+
+.bb-chat__message {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--color-surface-muted);
+}
+
+.bb-chat__message.is-mine { background: var(--color-action-primary-subtle); }
+.bb-chat__message.is-agent { border: 1px solid var(--color-border-subtle); background: var(--color-surface-panel); }
+
+.bb-chat__meta,
+.bb-comment-item__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.bb-chat__meta .bb-muted,
+.bb-comment-item__meta .bb-muted { font-size: 11px; }
+
+.bb-chat__body,
+.bb-comment-item__body {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.bb-chat__notice {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: start;
+  column-gap: 6px;
+  row-gap: 2px;
+  margin: 0;
+  padding: 0 4px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+
+.bb-chat__notice > svg { margin-top: 2px; }
+.bb-chat__notice > button { grid-column: 2; justify-self: start; }
+.bb-chat__notice.is-summary { color: var(--color-text-primary); }
+
+/* ---- composer ---- */
+
+.bb-composer { display: flex; flex-direction: column; gap: 6px; }
+.bb-composer__box { position: relative; }
+
+.bb-composer__input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 56px;
+  max-height: 180px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 8px;
+  color: var(--color-text-primary);
+  background: var(--color-surface-page);
+  font: inherit;
+  font-size: 13px;
+  resize: vertical;
+}
+
+.bb-composer__input:focus { border-color: var(--color-action-primary); outline: none; }
+
+.bb-composer__mentions {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 4px);
+  left: 0;
+  z-index: 5;
+  margin: 0;
+  padding: 4px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 8px;
+  background: var(--color-surface-popover);
+  list-style: none;
+}
+
+.bb-composer__mentions button {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  width: 100%;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--color-text-primary);
+  background: none;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.bb-composer__mentions button.is-picked,
+.bb-composer__mentions button:hover { background: var(--color-surface-hover); }
+
+.bb-composer__hint { font-size: 12px; }
+.bb-composer__task { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.bb-composer__switch,
+.bb-comments__resolved-toggle { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; }
+.bb-composer__actions { display: flex; gap: 6px; justify-content: flex-end; }
+
+/* ---- comment threads ---- */
+
+.bb-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 8px;
+  background: var(--color-surface-page);
+}
+
+.bb-thread.is-active { border-color: var(--color-action-primary); }
+.bb-thread.is-resolved { opacity: 0.75; }
+.bb-thread.is-draft { border-style: dashed; }
+
+.bb-thread__quote {
+  display: -webkit-box;
+  margin: 0;
+  padding: 0 0 0 8px;
+  overflow: hidden;
+  border: 0;
+  border-left: 3px solid var(--color-feedback-warning);
+  color: var(--color-text-secondary);
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  font-style: italic;
+  text-align: left;
+  cursor: pointer;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+
+.bb-thread[data-anchor="orphaned"] .bb-thread__quote { border-left-color: var(--color-border-default); }
+.bb-thread__comments { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.bb-thread__actions { display: flex; gap: 4px; }
+
+.bb-comment-item { display: flex; flex-direction: column; gap: 4px; }
+.bb-comment-item.is-agent { padding: 6px 8px; border-radius: 6px; background: var(--color-surface-muted); }
+
+.bb-comment-item.is-system {
+  flex-direction: row;
+  gap: 6px;
+  align-items: center;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+
+/* Passages with comments, in the editor. */
+.bb-editor__content .bb-comment {
+  border-bottom: 2px solid var(--color-feedback-warning);
+  background: var(--color-feedback-warning-subtle);
+  cursor: pointer;
+}
+
+.bb-editor__content .bb-comment.is-drifted { border-bottom-style: dashed; background: none; }
+
+.bb-editor__content .bb-comment.is-active {
+  border-bottom-color: var(--color-action-primary);
+  background: var(--color-action-primary-subtle);
+}
+
+.bb-comment-button {
+  position: absolute;
+  z-index: 4;
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  padding: 4px 10px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 999px;
+  color: var(--color-text-primary);
+  background: var(--color-surface-popover);
+  box-shadow: 0 2px 8px rgba(var(--color-text-primary-rgb), 0.12);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.bb-comment-button:hover { border-color: var(--color-action-primary); }
+
+/* ---- decisions ---- */
+
+.bb-decisions { gap: 10px; }
+
+.bb-decision {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 8px;
+  background: var(--color-surface-page);
+}
+
+.bb-decision.is-open,
+.bb-decision.is-proposed { border-color: var(--color-border-warning); }
+.bb-decision.is-cancelled { opacity: 0.7; }
+
+.bb-decision__head { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+.bb-decision__who { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; font-weight: 600; }
+.bb-decision__question { margin: 0; font-size: 13px; font-weight: 600; white-space: pre-wrap; }
+
+.bb-decision__passage {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  color: var(--color-text-link);
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.bb-decision__passage q { color: var(--color-text-secondary); font-style: italic; }
+.bb-decision__changed { color: var(--color-feedback-warning-text); font-style: normal; }
+
+.bb-decision__options { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; }
+
+.bb-decision__options li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  align-items: center;
+  font-size: 13px;
+}
+
+.bb-decision__options li.is-chosen .bb-decision__label { font-weight: 600; }
+.bb-decision__options label { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+.bb-decision__description { flex-basis: 100%; padding-left: 22px; font-size: 12px; }
+.bb-decision__proposal { margin: 0; font-size: 12px; }
+
+.bb-decision__text {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 6px;
+  color: var(--color-text-primary);
+  background: var(--color-surface-page);
+  font: inherit;
+  font-size: 13px;
+}
+
+.bb-decision__actions { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.bb-mandate__origin { font-size: 11px; }
+
+/* ---- comment margin: open threads beside the document, level with their passages ---- */
+
+.bb-editor__body {
+  display: flex;
+  gap: 20px;
+  align-items: flex-start;
+}
+
+.bb-editor__body > .bb-suggestions { flex: 1 1 auto; min-width: 0; }
+
+.bb-editor__margin {
+  position: relative;
+  flex: 0 0 260px;
+  align-self: stretch;
+}
+
+.bb-margin-card {
+  position: absolute;
+  right: 0;
+  left: 0;
+  cursor: pointer;
+}
+
+.bb-margin-card.is-active { z-index: 2; cursor: auto; }
+.bb-margin-card .bb-thread { background: var(--color-surface-elevated); }
+.bb-margin-card:not(.is-active) .bb-thread:hover { border-color: var(--color-border-hover); }
+.bb-margin-card.is-active .bb-thread { box-shadow: var(--effect-shadow-md); transform: translateX(-8px); }
+
+.bb-thread.is-margin:not(.is-active) .bb-comment-item__body {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.bb-thread__more { font-size: 12px; }
+
+.bb-comment-button__key {
+  padding: 0 4px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 4px;
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: 11px;
+}
+
+.bb-comment-button:disabled { cursor: default; color: var(--color-text-secondary); }

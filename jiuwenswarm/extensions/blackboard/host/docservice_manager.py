@@ -135,6 +135,9 @@ class DocServiceClient:
     async def agent_presence(self, doc_id: str, body: dict) -> dict:
         return await self.request("POST", f"/api/docs/{doc_id}/presence", json=body)
 
+    async def resolve_anchors(self, doc_id: str, anchors: list[dict]) -> dict:
+        return await self.request("POST", f"/api/docs/{doc_id}/anchors/resolve", json={"anchors": anchors})
+
     async def recheck(self, doc_id: str, user_id: str | None = None, *, role: str | None = None, revoke: bool = False) -> dict:
         body = {"userId": user_id, "role": role, "revoke": revoke}
         return await self.request("POST", f"/api/docs/{doc_id}/recheck", json=body)

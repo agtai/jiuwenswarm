@@ -19,7 +19,12 @@ import type {
   SuggestionView,
   Subscribe,
   WorkspaceView,
+  AnchorDraft,
+  ChatMessageView,
+  DecisionView,
+  ThreadView,
 } from './types';
+import { mentionsIn, sortThreads } from './conversation';
 
 export interface BlackboardState {
   hosts: HostView[];
@@ -38,6 +43,15 @@ export interface BlackboardState {
   mandates: MandateView[];
   // This person's sessions that work on the selected workspace.
   sessions: SessionAttachmentView[];
+  // The workspace chat, oldest first, and whether older messages exist.
+  chat: ChatMessageView[];
+  chatHasMore: boolean;
+  // Comment threads of the open document, the one in focus, and a passage being commented on.
+  threads: ThreadView[];
+  showResolved: boolean;
+  activeThread: string | null;
+  draftAnchor: AnchorDraft | null;
+  decisions: DecisionView[];
   hostStatus: HostStatus | null;
   // The right rail's tab.
   rail: RailTab;
@@ -45,7 +59,15 @@ export interface BlackboardState {
   loadError: string | null;
 }
 
-export type RailTab = 'members' | 'references' | 'agents';
+export type RailTab = 'chat' | 'comments' | 'decisions' | 'agents' | 'references' | 'members';
+
+type ChatPage = { messages: ChatMessageView[]; has_more: boolean };
+
+export interface CommentOptions {
+  // Let the agent edit the whole document instead of the passage.
+  wholeDocument?: boolean;
+  sessionId?: string | null;
+}
 
 export const INITIAL_STATE: BlackboardState = {
   hosts: [],
@@ -63,6 +85,13 @@ export const INITIAL_STATE: BlackboardState = {
   maxUploadMb: 25,
   mandates: [],
   sessions: [],
+  chat: [],
+  chatHasMore: false,
+  threads: [],
+  showResolved: false,
+  activeThread: null,
+  draftAnchor: null,
+  decisions: [],
   hostStatus: null,
   rail: 'members',
   loaded: false,
@@ -70,7 +99,22 @@ export const INITIAL_STATE: BlackboardState = {
 };
 
 // What belongs to the selected workspace; cleared whenever the selection changes.
-const WORKSPACE_CONTENT = { members: [], invites: [], docs: [], docId: null, docservice: null, references: [], mandates: [], sessions: [] };
+const WORKSPACE_CONTENT = {
+  members: [],
+  invites: [],
+  docs: [],
+  docId: null,
+  docservice: null,
+  references: [],
+  mandates: [],
+  sessions: [],
+  chat: [],
+  chatHasMore: false,
+  threads: [],
+  activeThread: null,
+  draftAnchor: null,
+  decisions: [],
+};
 
 // Chat sessions live in the web app; the page reaches them through these.
 export interface SessionPort {
@@ -94,7 +138,7 @@ export interface SelectionMemory {
 }
 
 const NO_MEMORY: SelectionMemory = { load: () => null, save: () => undefined };
-const RAIL_TABS: readonly RailTab[] = ['members', 'references', 'agents'];
+const RAIL_TABS: readonly RailTab[] = ['chat', 'comments', 'decisions', 'agents', 'references', 'members'];
 
 function selectionOf(state: BlackboardState): Selection {
   return { hostId: state.hostId, workspaceId: state.workspaceId, docId: state.docId, rail: state.rail };
@@ -123,6 +167,9 @@ const HOST_EVENTS = [
   'blackboard.mandate.updated',
   'blackboard.doc.suggestions_changed',
   'blackboard.sessions.updated',
+  'blackboard.chat.message',
+  'blackboard.thread.updated',
+  'blackboard.decision.updated',
 ] as const;
 
 export function currentWorkspace(state: BlackboardState): WorkspaceView | null {
@@ -271,7 +318,16 @@ export class BlackboardController {
   }
 
   async refreshWorkspaceContent(): Promise<void> {
-    await Promise.all([this.refreshMembers(), this.refreshDocs(), this.refreshReferences(), this.refreshMandates(), this.refreshSessions()]);
+    await Promise.all([
+      this.refreshMembers(),
+      this.refreshDocs(),
+      this.refreshReferences(),
+      this.refreshMandates(),
+      this.refreshSessions(),
+      this.refreshChat(),
+      this.refreshDecisions(),
+    ]);
+    await this.refreshThreads();
   }
 
   async refreshMandates(): Promise<void> {
@@ -310,7 +366,10 @@ export class BlackboardController {
       const docs = result.docs ?? [];
       // An archived or deleted document closes; otherwise the first one opens.
       const keep = docs.some((d) => d.id === this.state.docId);
-      this.set({ docs, docservice: result.docservice ?? null, docId: keep ? this.state.docId : (docs[0]?.id ?? null) });
+      const docId = keep ? this.state.docId : (docs[0]?.id ?? null);
+      const moved = docId !== this.state.docId;
+      this.set({ docs, docservice: result.docservice ?? null, docId, ...(moved ? { threads: [], activeThread: null, draftAnchor: null } : {}) });
+      if (moved) void this.refreshThreads();
     } catch (error) {
       this.set({ loadError: errorText(error) });
     }
@@ -346,7 +405,9 @@ export class BlackboardController {
   }
 
   selectDoc(docId: string | null): void {
-    this.set({ docId });
+    if (docId === this.state.docId) return;
+    this.set({ docId, threads: [], activeThread: null, draftAnchor: null });
+    void this.refreshThreads();
   }
 
   selectRail(rail: RailTab): void {
@@ -391,6 +452,12 @@ export class BlackboardController {
       if (workspaceId === this.state.workspaceId) await this.refreshMandates();
     } else if (event === 'blackboard.sessions.updated') {
       if (workspaceId === this.state.workspaceId) await this.refreshSessions();
+    } else if (event === 'blackboard.chat.message') {
+      if (workspaceId === this.state.workspaceId && payload.message) this.addChat(payload.message as ChatMessageView);
+    } else if (event === 'blackboard.thread.updated') {
+      if (payload.doc_id === this.state.docId) await this.refreshThreads();
+    } else if (event === 'blackboard.decision.updated') {
+      if (workspaceId === this.state.workspaceId) await this.refreshDecisions();
     } else if (event === 'blackboard.member.updated' || event === 'blackboard.member.role_changed') {
       if (event === 'blackboard.member.role_changed') await this.refreshWorkspaces();
       else if (workspaceId === this.state.workspaceId) await this.refreshMembers();
@@ -569,6 +636,164 @@ export class BlackboardController {
   }
 
   // Every pending suggestion one agent run made in a document.
+  // ---- the workspace chat ----
+
+  async refreshChat(): Promise<void> {
+    const { hostId, workspaceId } = this.state;
+    if (!hostId || !workspaceId) return;
+    try {
+      const page = await this.rpc<ChatPage>('blackboard.chat.list', { host: hostId, workspace_id: workspaceId });
+      if (hostId !== this.state.hostId || workspaceId !== this.state.workspaceId) return;
+      this.set({ chat: page.messages ?? [], chatHasMore: Boolean(page.has_more) });
+    } catch (error) {
+      this.set({ loadError: errorText(error) });
+    }
+  }
+
+  async loadOlderChat(): Promise<void> {
+    const first = this.state.chat[0];
+    if (!first) return;
+    const page = await this.rpc<ChatPage>('blackboard.chat.list', { ...this.requireWorkspace(), before: first.id });
+    this.set({ chat: [...(page.messages ?? []), ...this.state.chat], chatHasMore: Boolean(page.has_more) });
+  }
+
+  // `sessionId` picks the session a task for the agent runs in; none means the workspace's own.
+  async postChat(body: string, sessionId: string | null = null): Promise<ChatMessageView> {
+    const result = await this.rpc<{ message: ChatMessageView }>('blackboard.chat.post', {
+      ...this.requireWorkspace(),
+      body,
+      mentions: mentionsIn(body, this.state.members),
+      ...(sessionId ? { session_id: sessionId } : {}),
+    });
+    this.addChat(result.message);
+    return result.message;
+  }
+
+  private addChat(message: ChatMessageView): void {
+    if (message.workspace_id !== this.state.workspaceId) return;
+    const at = this.state.chat.findIndex((m) => m.id === message.id);
+    const chat = at >= 0 ? this.state.chat.map((m, i) => (i === at ? message : m)) : [...this.state.chat, message];
+    this.set({ chat });
+  }
+
+  // ---- comments on the open document ----
+
+  async refreshThreads(): Promise<void> {
+    const { hostId, docId } = this.state;
+    if (!hostId || !docId) {
+      this.set({ threads: [] });
+      return;
+    }
+    try {
+      const result = await this.rpc<{ threads: ThreadView[] }>('blackboard.comment.list', {
+        host: hostId,
+        doc_id: docId,
+        include_resolved: this.state.showResolved,
+      });
+      if (hostId !== this.state.hostId || docId !== this.state.docId) return;
+      this.set({ threads: sortThreads(result.threads ?? []) });
+    } catch (error) {
+      this.set({ loadError: errorText(error) });
+    }
+  }
+
+  setShowResolved(show: boolean): void {
+    this.set({ showResolved: show });
+    void this.refreshThreads();
+  }
+
+  // A selection to comment on: a new comment opens in the editor's margin beside it.
+  startComment(anchor: AnchorDraft): void {
+    this.set({ draftAnchor: anchor, activeThread: null });
+  }
+
+  cancelComment(): void {
+    this.set({ draftAnchor: null });
+  }
+
+  // The margin shows open threads beside their passage; a resolved or detached one is only in the
+  // Comments tab, which opens for it.
+  openThread(threadId: string | null): void {
+    const thread = threadId ? this.state.threads.find((th) => th.id === threadId) : undefined;
+    const listed = Boolean(thread && (thread.resolved_at || thread.anchor.status === 'orphaned'));
+    this.set({ activeThread: threadId, ...(listed ? { rail: 'comments' as RailTab } : {}) });
+  }
+
+  async createComment(body: string, options: CommentOptions = {}): Promise<ThreadView> {
+    const { docId, draftAnchor } = this.state;
+    if (!docId || !draftAnchor) throw new Error('No passage selected');
+    const result = await this.rpc<{ thread: ThreadView }>('blackboard.comment.create', {
+      host: this.requireHost(),
+      doc_id: docId,
+      anchor: draftAnchor,
+      body,
+      mentions: mentionsIn(body, this.state.members),
+      scope_switch: Boolean(options.wholeDocument),
+      ...(options.sessionId ? { session_id: options.sessionId } : {}),
+    });
+    this.set({ draftAnchor: null, activeThread: result.thread.id });
+    await this.refreshThreads();
+    return result.thread;
+  }
+
+  async replyThread(threadId: string, body: string, options: CommentOptions = {}): Promise<void> {
+    await this.rpc('blackboard.comment.reply', {
+      host: this.requireHost(),
+      thread_id: threadId,
+      body,
+      mentions: mentionsIn(body, this.state.members),
+      scope_switch: Boolean(options.wholeDocument),
+      ...(options.sessionId ? { session_id: options.sessionId } : {}),
+    });
+    await this.refreshThreads();
+  }
+
+  async editComment(commentId: string, body: string): Promise<void> {
+    await this.rpc('blackboard.comment.edit', { host: this.requireHost(), comment_id: commentId, body });
+    await this.refreshThreads();
+  }
+
+  async setThreadResolved(threadId: string, resolved: boolean): Promise<void> {
+    await this.rpc(resolved ? 'blackboard.comment.resolve' : 'blackboard.comment.reopen', { host: this.requireHost(), thread_id: threadId });
+    if (resolved && this.state.activeThread === threadId) this.set({ activeThread: null });
+    await this.refreshThreads();
+  }
+
+  // ---- decisions ----
+
+  async refreshDecisions(): Promise<void> {
+    const { hostId, workspaceId } = this.state;
+    if (!hostId || !workspaceId) return;
+    try {
+      const result = await this.rpc<{ decisions: DecisionView[] }>('blackboard.decision.list', { host: hostId, workspace_id: workspaceId });
+      if (hostId !== this.state.hostId || workspaceId !== this.state.workspaceId) return;
+      this.set({ decisions: result.decisions ?? [] });
+    } catch (error) {
+      this.set({ loadError: errorText(error) });
+    }
+  }
+
+  // An option's index or free text; the requester's answer is final, anyone else's a proposal.
+  async answerDecision(decisionId: string, answer: { option: number } | { text: string }): Promise<void> {
+    await this.rpc('blackboard.decision.answer', { host: this.requireHost(), decision_id: decisionId, ...answer });
+    await this.refreshDecisions();
+  }
+
+  async acceptDecision(decisionId: string): Promise<void> {
+    await this.rpc('blackboard.decision.accept', { host: this.requireHost(), decision_id: decisionId });
+    await this.refreshDecisions();
+  }
+
+  async cancelDecision(decisionId: string): Promise<void> {
+    await this.rpc('blackboard.decision.cancel', { host: this.requireHost(), decision_id: decisionId });
+    await this.refreshDecisions();
+  }
+
+  async resolveUnknown(mandateId: string, status: 'done' | 'failed'): Promise<void> {
+    await this.rpc('blackboard.mandate.resolve_unknown', { host: this.requireHost(), mandate_id: mandateId, status });
+    await this.refreshMandates();
+  }
+
   async decideMandate(docId: string, mandateId: string, action: 'accept' | 'reject'): Promise<number> {
     const result = await this.rpc<{ suggestions: SuggestionView[] }>('blackboard.suggestion.list', { host: this.requireHost(), doc_id: docId });
     const ids = (result.suggestions ?? []).filter((s) => s.author?.mandate === mandateId).map((s) => s.id);

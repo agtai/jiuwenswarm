@@ -26,13 +26,16 @@ import {
   Users,
   Check,
   X,
+  MessageSquarePlus,
 } from 'lucide-react';
 
 import { Button, Tag, type TagVariant } from '../../../../channels/web/frontend/src/components/ui';
 import { YJS_FIELD, authorColorIndex, blackboardExtensions } from '../../host/docservice/src/schema/extensions.ts';
-import type { DocToken } from '../types';
+import type { AnchorDraft, DocToken } from '../types';
 import { authorsOf, type AuthorEntry } from './authors';
 import { AuthorStamp } from './authorStamp';
+import { CommentMargin } from './CommentMargin';
+import { CommentHighlights, anchorForSelection, selectionTooLong, showThreads, threadRange, type ThreadAnchor } from './comments';
 import { DocSession, type ProviderFactory, type SessionState, type SessionStatus } from './session';
 
 export interface DocumentEditorProps {
@@ -46,7 +49,23 @@ export interface DocumentEditorProps {
   // The editable name above the content.
   title: ReactNode;
   suggestions: SuggestionActions;
+  comments: CommentActions;
 }
+
+export interface CommentActions {
+  threads: ThreadAnchor[];
+  active: string | null;
+  // The passage of the comment being written, shown with a draft card in the margin.
+  draft: AnchorDraft | null;
+  onOpenThread: (threadId: string | null) => void;
+  // Null for people who cannot comment (viewers, archived documents).
+  onComment: ((anchor: AnchorDraft) => void) | null;
+  // The margin's cards: a thread, and the comment being written.
+  renderThread: (threadId: string, active: boolean) => ReactNode;
+  renderDraft: () => ReactNode;
+}
+
+const DRAFT_ID = '__draft__';
 
 export interface SuggestionActions {
   // Null for people who cannot decide (viewers, archived documents).
@@ -107,7 +126,7 @@ function useSession(docId: string, fetchToken: DocumentEditorProps['fetchToken']
   return { live, state };
 }
 
-export default function DocumentEditor({ docId, fetchToken, me, names, header, title, suggestions }: DocumentEditorProps) {
+export default function DocumentEditor({ docId, fetchToken, me, names, header, title, suggestions, comments }: DocumentEditorProps) {
   const { t } = useTranslation();
   const { live, state } = useSession(docId, fetchToken);
   const [showAuthors, setShowAuthors] = useState(false);
@@ -160,6 +179,7 @@ export default function DocumentEditor({ docId, fetchToken, me, names, header, t
           showAuthors={showAuthors}
           title={title}
           suggestions={suggestions}
+          comments={comments}
         />
       ) : (
         <div className="bb-doc__loading" data-testid="blackboard-doc-loading" />
@@ -177,6 +197,7 @@ function LiveEditor({
   showAuthors,
   title,
   suggestions,
+  comments,
 }: {
   ydoc: Y.Doc;
   provider: HocuspocusProvider;
@@ -186,9 +207,15 @@ function LiveEditor({
   showAuthors: boolean;
   title: ReactNode;
   suggestions: SuggestionActions;
+  comments: CommentActions;
 }) {
+  const { t } = useTranslation();
   const meRef = useRef(me);
   meRef.current = me;
+  const commentsRef = useRef(comments);
+  commentsRef.current = comments;
+  const frame = useRef<HTMLDivElement | null>(null);
+  const [commentAt, setCommentAt] = useState<{ top: number; left: number; tooLong: boolean } | null>(null);
   const editor = useEditor(
     {
       editable: !readOnly,
@@ -219,6 +246,19 @@ function LiveEditor({
             }),
           }),
           AuthorStamp.configure({ getAuthor: () => ({ id: meRef.current.id, kind: 'person' }), document: ydoc }),
+          CommentHighlights.configure({
+            onOpenThread: (id) => {
+              if (id === DRAFT_ID || (id === null && !commentsRef.current.active)) return;
+              commentsRef.current.onOpenThread(id);
+            },
+            onComment: (anchor) => {
+              const start = commentsRef.current.onComment;
+              if (!start) return false;
+              start(anchor);
+              setCommentAt(null);
+              return true;
+            },
+          }),
         ],
       }),
       editorProps: { attributes: { class: 'bb-editor__content', 'data-testid': 'blackboard-editor-content' } },
@@ -234,14 +274,97 @@ function LiveEditor({
     editor?.commands.updateUser?.({ id: me.id, name: me.name });
   }, [editor, me.id, me.name]);
 
+  // The threads' passages and the draft's, highlighted; the one in focus scrolled into view. The
+  // margin shows a card for each passage that is still in the document.
+  const draft = comments.draft;
+  const marginAnchors = useMemo(() => {
+    const placed = comments.threads.filter((a) => a.status !== 'orphaned');
+    return draft ? [...placed, { id: DRAFT_ID, start: draft.start, end: draft.end, quote: draft.quote, status: 'ok' as const }] : placed;
+  }, [comments.threads, draft]);
+  const focused = comments.active ?? (draft ? DRAFT_ID : null);
+
+  useEffect(() => {
+    if (editor) showThreads(editor, marginAnchors, focused);
+  }, [editor, marginAnchors, focused]);
+
+  useEffect(() => {
+    if (!editor || !comments.active) return;
+    const anchor = comments.threads.find((a) => a.id === comments.active);
+    const range = anchor ? threadRange(editor.state, anchor) : null;
+    if (!range) return;
+    const node = editor.view.domAtPos(range.from).node;
+    const element = node instanceof Element ? node : node.parentElement;
+    element?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }, [editor, comments.active, comments.threads]);
+
+  // A Comment button next to a selection.
+  useEffect(() => {
+    if (!editor) return;
+    const place = () => {
+      const box = frame.current?.getBoundingClientRect();
+      const tooLong = !anchorForSelection(editor.state) && selectionTooLong(editor.state);
+      if (!box || !commentsRef.current.onComment || (!tooLong && !anchorForSelection(editor.state))) {
+        setCommentAt(null);
+        return;
+      }
+      const coords = editor.view.coordsAtPos(editor.state.selection.to);
+      setCommentAt({ top: coords.bottom - box.top + 6, left: Math.max(0, coords.left - box.left - 12), tooLong });
+    };
+    editor.on('selectionUpdate', place);
+    editor.on('update', place);
+    return () => {
+      editor.off('selectionUpdate', place);
+      editor.off('update', place);
+    };
+  }, [editor]);
+
+  const comment = () => {
+    const anchor = editor ? anchorForSelection(editor.state) : null;
+    if (anchor && comments.onComment) comments.onComment(anchor);
+    setCommentAt(null);
+  };
+
   return (
-    <div className={`bb-editor${showAuthors ? ' show-authors' : ''}`} data-testid="blackboard-editor" data-readonly={readOnly}>
+    <div
+      ref={frame}
+      className={`bb-editor${showAuthors ? ' show-authors' : ''}`}
+      data-testid="blackboard-editor"
+      data-readonly={readOnly}
+    >
       {editor && !readOnly ? <Toolbar editor={editor} /> : null}
       {editor && showAuthors ? <AuthorsLegend editor={editor} names={names} /> : null}
       {title}
-      <SuggestionCards names={names} actions={readOnly ? { ...suggestions, decide: null, decideRun: null } : suggestions}>
-        <EditorContent editor={editor} className="bb-editor__scroll" />
-      </SuggestionCards>
+      <div className="bb-editor__body">
+        <SuggestionCards names={names} actions={readOnly ? { ...suggestions, decide: null, decideRun: null } : suggestions}>
+          <EditorContent editor={editor} className="bb-editor__scroll" />
+        </SuggestionCards>
+        {editor && marginAnchors.length > 0 ? (
+          <CommentMargin
+            editor={editor}
+            anchors={marginAnchors}
+            active={focused}
+            render={(id, active) => (id === DRAFT_ID ? comments.renderDraft() : comments.renderThread(id, active))}
+            onActivate={(id) => comments.onOpenThread(id === DRAFT_ID ? null : id)}
+          />
+        ) : null}
+      </div>
+      {commentAt && comments.onComment ? (
+        <button
+          type="button"
+          className="bb-comment-button"
+          style={{ top: commentAt.top, left: commentAt.left }}
+          data-testid="blackboard-editor-comment-btn"
+          data-variant={commentAt.tooLong ? 'too-long' : 'ready'}
+          disabled={commentAt.tooLong}
+          title={commentAt.tooLong ? undefined : t('blackboard.comments.addShortcut')}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={comment}
+        >
+          <MessageSquarePlus size={14} aria-hidden="true" />
+          {commentAt.tooLong ? t('blackboard.comments.tooLong') : t('blackboard.comments.add')}
+          {commentAt.tooLong ? null : <kbd className="bb-comment-button__key">Ctrl+M</kbd>}
+        </button>
+      ) : null}
     </div>
   );
 }

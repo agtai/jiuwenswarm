@@ -23,7 +23,7 @@ import {
   DropdownMenuTrigger,
   Tag,
 } from '../../../../channels/web/frontend/src/components/ui';
-import type { SuggestionActions } from '../editor/DocumentEditor';
+import type { CommentActions, SuggestionActions } from '../editor/DocumentEditor';
 import type { DocServiceStatus, DocToken, DocView, WorkspaceView } from '../types';
 
 const DocumentEditor = lazy(() => import('../editor/DocumentEditor'));
@@ -48,6 +48,7 @@ export function WorkspacePane({
   fetchToken,
   docActions,
   suggestionActions,
+  commentActions,
   onNewDoc,
   onRename,
   onArchive,
@@ -64,6 +65,7 @@ export function WorkspacePane({
   fetchToken: (docId: string) => Promise<DocToken>;
   docActions: DocActions;
   suggestionActions: SuggestionActions;
+  commentActions: CommentActions;
   onNewDoc: () => void;
   onRename: () => void;
   onArchive: () => void;
@@ -134,6 +136,7 @@ export function WorkspacePane({
             header={<DocHeader doc={doc} canEdit={canEdit} actions={docActions} />}
             title={<DocTitle key={doc.id} doc={doc} canEdit={canEdit} onRename={docActions.rename} />}
             suggestions={suggestionActions}
+            comments={commentActions}
           />
         </Suspense>
       ) : (

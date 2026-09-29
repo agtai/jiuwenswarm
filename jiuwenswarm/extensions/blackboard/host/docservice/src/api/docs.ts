@@ -6,6 +6,7 @@ import { EditorState } from '@tiptap/pm/state'
 import * as Y from 'yjs'
 import { ROLES, WRITE_ROLES } from '../auth.ts'
 import { blackboardSchema } from '../schema/extensions.ts'
+import { readAnchors, resolveAnchors } from '../docs/anchors.ts'
 import { EditError, planEdit, readOps, type EditRequest } from '../docs/edits.ts'
 import { MarkdownError, agentView, hasRawHtml, importDoc, type View } from '../docs/markdown.ts'
 import { FIELD, readDoc, writeDoc, type DocPool } from '../docs/pool.ts'
@@ -233,6 +234,21 @@ export function docRoutes({ hocuspocus, pool, storage, version, shutdown }: DocR
           if (error instanceof EditError) throw new ApiError(409, error.code, error.message, error.details)
           throw error
         }
+      },
+    },
+    {
+      // Comment anchors against the live document: ok, drifted, orphaned, or moved (new positions).
+      method: 'POST',
+      path: new RegExp(`^/api/docs/${DOC_ID}/anchors/resolve$`),
+      handler: async ({ params: [docId], body }) => {
+        requireDoc(docId)
+        let anchors
+        try {
+          anchors = readAnchors(body.anchors)
+        } catch (error) {
+          throw new ApiError(400, 'invalid', error instanceof Error ? error.message : String(error), { field: 'anchors' })
+        }
+        return { anchors: await pool.run(docId, (ydoc) => resolveAnchors(ydoc, anchors)) }
       },
     },
     {

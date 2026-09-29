@@ -298,7 +298,16 @@
         "accept_other": "已接受 {{count}} 条建议。",
         "reject_one": "已拒绝 {{count}} 条建议。",
         "reject_other": "已拒绝 {{count}} 条建议。"
-      }
+      },
+      "queuedAt": "排队中（第 {{position}} 位）",
+      "origin": {
+        "comment": "来自评论",
+        "workspace_chat": "来自聊天",
+        "workspace_session": "来自会话"
+      },
+      "resolveDone": "已完成",
+      "resolveFailed": "已失败",
+      "resolveHint": "智能体没有再响应。请检查它的修改，然后说明任务的结果。"
     },
     "chat": {
       "menuItem": "Blackboard",
@@ -308,6 +317,89 @@
       "openBlackboard": "打开 Blackboard",
       "attach": "在此工作区工作",
       "detach": "停止在此工作区工作"
+    },
+    "messages": {
+      "tab": "聊天",
+      "older": "更早的消息",
+      "empty": "还没有消息。给工作区留言，或让 @jiuwen 帮忙。",
+      "placeholder": "输入消息；用 @ 提及成员或你的智能体",
+      "send": "发送",
+      "readOnly": "查看者可以阅读聊天，但不能发言。",
+      "openThread": "打开讨论",
+      "answered": "回答：{{answer}}",
+      "proposed": "建议的回答：{{answer}}"
+    },
+    "comments": {
+      "tab": "评论",
+      "add": "评论",
+      "addShortcut": "评论选中的文字（Ctrl+M）",
+      "noDoc": "打开一个文档以查看它的评论。",
+      "placeholder": "写评论；@jiuwen 让你的智能体处理这段内容",
+      "post": "评论",
+      "empty": "还没有评论。在文档中选中文字，然后点“评论”，或按 Ctrl+M。",
+      "emptyReadOnly": "这个文档还没有评论。",
+      "detached": "已脱离",
+      "detachedHint": "这些讨论针对的内容已经不在了，或者相同的文字现在出现了不止一次。",
+      "showResolved": "显示已解决的讨论",
+      "drifted": "这段内容已改变",
+      "save": "保存",
+      "reply": "回复",
+      "replyPlaceholder": "回复；@jiuwen 让你的智能体处理这段内容",
+      "reopen": "重新打开",
+      "resolve": "解决",
+      "edited": "（已编辑）",
+      "edit": "编辑",
+      "tooLong": "选中的文字太长，无法评论（超过 100,000 个字符）",
+      "moreReplies_one": "还有 {{count}} 条回复",
+      "moreReplies_other": "还有 {{count}} 条回复"
+    },
+    "composer": {
+      "agent": "你的智能体",
+      "editorsOnly": "只有编辑者和所有者能给智能体布置任务；这条会作为普通消息发出。",
+      "wholeDocument": "允许智能体编辑整个文档",
+      "session": "会话",
+      "defaultSession": "工作区的会话"
+    },
+    "decisions": {
+      "tab": "决策",
+      "intro": "智能体继续工作前提出的问题。任何编辑者都可以回答；由布置任务的人确认答案。",
+      "empty": "还没有问题。",
+      "askedBy": "{{name}} 的智能体提问",
+      "status": {
+        "open": "待回答",
+        "proposed": "已提议答案",
+        "answered": "已回答",
+        "cancelled": "已撤回"
+      },
+      "changed": "这段内容在提问后已改变",
+      "recommended": "推荐",
+      "proposed": "{{name}} 提议：{{answer}}",
+      "answered": "已回答：{{answer}}（{{name}}）",
+      "answeredAccepted": "已回答：{{answer}}（{{name}}，由 {{accepted}} 确认）",
+      "freeText": "或者用自己的话回答",
+      "answer": "回答",
+      "propose": "提议",
+      "accept": "确认",
+      "cancel": "撤回"
+    },
+    "notices": {
+      "session_edit": "{{name}} 的智能体正在为 {{doc}} 提出修改。",
+      "agent_failed": "{{name}} 的智能体未能完成：{{reason}}。",
+      "agent_failed_plain": "{{name}} 的智能体未能完成。",
+      "agent_unknown": "{{name}} 的智能体没有再响应，任务标记为未知。",
+      "agent_cancelled": "{{name}} 的智能体已被 {{by}} 停止。",
+      "agent_stopped": "{{name}} 的智能体已被停止。",
+      "agent_forbidden": "只有编辑者和所有者能给智能体布置任务。",
+      "agent_done_silently": "{{name}} 的智能体已完成，没有回复。",
+      "answer_accepted": "{{name}} 确认了 {{answeredBy}} 的答案：{{answer}}",
+      "thread_reply": "{{name}} 的智能体在 {{doc}} 的讨论中回复：{{excerpt}}",
+      "reason": {
+        "not_picked_up": "对方的 jiuwenswarm 没有接收任务",
+        "no_result": "没有返回结果",
+        "not_an_editor": "对方已不再是编辑者",
+        "timeout": "耗时过长",
+        "already_handled": "讨论已被解决"
+      }
     }
   },
   "common": {

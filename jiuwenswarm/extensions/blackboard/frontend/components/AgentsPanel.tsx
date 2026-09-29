@@ -1,21 +1,10 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Ban, Bot, Check, ExternalLink, Link2, Unlink, X } from 'lucide-react';
+import { Ban, Bot, Check, CircleCheck, CircleX, ExternalLink, Link2, Unlink, X } from 'lucide-react';
 
-import { Button, Select, Tag, type TagVariant } from '../../../../channels/web/frontend/src/components/ui';
-import type { DocView, MandateStatus, MandateView, SessionAttachmentView } from '../types';
-
-const STATUS_VARIANT: Record<MandateStatus, TagVariant> = {
-  queued: 'neutral',
-  running: 'info',
-  waiting_for_answer: 'warning',
-  done: 'success',
-  failed: 'danger',
-  cancelled: 'neutral',
-  refused: 'danger',
-  unknown: 'warning',
-};
-const ACTIVE: MandateStatus[] = ['queued', 'running', 'waiting_for_answer'];
+import { Button, Select } from '../../../../channels/web/frontend/src/components/ui';
+import type { DocView, MandateView, SessionAttachmentView } from '../types';
+import { ACTIVE, TaskTag } from './tasks';
 
 export function AgentsPanel({
   mandates,
@@ -30,6 +19,7 @@ export function AgentsPanel({
   onDetach,
   onCancel,
   onDecide,
+  onResolveUnknown,
 }: {
   mandates: MandateView[];
   sessions: SessionAttachmentView[];
@@ -43,6 +33,7 @@ export function AgentsPanel({
   onDetach: (sessionId: string) => void;
   onCancel: (mandate: MandateView) => void;
   onDecide: (mandate: MandateView, docId: string, action: 'accept' | 'reject') => void;
+  onResolveUnknown: (mandate: MandateView, status: 'done' | 'failed') => void;
 }) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
@@ -145,10 +136,13 @@ export function AgentsPanel({
                     <Bot size={13} aria-hidden="true" />
                     {t('blackboard.agents.agentOf', { name: m.requester_name ?? m.requester_id })}
                   </span>
-                  <Tag variant={STATUS_VARIANT[m.status]} data-testid="blackboard-mandate-status" data-variant={m.status}>
-                    {t(`blackboard.agents.status.${m.status}`)}
-                  </Tag>
+                  <span data-testid="blackboard-mandate-status" data-variant={m.status}>
+                    <TaskTag mandate={m} />
+                  </span>
                 </div>
+                <p className="bb-mandate__origin bb-muted" data-testid="blackboard-mandate-origin" data-variant={m.origin}>
+                  {t(`blackboard.agents.origin.${m.origin}`)}
+                </p>
                 <p className="bb-mandate__instruction">{m.instruction}</p>
                 <p className="bb-muted">
                   {t('blackboard.agents.changes', { count: applied.reduce((n, r) => n + r.suggestion_ids.length, 0) })}
@@ -181,6 +175,30 @@ export function AgentsPanel({
                         </span>
                       ))
                     : null}
+                  {m.status === 'unknown' && canEdit ? (
+                    <span className="bb-inline">
+                      <Button
+                        size="sm"
+                        variant="quiet"
+                        icon={<CircleCheck size={13} />}
+                        title={t('blackboard.agents.resolveHint')}
+                        data-testid="blackboard-mandate-resolve-done-btn"
+                        onClick={() => onResolveUnknown(m, 'done')}
+                      >
+                        {t('blackboard.agents.resolveDone')}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="quiet"
+                        icon={<CircleX size={13} />}
+                        title={t('blackboard.agents.resolveHint')}
+                        data-testid="blackboard-mandate-resolve-failed-btn"
+                        onClick={() => onResolveUnknown(m, 'failed')}
+                      >
+                        {t('blackboard.agents.resolveFailed')}
+                      </Button>
+                    </span>
+                  ) : null}
                   {active && (canEdit || m.requester_id === meId) ? (
                     <Button size="sm" variant="quiet" icon={<Ban size={13} />} data-testid="blackboard-mandate-cancel-btn" onClick={() => onCancel(m)}>
                       {t('blackboard.agents.cancel')}

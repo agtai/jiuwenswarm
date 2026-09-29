@@ -236,6 +236,11 @@ class Mandate:
     started_at: str | None
     finished_at: str | None
     last_activity_at: str | None
+    # A dispatched mandate's current turn (comment and chat origins).
+    dispatched_at: str | None = None
+    claimed_at: str | None = None
+    turn_id: str | None = None
+    answer: dict[str, Any] | None = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Mandate":
@@ -257,6 +262,10 @@ class Mandate:
             started_at=row["started_at"],
             finished_at=row["finished_at"],
             last_activity_at=row["last_activity_at"],
+            dispatched_at=row["dispatched_at"],
+            claimed_at=row["claimed_at"],
+            turn_id=row["turn_id"],
+            answer=_json(row["answer"], None),
         )
 
     def to_dict(self, requester_name: str | None = None) -> dict[str, Any]:
@@ -275,6 +284,10 @@ class Mandate:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "last_activity_at": self.last_activity_at,
+            "origin_ref": self.origin_ref,
+            "reply_target": self.reply_target,
+            "turn_count": self.turn_count,
+            "claimed_at": self.claimed_at,
         }
 
 
@@ -324,4 +337,213 @@ class Receipt:
             "error": self.error,
             "created_at": self.created_at,
             "applied_at": self.applied_at,
+        }
+
+
+@dataclass(frozen=True)
+class Thread:
+    id: str
+    workspace_id: str
+    doc_id: str
+    anchor: dict[str, Any]
+    created_by: str
+    created_at: str
+    resolved_at: str | None
+    resolved_by: str | None
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> "Thread":
+        return cls(
+            id=row["id"],
+            workspace_id=row["workspace_id"],
+            doc_id=row["doc_id"],
+            anchor=_json(row["anchor"], {}),
+            created_by=row["created_by"],
+            created_at=row["created_at"],
+            resolved_at=row["resolved_at"],
+            resolved_by=row["resolved_by"],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "workspace_id": self.workspace_id,
+            "doc_id": self.doc_id,
+            "anchor": self.anchor,
+            "created_by": self.created_by,
+            "created_at": self.created_at,
+            "resolved_at": self.resolved_at,
+            "resolved_by": self.resolved_by,
+        }
+
+
+@dataclass(frozen=True)
+class Comment:
+    id: str
+    thread_id: str
+    author_id: str
+    author_kind: str
+    body: str
+    mentions: list[dict[str, str]]
+    scope_switch: bool
+    mandate_id: str | None
+    decision_id: str | None
+    created_at: str
+    edited_at: str | None
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> "Comment":
+        return cls(
+            id=row["id"],
+            thread_id=row["thread_id"],
+            author_id=row["author_id"],
+            author_kind=row["author_kind"],
+            body=row["body"],
+            mentions=_json(row["mentions"], []),
+            scope_switch=bool(row["scope_switch"]),
+            mandate_id=row["mandate_id"],
+            decision_id=row["decision_id"],
+            created_at=row["created_at"],
+            edited_at=row["edited_at"],
+        )
+
+    def to_dict(self, author_name: str | None = None) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "thread_id": self.thread_id,
+            "author_id": self.author_id,
+            "author_kind": self.author_kind,
+            "author_name": author_name,
+            "body": self.body,
+            "mentions": self.mentions,
+            "scope_switch": self.scope_switch,
+            "mandate_id": self.mandate_id,
+            "decision_id": self.decision_id,
+            "created_at": self.created_at,
+            "edited_at": self.edited_at,
+        }
+
+
+@dataclass(frozen=True)
+class ChatMessage:
+    id: str
+    workspace_id: str
+    author_id: str
+    author_kind: str
+    kind: str
+    body: str
+    mentions: list[dict[str, str]]
+    mandate_id: str | None
+    decision_id: str | None
+    created_at: str
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> "ChatMessage":
+        return cls(
+            id=row["id"],
+            workspace_id=row["workspace_id"],
+            author_id=row["author_id"],
+            author_kind=row["author_kind"],
+            kind=row["kind"],
+            body=row["body"],
+            mentions=_json(row["mentions"], []),
+            mandate_id=row["mandate_id"],
+            decision_id=row["decision_id"],
+            created_at=row["created_at"],
+        )
+
+    def to_dict(self, author_name: str | None = None) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "workspace_id": self.workspace_id,
+            "author_id": self.author_id,
+            "author_kind": self.author_kind,
+            "author_name": author_name,
+            "kind": self.kind,
+            "body": self.body,
+            "mentions": self.mentions,
+            "mandate_id": self.mandate_id,
+            "decision_id": self.decision_id,
+            "created_at": self.created_at,
+        }
+
+
+@dataclass(frozen=True)
+class Decision:
+    id: str
+    workspace_id: str
+    mandate_id: str
+    requester_id: str
+    doc_id: str | None
+    block_id: str | None
+    block_digest: str | None
+    quote: str | None
+    question: str
+    options: list[dict[str, str]]
+    recommended: int | None
+    status: str
+    answer: dict[str, Any] | None
+    answered_by: str | None
+    answered_at: str | None
+    accepted_by: str | None
+    accepted_at: str | None
+    created_at: str
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> "Decision":
+        return cls(
+            id=row["id"],
+            workspace_id=row["workspace_id"],
+            mandate_id=row["mandate_id"],
+            requester_id=row["requester_id"],
+            doc_id=row["doc_id"],
+            block_id=row["block_id"],
+            block_digest=row["block_digest"],
+            quote=row["quote"],
+            question=row["question"],
+            options=_json(row["options"], []),
+            recommended=row["recommended"],
+            status=row["status"],
+            answer=_json(row["answer"], None),
+            answered_by=row["answered_by"],
+            answered_at=row["answered_at"],
+            accepted_by=row["accepted_by"],
+            accepted_at=row["accepted_at"],
+            created_at=row["created_at"],
+        )
+
+    def answer_label(self) -> str:
+        """The chosen option's label, or the free text."""
+        if not self.answer:
+            return ""
+        option = self.answer.get("option")
+        if isinstance(option, int) and 0 <= option < len(self.options):
+            return self.options[option]["label"]
+        return str(self.answer.get("text") or "")
+
+    def to_dict(self, names: dict[str, str] | None = None) -> dict[str, Any]:
+        names = names or {}
+        return {
+            "id": self.id,
+            "workspace_id": self.workspace_id,
+            "mandate_id": self.mandate_id,
+            "requester_id": self.requester_id,
+            "requester_name": names.get(self.requester_id),
+            "doc_id": self.doc_id,
+            "block_id": self.block_id,
+            "block_digest": self.block_digest,
+            "quote": self.quote,
+            "question": self.question,
+            "options": self.options,
+            "recommended": self.recommended,
+            "status": self.status,
+            "answer": self.answer,
+            "answer_label": self.answer_label(),
+            "answered_by": self.answered_by,
+            "answered_by_name": names.get(self.answered_by or ""),
+            "answered_at": self.answered_at,
+            "accepted_by": self.accepted_by,
+            "accepted_by_name": names.get(self.accepted_by or ""),
+            "accepted_at": self.accepted_at,
+            "created_at": self.created_at,
         }

@@ -137,6 +137,88 @@ MIGRATIONS: list[tuple[int, tuple[str, ...]]] = [
             "CREATE INDEX doc_locks_mandate ON doc_locks(mandate_id)",
         ),
     ),
+    (
+        4,
+        (
+            # Milestone 5: comment threads, the workspace chat, decisions, and the columns a
+            # dispatched mandate needs to track its turns.
+            # A thread is anchored to a passage of one document; `anchor` is JSON (see host/api/comments.py).
+            """CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                doc_id TEXT NOT NULL REFERENCES docs(id) ON DELETE CASCADE,
+                anchor TEXT NOT NULL,
+                created_by TEXT NOT NULL REFERENCES users(id),
+                created_at TEXT NOT NULL,
+                resolved_at TEXT,
+                resolved_by TEXT
+            )""",
+            "CREATE INDEX threads_doc ON threads(doc_id, created_at)",
+            # An agent's comment has the requester as its author and kind 'agent'; the host writes 'system' ones.
+            """CREATE TABLE comments (
+                id TEXT PRIMARY KEY,
+                thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+                author_id TEXT NOT NULL,
+                author_kind TEXT NOT NULL CHECK (author_kind IN ('person', 'agent', 'system')),
+                body TEXT NOT NULL,
+                mentions TEXT NOT NULL DEFAULT '[]',
+                scope_switch INTEGER NOT NULL DEFAULT 0,
+                mandate_id TEXT,
+                decision_id TEXT,
+                created_at TEXT NOT NULL,
+                edited_at TEXT
+            )""",
+            "CREATE INDEX comments_thread ON comments(thread_id, created_at)",
+            """CREATE TABLE chat_messages (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                author_id TEXT NOT NULL,
+                author_kind TEXT NOT NULL CHECK (author_kind IN ('person', 'agent', 'system')),
+                kind TEXT NOT NULL CHECK (kind IN ('message', 'notice', 'summary', 'question', 'answer')),
+                body TEXT NOT NULL,
+                mentions TEXT NOT NULL DEFAULT '[]',
+                mandate_id TEXT,
+                decision_id TEXT,
+                created_at TEXT NOT NULL
+            )""",
+            "CREATE INDEX chat_messages_workspace ON chat_messages(workspace_id, created_at)",
+            # Where the chat context of the next agent turn starts: the position (rowid) of the
+            # newest message an agent turn has been shown.
+            """CREATE TABLE workspace_chat_state (
+                workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+                seen_up_to INTEGER NOT NULL DEFAULT 0
+            )""",
+            """CREATE TABLE decisions (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                mandate_id TEXT NOT NULL REFERENCES mandates(id) ON DELETE CASCADE,
+                requester_id TEXT NOT NULL,
+                doc_id TEXT,
+                block_id TEXT,
+                block_digest TEXT,
+                quote TEXT,
+                question TEXT NOT NULL,
+                options TEXT NOT NULL,
+                recommended INTEGER,
+                status TEXT NOT NULL CHECK (status IN ('open', 'proposed', 'answered', 'cancelled')),
+                answer TEXT,
+                answered_by TEXT,
+                answered_at TEXT,
+                accepted_by TEXT,
+                accepted_at TEXT,
+                created_at TEXT NOT NULL
+            )""",
+            "CREATE INDEX decisions_workspace ON decisions(workspace_id, created_at)",
+            "CREATE INDEX decisions_mandate ON decisions(mandate_id)",
+            # A dispatched mandate's current turn: offered to the requester's jiuwenswarm, picked up, and
+            # the accepted answer the next turn starts with.
+            "ALTER TABLE mandates ADD COLUMN dispatched_at TEXT",
+            "ALTER TABLE mandates ADD COLUMN claimed_at TEXT",
+            "ALTER TABLE mandates ADD COLUMN turn_id TEXT",
+            "ALTER TABLE mandates ADD COLUMN answer TEXT",
+            "CREATE INDEX mandates_requester ON mandates(requester_id, status)",
+        ),
+    ),
 ]
 
 LATEST_VERSION = MIGRATIONS[-1][0]

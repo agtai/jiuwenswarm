@@ -42,6 +42,22 @@ MANDATE_CANCEL = "blackboard.mandate.cancel"
 SUGGESTION_LIST = "blackboard.suggestion.list"
 SUGGESTION_DECIDE = "blackboard.suggestion.decide"
 
+# Host methods (milestone 5): comments, the workspace chat, decisions.
+COMMENT_CREATE = "blackboard.comment.create"
+COMMENT_REPLY = "blackboard.comment.reply"
+COMMENT_EDIT = "blackboard.comment.edit"
+COMMENT_RESOLVE = "blackboard.comment.resolve"
+COMMENT_REOPEN = "blackboard.comment.reopen"
+COMMENT_LIST = "blackboard.comment.list"
+CHAT_POST = "blackboard.chat.post"
+CHAT_LIST = "blackboard.chat.list"
+DECISION_LIST = "blackboard.decision.list"
+DECISION_GET = "blackboard.decision.get"
+DECISION_ANSWER = "blackboard.decision.answer"
+DECISION_ACCEPT = "blackboard.decision.accept"
+DECISION_CANCEL = "blackboard.decision.cancel"
+MANDATE_RESOLVE_UNKNOWN = "blackboard.mandate.resolve_unknown"
+
 HOST_METHODS: tuple[str, ...] = (
     ME,
     ME_SET_NAME,
@@ -74,12 +90,32 @@ HOST_METHODS: tuple[str, ...] = (
     MANDATE_CANCEL,
     SUGGESTION_LIST,
     SUGGESTION_DECIDE,
+    COMMENT_CREATE,
+    COMMENT_REPLY,
+    COMMENT_EDIT,
+    COMMENT_RESOLVE,
+    COMMENT_REOPEN,
+    COMMENT_LIST,
+    CHAT_POST,
+    CHAT_LIST,
+    DECISION_LIST,
+    DECISION_GET,
+    DECISION_ANSWER,
+    DECISION_ACCEPT,
+    DECISION_CANCEL,
+    MANDATE_RESOLVE_UNKNOWN,
 )
 
-# Methods a member's agent calls on the host with the member's token (the toolkit in the
-# AgentServer); they are not proxied for browsers.
+# Methods a member's agent and dispatcher call on the host with the member's token (the toolkit
+# in the AgentServer, the dispatcher in the Gateway); they are not proxied for browsers.
 EDIT = "blackboard.edit"
-AGENT_METHODS: tuple[str, ...] = (EDIT,)
+# The agent's question to the workspace (blackboard_ask).
+DECISION_CREATE = "blackboard.decision.create"
+# The dispatcher: picking up an offered turn, reporting its end, and the turns offered while offline.
+MANDATE_CLAIM = "blackboard.mandate.claim"
+MANDATE_REPORT = "blackboard.mandate.report"
+MANDATE_PENDING = "blackboard.mandate.pending"
+AGENT_METHODS: tuple[str, ...] = (EDIT, DECISION_CREATE, MANDATE_CLAIM, MANDATE_REPORT, MANDATE_PENDING)
 
 # Methods the host serves without a member token.
 NO_AUTH_METHODS = frozenset({INVITE_ACCEPT})
@@ -109,6 +145,13 @@ EV_DOC_UPDATED = "blackboard.doc.updated"
 EV_REFERENCE_UPDATED = "blackboard.reference.updated"
 EV_MANDATE_UPDATED = "blackboard.mandate.updated"
 EV_SUGGESTIONS_CHANGED = "blackboard.doc.suggestions_changed"
+EV_THREAD_UPDATED = "blackboard.thread.updated"
+EV_CHAT_MESSAGE = "blackboard.chat.message"
+EV_DECISION_UPDATED = "blackboard.decision.updated"
+# To the requester's own jiuwenswarm only: run a turn of a mandate, or stop it. The client part
+# handles them and does not forward them to browsers.
+EV_MANDATE_RUN = "blackboard.mandate.run"
+EV_MANDATE_STOP = "blackboard.mandate.stop"
 # Events of the client part.
 EV_HOSTS_UPDATED = "blackboard.hosts.updated"
 EV_HOST_STATUS = "blackboard.host.status_changed"
@@ -125,6 +168,11 @@ HOST_EVENTS = frozenset(
         EV_REFERENCE_UPDATED,
         EV_MANDATE_UPDATED,
         EV_SUGGESTIONS_CHANGED,
+        EV_THREAD_UPDATED,
+        EV_CHAT_MESSAGE,
+        EV_DECISION_UPDATED,
+        EV_MANDATE_RUN,
+        EV_MANDATE_STOP,
     }
 )
 

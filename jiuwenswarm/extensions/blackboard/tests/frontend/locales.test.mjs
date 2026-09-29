@@ -78,6 +78,16 @@ test('the keys built at runtime exist for every value they take', () => {
     assert.ok(en.has(`blackboard.agents.status.${status}`), status);
   }
   for (const action of ['accept', 'reject']) assert.ok(has(en, `blackboard.agents.decided.${action}`), action);
+  for (const origin of ['comment', 'workspace_chat', 'workspace_session']) assert.ok(en.has(`blackboard.agents.origin.${origin}`), origin);
+  for (const status of ['open', 'proposed', 'answered', 'cancelled']) assert.ok(en.has(`blackboard.decisions.status.${status}`), status);
+  const notices = ['session_edit', 'agent_failed', 'agent_failed_plain', 'agent_unknown', 'agent_cancelled', 'agent_stopped'];
+  for (const code of [...notices, 'agent_forbidden', 'agent_done_silently', 'answer_accepted', 'thread_reply']) {
+    assert.ok(en.has(`blackboard.notices.${code}`), code);
+  }
+  for (const reason of ['not_picked_up', 'no_result', 'not_an_editor', 'timeout', 'already_handled']) {
+    assert.ok(en.has(`blackboard.notices.reason.${reason}`), reason);
+  }
+  for (const tab of ['messages', 'comments', 'decisions', 'agents', 'references', 'members']) assert.ok(en.has(`blackboard.${tab}.tab`), tab);
   for (const reason of ['not_built', 'node_missing', 'node_too_old', 'start_failed', 'exited', 'not_configured', 'stopped', 'starting']) {
     assert.ok(en.has(`blackboard.docservice.${reason}`), reason);
   }

@@ -151,15 +151,18 @@ class HostRuntime:
 
     @staticmethod
     async def _sweep(ctx: HostContext) -> None:
-        """End workspace-session mandates that have gone quiet."""
+        """End workspace-session mandates that have gone quiet, and dispatched turns that nobody picked
+        up or that never reported."""
+        from jiuwenswarm.extensions.blackboard.host.api.dispatch import sweep_dispatched
         from jiuwenswarm.extensions.blackboard.host.api.mandates import sweep_idle_mandates
 
         while True:
             await asyncio.sleep(SWEEP_INTERVAL_S)
             try:
                 await sweep_idle_mandates(ctx)
+                await sweep_dispatched(ctx)
             except Exception:  # noqa: BLE001 - the next round tries again
-                logger.exception("blackboard: sweeping idle mandates failed")
+                logger.exception("blackboard: sweeping mandates failed")
 
     async def restart_docs(self) -> None:
         if self.docs is not None:

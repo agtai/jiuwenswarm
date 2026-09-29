@@ -54,6 +54,16 @@ function fakeWorld() {
         return { suggestions: world.suggestions ?? [] };
       case 'blackboard.doc.list':
         return { docs: world.docs?.[params.workspace_id] ?? [], docservice: null };
+      case 'blackboard.chat.list':
+        return { messages: structuredClone(world.chat ?? []), has_more: false };
+      case 'blackboard.chat.post':
+        return { message: { id: 'cm_new', workspace_id: params.workspace_id, kind: 'message', author_kind: 'person', body: params.body } };
+      case 'blackboard.comment.list':
+        return { threads: structuredClone(world.threads?.[params.doc_id] ?? []) };
+      case 'blackboard.comment.create':
+        return { thread: { id: 't_new', doc_id: params.doc_id } };
+      case 'blackboard.decision.list':
+        return { decisions: structuredClone(world.decisions ?? []) };
       case 'blackboard.session.attach':
         return { session: { session_id: params.session_id, host: params.host, workspace_id: params.workspace_id, title: 'T' } };
       default:
@@ -80,7 +90,7 @@ test('start loads the hosts, picks the default host and its workspaces', async (
   assert.equal(s.hostId, 'h1');
   assert.deepEqual(s.workspaces.map((w) => w.id), ['ws1', 'ws2']);
   assert.equal(s.workspaceId, null);
-  assert.equal(f.handlers.size, 11);
+  assert.equal(f.handlers.size, 14);
   c.stop();
   assert.equal(f.handlers.size, 0);
 });
@@ -291,4 +301,103 @@ test('the chat lists workspaces a person can edit and adds or takes them from a 
   const left = await toggleAttachment(f.rpc, 's1', choices[0], added);
   assert.deepEqual(left.map((a) => a.workspace_id), ['ws2']);
   assert.deepEqual(f.calls.at(-1), ['blackboard.session.detach', { host: 'h1', workspace_id: 'ws1', session_id: 's1' }]);
+});
+
+function thread(id, position, extra = {}) {
+  return { id, position, resolved_at: null, created_at: '2026-01-01', anchor: { quote: id, status: 'ok' }, comments: [], ...extra };
+}
+
+test('the chat loads with the workspace, and pushed messages join it once', async () => {
+  const f = fakeWorld();
+  f.world.chat = [{ id: 'cm1', workspace_id: 'ws1', kind: 'message', body: 'hello' }];
+  const c = new BlackboardController(f.rpc, f.subscribe);
+  await c.start();
+  await c.selectWorkspace('ws1');
+  assert.deepEqual(c.getState().chat.map((m) => m.id), ['cm1']);
+
+  const pushed = { id: 'cm2', workspace_id: 'ws1', kind: 'message', body: 'second' };
+  f.emit('blackboard.chat.message', { host: 'h1', workspace_id: 'ws1', message: pushed });
+  f.emit('blackboard.chat.message', { host: 'h1', workspace_id: 'ws1', message: { ...pushed, mandate_id: 'm1' } });
+  f.emit('blackboard.chat.message', { host: 'h1', workspace_id: 'ws2', message: { ...pushed, id: 'cm9', workspace_id: 'ws2' } });
+  await flush();
+  assert.deepEqual(c.getState().chat.map((m) => [m.id, m.mandate_id ?? null]), [['cm1', null], ['cm2', 'm1']]);
+
+  f.world.members.ws1 = [{ user_id: 'u2', display_name: 'Bob' }];
+  await c.refreshMembers();
+  await c.postChat('@jiuwen ask @Bob', 'sess-9');
+  const posted = f.calls.find(([method]) => method === 'blackboard.chat.post')[1];
+  assert.deepEqual(posted, {
+    host: 'h1',
+    workspace_id: 'ws1',
+    body: '@jiuwen ask @Bob',
+    mentions: [{ kind: 'agent' }, { kind: 'user', id: 'u2' }],
+    session_id: 'sess-9',
+  });
+});
+
+test('comments follow the open document; a selection starts a comment in the margin', async () => {
+  const f = fakeWorld();
+  f.world.docs = { ws1: [{ id: 'd1', title: 'One' }, { id: 'd2', title: 'Two' }] };
+  f.world.threads = { d1: [thread('late', 50), thread('early', 2)], d2: [thread('other', 1)] };
+  const c = new BlackboardController(f.rpc, f.subscribe);
+  await c.start();
+  await c.selectWorkspace('ws1');
+  await flush();
+  assert.deepEqual(c.getState().threads.map((t) => t.id), ['early', 'late']);
+
+  c.selectDoc('d2');
+  await flush();
+  assert.deepEqual(c.getState().threads.map((t) => t.id), ['other']);
+
+  const anchor = { block_id: 'b1', block_to: 'b1', digest: null, start: 'AQ==', end: 'Ag==', quote: 'words', offset: 0, length: 5 };
+  c.startComment(anchor);
+  assert.deepEqual([c.getState().rail, c.getState().draftAnchor], ['members', anchor]);
+  await c.createComment('@jiuwen tighten', { wholeDocument: true });
+  const created = f.calls.find(([method]) => method === 'blackboard.comment.create')[1];
+  assert.deepEqual(created, {
+    host: 'h1',
+    doc_id: 'd2',
+    anchor,
+    body: '@jiuwen tighten',
+    mentions: [{ kind: 'agent' }],
+    scope_switch: true,
+  });
+  assert.deepEqual([c.getState().draftAnchor, c.getState().activeThread], [null, 't_new']);
+
+  // Another document's thread changes leave this list alone; this document's reload it.
+  const before = f.calls.filter(([method]) => method === 'blackboard.comment.list').length;
+  f.emit('blackboard.thread.updated', { host: 'h1', workspace_id: 'ws1', doc_id: 'd1', thread_id: 'late' });
+  await flush();
+  assert.equal(f.calls.filter(([method]) => method === 'blackboard.comment.list').length, before);
+  f.world.threads.d2.push(thread('added', 5));
+  f.emit('blackboard.thread.updated', { host: 'h1', workspace_id: 'ws1', doc_id: 'd2', thread_id: 'added' });
+  await flush();
+  await flush();
+  assert.deepEqual(c.getState().threads.map((t) => t.id), ['other', 'added']);
+});
+
+test('decision pushes reload the decisions', async () => {
+  const f = fakeWorld();
+  const c = new BlackboardController(f.rpc, f.subscribe);
+  await c.start();
+  await c.selectWorkspace('ws1');
+  f.world.decisions = [{ id: 'dc1', status: 'open' }];
+  f.emit('blackboard.decision.updated', { host: 'h1', workspace_id: 'ws1', decision_id: 'dc1', status: 'open' });
+  await flush();
+  await flush();
+  assert.deepEqual(c.getState().decisions.map((d) => d.id), ['dc1']);
+});
+
+test('opening a thread keeps the rail, unless the margin cannot show that thread', async () => {
+  const f = fakeWorld();
+  f.world.docs = { ws1: [{ id: 'd1', title: 'One' }] };
+  f.world.threads = { d1: [thread('here', 1), thread('gone', 2, { anchor: { quote: 'gone', status: 'orphaned' } })] };
+  const c = new BlackboardController(f.rpc, f.subscribe);
+  await c.start();
+  await c.selectWorkspace('ws1');
+  await flush();
+  c.openThread('here');
+  assert.deepEqual([c.getState().activeThread, c.getState().rail], ['here', 'members']);
+  c.openThread('gone');
+  assert.deepEqual([c.getState().activeThread, c.getState().rail], ['gone', 'comments']);
 });

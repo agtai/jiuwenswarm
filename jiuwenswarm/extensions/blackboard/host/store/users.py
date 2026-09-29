@@ -62,3 +62,12 @@ def set_status(conn: sqlite3.Connection, user_id: str, status: str) -> None:
 
 def touch(conn: sqlite3.Connection, user_id: str) -> None:
     conn.execute("UPDATE users SET last_seen_at = ? WHERE id = ?", (now_iso(), user_id))
+
+
+def names(conn: sqlite3.Connection, user_ids: set[str] | list[str]) -> dict[str, str]:
+    """Display names by user id, for the ids that exist."""
+    ids = sorted({i for i in user_ids if i})
+    if not ids:
+        return {}
+    rows = conn.execute(f"SELECT id, display_name FROM users WHERE id IN ({','.join('?' * len(ids))})", ids).fetchall()
+    return {r["id"]: r["display_name"] for r in rows}

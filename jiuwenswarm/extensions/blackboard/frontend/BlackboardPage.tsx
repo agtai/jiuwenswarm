@@ -1,14 +1,17 @@
 import { useCallback, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Link2, Server, Users } from 'lucide-react';
+import { Bot, CircleHelp, Link2, MessageSquare, MessagesSquare, Paperclip, Server, Users } from 'lucide-react';
 
 import { Button, Tabs, toast } from '../../../channels/web/frontend/src/components/ui';
 import { FormDialog } from '../../../channels/web/frontend/src/components/form';
 import { canEdit, currentDoc, currentHost, currentWorkspace, type RailTab } from './controller';
 import { describeError } from './errors';
-import type { DocView, InviteView, MandateView, MemberView, ReferenceView } from './types';
+import type { AnchorDraft, DocView, InviteView, MandateView, MemberView, ReferenceView, Role } from './types';
 import { useController } from './useController';
 import { AgentsPanel } from './components/AgentsPanel';
+import { ChatPanel } from './components/ChatPanel';
+import { CommentDraft, CommentsPanel, ThreadCard, type CommentsActions, type ThreadProps } from './components/CommentsPanel';
+import { DecisionsPanel, type DecisionActions } from './components/Decisions';
 import { MembersPanel } from './components/MembersPanel';
 import { ReferencePreview, ReferencesPanel } from './components/ReferencesPanel';
 import { Sidebar } from './components/Sidebar';
@@ -44,6 +47,29 @@ type Confirm = {
 };
 
 type Open = 'join' | 'new' | 'rename' | 'invite' | 'settings' | 'newDoc' | null;
+
+const RAIL_ICONS: Record<RailTab, typeof Users> = {
+  chat: MessageSquare,
+  comments: MessagesSquare,
+  decisions: CircleHelp,
+  agents: Bot,
+  references: Paperclip,
+  members: Users,
+};
+const RAIL_ORDER: RailTab[] = ['chat', 'comments', 'decisions', 'agents', 'references', 'members'];
+const RAIL_LABELS: Record<RailTab, string> = {
+  chat: 'blackboard.messages.tab',
+  comments: 'blackboard.comments.tab',
+  decisions: 'blackboard.decisions.tab',
+  agents: 'blackboard.agents.tab',
+  references: 'blackboard.references.tab',
+  members: 'blackboard.members.tab',
+};
+
+// Commenters and above may comment and post in the chat, unless the workspace is archived.
+function canTalk(role: Role | undefined, archived: boolean): boolean {
+  return !archived && (role === 'owner' || role === 'editor' || role === 'commenter');
+}
 type DocDialog = { kind: 'import' | 'markdown'; doc: DocView } | null;
 
 export function BlackboardPage() {
@@ -63,6 +89,18 @@ export function BlackboardPage() {
   const me = state.me ? { id: state.me.user_id, name: state.me.display_name } : null;
   const fetchToken = useCallback((docId: string) => controller.docToken(docId), [controller, state.hostId]);
   const instructions = useMemo(() => new Map(state.mandates.map((m) => [m.id, m.instruction])), [state.mandates]);
+  const mandatesById = useMemo(() => new Map(state.mandates.map((m) => [m.id, m])), [state.mandates]);
+  const decisionsById = useMemo(() => new Map(state.decisions.map((d) => [d.id, d])), [state.decisions]);
+  const docTitles = useMemo(() => new Map(state.docs.map((d) => [d.id, d.title])), [state.docs]);
+  const talk = canTalk(workspace?.role, Boolean(workspace?.archived));
+  const commentable = talk && Boolean(doc && !doc.archived);
+  const threadAnchors = useMemo(
+    () =>
+      state.threads
+        .filter((th) => !th.resolved_at)
+        .map((th) => ({ id: th.id, start: th.anchor.start, end: th.anchor.end, quote: th.anchor.quote, status: th.anchor.status })),
+    [state.threads],
+  );
   const suggestionActions = useMemo(
     () => ({
       decide:
@@ -217,6 +255,63 @@ export function BlackboardPage() {
 
   const reachable = host?.is_self ? Boolean(state.hostStatus?.reachable_from_other_machines) : true;
 
+  const decisionActions: DecisionActions = {
+    answer: editable ? (id, answer) => controller.answerDecision(id, answer).catch((error) => report(error)) : null,
+    accept: (id) => controller.acceptDecision(id).catch((error) => report(error)),
+    cancel: (id) => controller.cancelDecision(id).catch((error) => report(error)),
+    openDoc: (docId) => controller.selectDoc(docId),
+  };
+
+  // Errors reach the person; the composers keep their text by seeing the failure.
+  const rethrow = (error: unknown): never => {
+    report(error);
+    throw error;
+  };
+
+  const threadActions: CommentsActions = {
+    create: ({ body, wholeDocument, sessionId }) =>
+      controller.createComment(body, { wholeDocument, sessionId }).then(() => undefined, rethrow),
+    cancelDraft: () => controller.cancelComment(),
+    reply: (threadId, { body, wholeDocument, sessionId }) =>
+      controller.replyThread(threadId, body, { wholeDocument, sessionId }).catch(rethrow),
+    edit: (commentId, body) => controller.editComment(commentId, body).catch(rethrow),
+    setResolved: (threadId, resolved) => controller.setThreadResolved(threadId, resolved).catch(report),
+    open: (threadId) => controller.openThread(threadId),
+    showResolved: (show) => controller.setShowResolved(show),
+  };
+
+  const threadProps: ThreadProps = {
+    members: state.members,
+    meId: state.me?.user_id ?? null,
+    canComment: commentable,
+    canTask: editable,
+    sessions: state.sessions,
+    mandates: mandatesById,
+    decisions: decisionsById,
+    docTitles,
+    decisionActions,
+    actions: threadActions,
+  };
+
+  // Open threads and the comment being written, as cards in the editor's margin.
+  const commentActions = {
+    threads: threadAnchors,
+    active: state.activeThread,
+    draft: state.draftAnchor,
+    onOpenThread: (id: string | null) => controller.openThread(id),
+    onComment: commentable ? (anchor: AnchorDraft) => controller.startComment(anchor) : null,
+    renderThread: (id: string, active: boolean) => {
+      const thread = state.threads.find((th) => th.id === id);
+      return thread ? <ThreadCard thread={thread} active={active} variant="margin" {...threadProps} /> : null;
+    },
+    renderDraft: () => <CommentDraft {...threadProps} />,
+  };
+
+  const openThreadFromChat = (docId: string, threadId: string) => {
+    controller.selectDoc(docId);
+    controller.openThread(threadId);
+  };
+
   return (
     <div className="bb-page" data-testid="blackboard-page">
       {state.loaded && state.hosts.length === 0 ? (
@@ -263,6 +358,7 @@ export function BlackboardPage() {
                 fetchToken={fetchToken}
                 docActions={docActions}
                 suggestionActions={suggestionActions}
+                commentActions={commentActions}
                 onNewDoc={() => setOpen('newDoc')}
                 onRename={() => setOpen('rename')}
                 onArchive={() => void controller.setArchived(true).catch(report)}
@@ -276,19 +372,78 @@ export function BlackboardPage() {
             )}
           </main>
           {workspace ? (
-            <aside className="bb-rail" data-testid="blackboard-rail">
+            <aside className={`bb-rail is-${railTab}`} data-testid="blackboard-rail">
               <Tabs<RailTab>
-                items={[
-                  { value: 'members', label: t('blackboard.members.tab'), testId: 'blackboard-rail-tab-members' },
-                  { value: 'references', label: t('blackboard.references.tab'), testId: 'blackboard-rail-tab-references' },
-                  { value: 'agents', label: t('blackboard.agents.tab'), testId: 'blackboard-rail-tab-agents' },
-                ]}
+                className="bb-rail__tabs"
+                items={RAIL_ORDER.map((tab) => {
+                  const Icon = RAIL_ICONS[tab];
+                  const count =
+                    tab === 'decisions' ? state.decisions.filter((d) => d.status === 'open' || d.status === 'proposed').length : 0;
+                  return {
+                    value: tab,
+                    label: (
+                      <span className="bb-rail__tab" title={t(RAIL_LABELS[tab])} aria-label={t(RAIL_LABELS[tab])}>
+                        <Icon size={16} aria-hidden="true" />
+                        {count > 0 ? (
+                          <span className="bb-rail__badge" data-testid="blackboard-rail-badge">
+                            {count}
+                          </span>
+                        ) : null}
+                      </span>
+                    ),
+                    testId: `blackboard-rail-tab-${tab}`,
+                  };
+                })}
                 value={railTab}
                 onChange={(tab) => controller.selectRail(tab)}
                 bordered
                 wrapperTestId="blackboard-rail-tabs"
               />
-              {railTab === 'members' ? (
+              <h3 className="bb-rail__title" data-testid="blackboard-rail-title">
+                {t(RAIL_LABELS[railTab])}
+              </h3>
+              {railTab === 'chat' ? (
+                <ChatPanel
+                  messages={state.chat}
+                  hasMore={state.chatHasMore}
+                  members={state.members}
+                  meId={state.me?.user_id ?? null}
+                  canPost={talk}
+                  canTask={editable}
+                  sessions={state.sessions}
+                  mandates={mandatesById}
+                  decisions={decisionsById}
+                  docTitles={docTitles}
+                  decisionActions={decisionActions}
+                  onLoadOlder={() => controller.loadOlderChat().catch(report)}
+                  onPost={({ body, sessionId }) => controller.postChat(body, sessionId).then(() => undefined, rethrow)}
+                  onOpenThread={openThreadFromChat}
+                />
+              ) : railTab === 'comments' ? (
+                <CommentsPanel
+                  doc={doc}
+                  threads={state.threads}
+                  activeThread={state.activeThread}
+                  showResolved={state.showResolved}
+                  members={state.members}
+                  meId={state.me?.user_id ?? null}
+                  canComment={commentable}
+                  canTask={editable}
+                  sessions={state.sessions}
+                  mandates={mandatesById}
+                  decisions={decisionsById}
+                  docTitles={docTitles}
+                  decisionActions={decisionActions}
+                  actions={threadActions}
+                />
+              ) : railTab === 'decisions' ? (
+                <DecisionsPanel
+                  decisions={state.decisions}
+                  meId={state.me?.user_id ?? null}
+                  docTitles={docTitles}
+                  actions={decisionActions}
+                />
+              ) : railTab === 'members' ? (
                 <MembersPanel
                   workspace={workspace}
                   members={state.members}
@@ -315,6 +470,7 @@ export function BlackboardPage() {
                   onDetach={(sessionId) => void controller.detachSession(sessionId).catch(report)}
                   onCancel={askCancelMandate}
                   onDecide={decideRun}
+                  onResolveUnknown={(mandate, status) => void controller.resolveUnknown(mandate.id, status).catch(report)}
                 />
               ) : (
                 <ReferencesPanel

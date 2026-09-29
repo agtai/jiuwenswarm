@@ -1,9 +1,10 @@
-"""Mandates on the host (milestone 4): agents edit documents under a recorded, scoped, locked mandate
-whose every batch leaves a receipt.
+"""Mandates on the host: agents edit documents under a recorded, scoped, locked mandate whose every
+batch leaves a receipt.
 
-This milestone serves the `workspace_session` origin: a person talks to their agent in a session
-attached to the workspace, and the agent's first `blackboard.edit` in a turn begins the mandate. The
-comment and chat origins (milestone 5) reuse the records, locks and receipts.
+This module serves the `workspace_session` origin (milestone 4): a person talks to their agent in a
+session attached to the workspace, and the agent's first `blackboard.edit` in a turn begins the
+mandate. Comment and chat mandates (milestone 5, ``dispatch.py``) reuse the records, locks, receipts
+and ``blackboard.edit``.
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ def _agent_label(name: str | None) -> str:
     return f"{name}'s agent" if name else "Agent"
 
 
-async def _publish_mandate(ctx: HostContext, mandate: Mandate) -> None:
+async def publish_mandate(ctx: HostContext, mandate: Mandate) -> None:
     await ctx.hub.publish(
         p.EV_MANDATE_UPDATED,
         {"workspace_id": mandate.workspace_id, "mandate_id": mandate.id, "status": mandate.status},
@@ -55,16 +56,22 @@ async def _clear_presence(ctx: HostContext, doc_ids: list[str]) -> None:
 
 
 async def finish_mandate(ctx: HostContext, mandate_id: str, status: str, reason: str | None = None) -> Mandate:
-    """End a mandate: record the state, let go of its documents, take its caret away."""
+    """End a mandate: record the state, let go of its documents, take its caret away, and let the
+    dispatch layer stop its turn and start whoever waits for the documents."""
+    from jiuwenswarm.extensions.blackboard.host.api.dispatch import after_finish
 
-    def work(conn: sqlite3.Connection) -> tuple[Mandate, list[str]]:
+    def work(conn: sqlite3.Connection) -> tuple[Mandate, Mandate, list[str]]:
+        before = mandates.get(conn, mandate_id)
+        if before is None:
+            raise not_found("no such mandate", mandate_id=mandate_id)
         held = mandates.locked_docs(conn, mandate_id)
-        return mandates.set_status(conn, mandate_id, status, reason), held
+        return before, mandates.set_status(conn, mandate_id, status, reason), held
 
-    mandate, held = await ctx.store.transact(work)
+    before, mandate, held = await ctx.store.transact(work)
     await _clear_presence(ctx, held)
     await ctx.lock_waits.released()
-    await _publish_mandate(ctx, mandate)
+    await publish_mandate(ctx, mandate)
+    await after_finish(ctx, before, mandate, held if status != "waiting_for_answer" else [])
     return mandate
 
 
@@ -95,6 +102,7 @@ async def mandate_list(call: Call) -> dict[str, Any]:
 
     rows, receipts = await call.ctx.store.read(work)
     open_ids = await _open_suggestions(call.ctx, receipts)
+    positions = await call.ctx.store.read(lambda c: _queue_positions(c, [m for m, _ in rows]))
     return {
         "workspace_id": workspace_id,
         "mandates": [
@@ -102,10 +110,20 @@ async def mandate_list(call: Call) -> dict[str, Any]:
                 **m.to_dict(name),
                 "receipts": [r.to_dict() for r in receipts.get(m.id, [])],
                 "pending": _pending(receipts.get(m.id, []), open_ids),
+                "queue_position": positions.get(m.id),
             }
             for m, name in rows
         ],
     }
+
+
+def _queue_positions(conn: sqlite3.Connection, listed: list[Mandate]) -> dict[str, int]:
+    """For each waiting comment mandate, its place in its document's queue (1 is next)."""
+    out: dict[str, int] = {}
+    for doc_id in {str(m.scope.get("doc_id")) for m in listed if m.status == "queued"}:
+        for position, waiting in enumerate(mandates.queued_for_doc(conn, doc_id), start=1):
+            out[waiting.id] = position
+    return out
 
 
 async def _open_suggestions(ctx: HostContext, receipts: dict[str, list[Receipt]]) -> dict[str, set[str]]:
@@ -296,7 +314,7 @@ async def edit(call: Call) -> dict[str, Any]:
     for previous in older:
         await finish_mandate(ctx, previous.id, "done", "next_turn")
     if created:
-        await _publish_mandate(ctx, mandate)
+        await publish_mandate(ctx, mandate)
 
     async def try_lock() -> bool:
         return await ctx.store.transact(lambda c: mandates.try_lock(c, doc_id, mandate.id))
@@ -346,9 +364,22 @@ async def edit(call: Call) -> dict[str, Any]:
             suggestion_ids=result.get("suggestionIds"),
         )
 
-    await ctx.store.transact(applied)
+    first = await ctx.store.transact(lambda c: (applied(c), _applied_count(c, mandate.id) == 1)[1])
     await ctx.hub.publish(p.EV_SUGGESTIONS_CHANGED, {"workspace_id": doc.workspace_id, "doc_id": doc_id}, workspace_id=doc.workspace_id)
-    await _publish_mandate(ctx, mandate)
+    await publish_mandate(ctx, mandate)
+    if first and mandate.origin == "workspace_session":
+        # The request stays in the person's session; the workspace sees that their agent is at work.
+        from jiuwenswarm.extensions.blackboard.host.api.feed import coded, post_chat
+
+        await post_chat(
+            ctx,
+            workspace_id=doc.workspace_id,
+            author_id=mandate.requester_id,
+            author_kind="system",
+            kind="notice",
+            body=coded("session_edit", doc_id=doc_id, doc_title=doc.title),
+            mandate_id=mandate.id,
+        )
     return {
         "mandate_id": mandate.id,
         "receipt_id": receipt.id,
@@ -356,3 +387,8 @@ async def edit(call: Call) -> dict[str, Any]:
         "suggestion_ids": result.get("suggestionIds", []),
         "blocks_after": [{"id": b["id"], "digest": b["digest"]} for b in result.get("after", [])],
     }
+
+
+def _applied_count(conn: sqlite3.Connection, mandate_id: str) -> int:
+    row = conn.execute("SELECT COUNT(*) FROM receipts WHERE mandate_id = ? AND status = 'applied'", (mandate_id,)).fetchone()
+    return int(row[0])

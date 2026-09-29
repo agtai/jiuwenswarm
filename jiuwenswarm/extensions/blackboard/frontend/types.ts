@@ -145,6 +145,12 @@ export interface MandateView {
   receipts: ReceiptView[];
   // Doc id -> this run's suggestions nobody has decided on yet.
   pending: Record<string, string[]>;
+  // Where the task was given: {thread_id, comment_id} or {message_id} or {session_id}.
+  origin_ref?: Record<string, string>;
+  scope?: { doc_id?: string; block_from?: string; block_to?: string };
+  turn_count?: number;
+  // A comment task waiting for its document: 1 is next.
+  queue_position?: number | null;
 }
 
 // A session of this person's that works on a workspace with an agent.
@@ -165,6 +171,98 @@ export interface SuggestionView {
   inserted: string;
   deleted: string;
   blockIds: string[];
+}
+
+export type Mention = { kind: 'agent' } | { kind: 'user'; id: string };
+export type AuthorKind = 'person' | 'agent' | 'system';
+
+export interface ChatMessageView {
+  id: string;
+  workspace_id: string;
+  author_id: string;
+  author_kind: AuthorKind;
+  author_name: string | null;
+  // message and answer are people's text; question the agent's; notice and summary are JSON codes.
+  kind: 'message' | 'notice' | 'summary' | 'question' | 'answer';
+  body: string;
+  mentions: Mention[];
+  mandate_id: string | null;
+  decision_id: string | null;
+  created_at: string;
+}
+
+export type AnchorStatus = 'ok' | 'drifted' | 'orphaned';
+
+// A passage of a document: its first and last block, its ends as Yjs relative positions (base64),
+// and the text it quoted.
+export interface AnchorDraft {
+  block_id: string;
+  block_to: string;
+  digest: string | null;
+  start: string;
+  end: string;
+  quote: string;
+  offset: number;
+  length: number;
+}
+
+export interface AnchorView extends AnchorDraft {
+  status: AnchorStatus;
+}
+
+export interface CommentView {
+  id: string;
+  thread_id: string;
+  author_id: string;
+  author_kind: AuthorKind;
+  author_name: string | null;
+  body: string;
+  mentions: Mention[];
+  scope_switch: boolean;
+  mandate_id: string | null;
+  decision_id: string | null;
+  created_at: string;
+  edited_at: string | null;
+  mandate_status?: MandateStatus | null;
+}
+
+export interface ThreadView {
+  id: string;
+  workspace_id: string;
+  doc_id: string;
+  anchor: AnchorView;
+  created_by: string;
+  created_by_name: string | null;
+  created_at: string;
+  resolved_at: string | null;
+  resolved_by: string | null;
+  position: number | null;
+  comments: CommentView[];
+}
+
+export type DecisionStatus = 'open' | 'proposed' | 'answered' | 'cancelled';
+
+export interface DecisionView {
+  id: string;
+  workspace_id: string;
+  mandate_id: string;
+  requester_id: string;
+  requester_name: string | null;
+  doc_id: string | null;
+  block_id: string | null;
+  quote: string | null;
+  question: string;
+  options: Array<{ label: string; description: string }>;
+  recommended: number | null;
+  status: DecisionStatus;
+  answer: { option: number | null; text: string | null } | null;
+  answer_label: string;
+  answered_by: string | null;
+  answered_by_name: string | null;
+  accepted_by: string | null;
+  accepted_by_name: string | null;
+  created_at: string;
+  passage_changed?: boolean;
 }
 
 export type Rpc = <T = unknown>(method: string, params?: Record<string, unknown>) => Promise<T>;

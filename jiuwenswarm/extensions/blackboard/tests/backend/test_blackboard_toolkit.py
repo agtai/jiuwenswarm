@@ -6,7 +6,7 @@ from jiuwenswarm.extensions.blackboard import extension as extension_module
 from jiuwenswarm.extensions.blackboard.client.hosts import HostEntry, HostRegistry
 from jiuwenswarm.extensions.blackboard.client.sessions import SessionAttachments
 from jiuwenswarm.extensions.blackboard.client.toolkit.bridge import to_openjiuwen
-from jiuwenswarm.extensions.blackboard.client.toolkit.tools import SessionTools, WorkspaceRef
+from jiuwenswarm.extensions.blackboard.client.toolkit.tools import MandateRef, SessionTools, WorkspaceRef
 from jiuwenswarm.extensions.blackboard.common import protocol as p
 from jiuwenswarm.extensions.blackboard.common.config import HostSettings
 from jiuwenswarm.extensions.blackboard.extension import BlackboardApplicationPlugin
@@ -39,6 +39,36 @@ async def test_only_attached_sessions_get_the_tools(tmp_path, monkeypatch):
 
     await attachments.detach("sess-1")
     assert plugin.agent_tools(ctx) == []
+
+
+async def test_a_dispatched_turn_edits_under_its_task_and_may_ask(tmp_path, monkeypatch):
+    monkeypatch.setattr(extension_module, "blackboard_dir", lambda: tmp_path)
+    plugin = BlackboardApplicationPlugin()
+    await SessionAttachments(tmp_path / "client" / "sessions.json").attach("s1", "h1", "ws1", "Launch")
+    meta = {"blackboard": {"host": "h1", "workspace_id": "ws1", "mandate_id": "m1", "origin": "comment", "workspace_title": "Launch"}}
+    tools = plugin.agent_tools(AgentToolContext(session_id="s1", channel_id="__blackboard__", request_id="r1", metadata=meta))
+    assert {t.card.name for t in tools} == TOOL_NAMES | {"blackboard_ask"}
+    toolkit = plugin._toolsets["s1"][0]
+    assert toolkit.mandate == MandateRef("h1", "ws1", "m1", "comment")
+    # The same metadata on another channel is not a dispatched turn.
+    plain = plugin.agent_tools(AgentToolContext(session_id="s1", channel_id="web", request_id="r2", metadata=meta))
+    assert {t.card.name for t in plain} == TOOL_NAMES and toolkit.mandate is None
+
+    sent: list[tuple[str, dict]] = []
+
+    async def fake_call(ws, method, params, timeout=30.0):  # noqa: ANN001
+        sent.append((method, params))
+        return {"mandate_id": params.get("mandate_id"), "decision_id": "dc1"}
+
+    toolkit._call = fake_call  # type: ignore[method-assign]
+    toolkit.mandate = MandateRef("h1", "ws1", "m1", "comment")
+    toolkit._homes.update({"d1": WorkspaceRef("h1", "ws1"), "d9": WorkspaceRef("h2", "ws9")})
+    await toolkit.edit("d1", [{"op": "delete", "block_id": "b1", "digest": "x"}])
+    assert sent[-1] == (p.EDIT, {"doc_id": "d1", "ops": [{"op": "delete", "block_id": "b1", "digest": "x"}], "note": "", "mandate_id": "m1"})
+    run = {spec.name: spec.func for spec in toolkit.specs()}
+    assert (await run["blackboard_edit"](doc="d9", ops=[]))["code"] == "out_of_scope"
+    asked = await run["blackboard_ask"](question="Which?", options=[{"label": "a"}, {"label": "b"}], recommended=0)
+    assert asked["ok"] and sent[-1] == (p.DECISION_CREATE, {"mandate_id": "m1", "question": "Which?", "options": [{"label": "a"}, {"label": "b"}], "recommended": 0})
 
 
 def test_the_model_sees_the_tools_and_json_results():

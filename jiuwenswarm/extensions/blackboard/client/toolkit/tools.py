@@ -41,6 +41,16 @@ class WorkspaceRef:
     title: str = ""
 
 
+@dataclass(frozen=True)
+class MandateRef:
+    """The comment or chat task a dispatched turn works on."""
+
+    host_id: str
+    workspace_id: str
+    mandate_id: str
+    origin: str = ""
+
+
 @dataclass
 class SessionTools:
     registry: HostRegistry
@@ -48,6 +58,9 @@ class SessionTools:
     workspaces: list[WorkspaceRef]
     # The current request id; set before every turn, so edits of one turn share a mandate.
     turn_id: str = ""
+    # Set for a turn the dispatcher started on a comment or chat task: edits go under its mandate,
+    # and the agent may ask the workspace a question.
+    mandate: MandateRef | None = None
     # Which workspace a document or reference id belongs to, learned from the lists.
     _homes: dict[str, WorkspaceRef] = field(default_factory=dict)
 
@@ -116,12 +129,40 @@ class SessionTools:
 
     async def edit(self, doc: str, ops: list[dict[str, Any]], note: str = "") -> dict[str, Any]:
         ws = await self._home(doc, self.list_docs, "doc")
-        params = {"doc_id": doc, "ops": ops, "note": note, "session_id": self.session_id, "turn_id": self.turn_id}
+        params: dict[str, Any] = {"doc_id": doc, "ops": ops, "note": note}
+        if self.mandate is not None:
+            if (ws.host_id, ws.workspace_id) != (self.mandate.host_id, self.mandate.workspace_id):
+                raise BlackboardError(
+                    "out_of_scope",
+                    "this task is for another workspace; edit only its documents",
+                    {"doc": doc, "workspace": self.mandate.workspace_id},
+                )
+            params["mandate_id"] = self.mandate.mandate_id
+        else:
+            params.update(session_id=self.session_id, turn_id=self.turn_id)
         result = await self._call(ws, p.EDIT, params, timeout=EDIT_TIMEOUT_S)
         return {
             **result,
             "message": "Your changes are suggestions now; the people in the workspace accept or reject them.",
         }
+
+    async def ask(
+        self,
+        question: str,
+        options: list[dict[str, Any]],
+        recommended: int | None = None,
+        doc: str | None = None,
+        block_id: str | None = None,
+    ) -> dict[str, Any]:
+        if self.mandate is None:
+            raise BlackboardError("no_mandate", "questions go to the workspace only in tasks from a comment or the chat")
+        ws = WorkspaceRef(self.mandate.host_id, self.mandate.workspace_id)
+        params: dict[str, Any] = {"mandate_id": self.mandate.mandate_id, "question": question, "options": options}
+        if recommended is not None:
+            params["recommended"] = recommended
+        if doc:
+            params.update(doc_id=doc, block_id=block_id)
+        return await self._call(ws, p.DECISION_CREATE, params)
 
     async def list_references(self, workspace: str | None = None) -> dict[str, Any]:
         out = []
@@ -159,6 +200,44 @@ class SessionTools:
         }
 
     def specs(self) -> list[ToolSpec]:
+        specs = self._specs()
+        if self.mandate is not None:
+            specs.append(self._ask_spec())
+        return specs
+
+    def _ask_spec(self) -> ToolSpec:
+        return ToolSpec(
+            "blackboard_ask",
+            "Ask the people in the workspace a question you need answered before you can go on, with 2 to 4 "
+            "options. Any editor may answer; the person who gave you the task accepts the answer. After calling "
+            "this, end your turn at once: you will be started again with the answer.",
+            {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string", "description": "the question, at most 1000 characters"},
+                    "options": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 4,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": {"type": "string", "description": "the choice, at most 120 characters"},
+                                "description": {"type": "string", "description": "what it means, optional"},
+                            },
+                            "required": ["label"],
+                        },
+                    },
+                    "recommended": {"type": "integer", "description": "index of the option you recommend, optional"},
+                    "doc": {"type": "string", "description": "the document the question is about, optional"},
+                    "block_id": {"type": "string", "description": "the block the question is about, optional"},
+                },
+                "required": ["question", "options"],
+            },
+            self._safe(self.ask, ("question", "options", "recommended", "doc", "block_id")),
+        )
+
+    def _specs(self) -> list[ToolSpec]:
         titles = ", ".join(f'"{w.title}" ({w.workspace_id})' if w.title else w.workspace_id for w in self.workspaces)
         where = f"the Blackboard workspaces this session works on: {titles}"
         workspace_param = {"type": "string", "description": "optional workspace id; all of the session's workspaces when left out"}

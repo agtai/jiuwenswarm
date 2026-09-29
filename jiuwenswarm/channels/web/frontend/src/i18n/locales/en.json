@@ -298,7 +298,16 @@
         "accept_other": "Accepted {{count}} suggestions.",
         "reject_one": "Rejected {{count}} suggestion.",
         "reject_other": "Rejected {{count}} suggestions."
-      }
+      },
+      "queuedAt": "Queued ({{position}})",
+      "origin": {
+        "comment": "From a comment",
+        "workspace_chat": "From the chat",
+        "workspace_session": "From a session"
+      },
+      "resolveDone": "It finished",
+      "resolveFailed": "It failed",
+      "resolveHint": "The agent stopped answering. Check its changes, then say how the task ended."
     },
     "chat": {
       "menuItem": "Blackboard",
@@ -308,6 +317,89 @@
       "openBlackboard": "Open Blackboard",
       "attach": "Work on this workspace",
       "detach": "Stop working on this workspace"
+    },
+    "messages": {
+      "tab": "Chat",
+      "older": "Earlier messages",
+      "empty": "No messages yet. Write to the workspace, or ask @jiuwen for help.",
+      "placeholder": "Write a message; @ mentions a member or your agent",
+      "send": "Send",
+      "readOnly": "Viewers read the chat but cannot post.",
+      "openThread": "Open the thread",
+      "answered": "answered: {{answer}}",
+      "proposed": "proposed an answer: {{answer}}"
+    },
+    "comments": {
+      "tab": "Comments",
+      "add": "Comment",
+      "addShortcut": "Comment on the selection (Ctrl+M)",
+      "noDoc": "Open a document to see its comments.",
+      "placeholder": "Write a comment; @jiuwen gives your agent a task on this passage",
+      "post": "Comment",
+      "empty": "No comments yet. Select text in the document and choose Comment, or press Ctrl+M.",
+      "emptyReadOnly": "No comments on this document.",
+      "detached": "Detached",
+      "detachedHint": "The passage these threads were about is gone, or its words now appear more than once.",
+      "showResolved": "Show resolved threads",
+      "drifted": "The passage changed",
+      "save": "Save",
+      "reply": "Reply",
+      "replyPlaceholder": "Reply; @jiuwen gives your agent a task on this passage",
+      "reopen": "Reopen",
+      "resolve": "Resolve",
+      "edited": "(edited)",
+      "edit": "Edit",
+      "tooLong": "Too long to comment on (over 100,000 characters)",
+      "moreReplies_one": "1 more reply",
+      "moreReplies_other": "{{count}} more replies"
+    },
+    "composer": {
+      "agent": "your agent",
+      "editorsOnly": "Only editors and owners can give the agent a task; this goes out as a plain message.",
+      "wholeDocument": "Let the agent edit the whole document",
+      "session": "Session",
+      "defaultSession": "The workspace's session"
+    },
+    "decisions": {
+      "tab": "Decisions",
+      "intro": "Questions agents asked before going on. Any editor may answer; the person who gave the task accepts the answer.",
+      "empty": "No questions yet.",
+      "askedBy": "{{name}}'s agent asks",
+      "status": {
+        "open": "Open",
+        "proposed": "Answer proposed",
+        "answered": "Answered",
+        "cancelled": "Withdrawn"
+      },
+      "changed": "The passage changed since",
+      "recommended": "Recommended",
+      "proposed": "{{name}} proposed: {{answer}}",
+      "answered": "Answered: {{answer}} ({{name}})",
+      "answeredAccepted": "Answered: {{answer}} ({{name}}, accepted by {{accepted}})",
+      "freeText": "Or answer in your own words",
+      "answer": "Answer",
+      "propose": "Propose",
+      "accept": "Accept",
+      "cancel": "Withdraw"
+    },
+    "notices": {
+      "session_edit": "{{name}}'s agent is proposing changes to {{doc}}.",
+      "agent_failed": "{{name}}'s agent could not finish: {{reason}}.",
+      "agent_failed_plain": "{{name}}'s agent could not finish.",
+      "agent_unknown": "{{name}}'s agent stopped answering; its task is marked Unknown.",
+      "agent_cancelled": "{{name}}'s agent was stopped by {{by}}.",
+      "agent_stopped": "{{name}}'s agent was stopped.",
+      "agent_forbidden": "Only editors and owners can give the agent a task.",
+      "agent_done_silently": "{{name}}'s agent finished without a reply.",
+      "answer_accepted": "{{name}} accepted {{answeredBy}}'s answer: {{answer}}",
+      "thread_reply": "{{name}}'s agent replied in a thread on {{doc}}: {{excerpt}}",
+      "reason": {
+        "not_picked_up": "the requester's jiuwenswarm did not pick up the task",
+        "no_result": "no result came back",
+        "not_an_editor": "the requester is no longer an editor",
+        "timeout": "it took too long",
+        "already_handled": "the thread was resolved"
+      }
     }
   },
   "common": {

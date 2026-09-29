@@ -100,6 +100,17 @@ class SessionAttachments:
 
         return await self._store.update(mutate)
 
+    def default_for(self, host: str, workspace_id: str) -> str | None:
+        """The session tasks from comments and the chat run in, for this workspace."""
+        value = (self._store.read().get("defaults") or {}).get(f"{host}/{workspace_id}")
+        return value if isinstance(value, str) and value else None
+
+    async def set_default(self, host: str, workspace_id: str, session_id: str) -> None:
+        def mutate(data: dict[str, Any]) -> None:
+            data.setdefault("defaults", {})[f"{host}/{workspace_id}"] = session_id
+
+        await self._store.update(mutate)
+
     async def detach_host(self, host: str) -> None:
         def mutate(data: dict[str, Any]) -> None:
             sessions = data.setdefault("sessions", {})

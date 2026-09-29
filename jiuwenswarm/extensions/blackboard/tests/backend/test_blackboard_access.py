@@ -7,6 +7,8 @@ import pytest
 from jiuwenswarm.extensions.blackboard.common import protocol as p
 from jiuwenswarm.extensions.blackboard.common.errors import FORBIDDEN, NOT_FOUND, NOT_MEMBER
 from jiuwenswarm.extensions.blackboard.common.roles import ROLES, role_at_least
+from jiuwenswarm.extensions.blackboard.host.store import mandates
+from jiuwenswarm.extensions.blackboard.tests.backend.support import ANCHOR
 
 # method -> (lowest role allowed, extra params). "<carol>", "<code>", "<doc>" and "<ref>" are filled
 # in per case.
@@ -39,12 +41,29 @@ WORKSPACE_METHODS = {
     p.MANDATE_CANCEL: ("editor", {"mandate_id": "<mandate>"}),
     p.SUGGESTION_LIST: ("viewer", {"doc_id": "<doc>"}),
     p.SUGGESTION_DECIDE: ("editor", {"doc_id": "<doc>", "suggestion_ids": ["s_x"], "action": "reject"}),
+    p.COMMENT_CREATE: ("commenter", {"doc_id": "<doc>", "anchor": ANCHOR, "body": "Nice"}),
+    p.COMMENT_REPLY: ("commenter", {"thread_id": "<thread>", "body": "Agreed"}),
+    p.COMMENT_RESOLVE: ("commenter", {"thread_id": "<thread>"}),
+    p.COMMENT_REOPEN: ("commenter", {"thread_id": "<resolved_thread>"}),
+    p.COMMENT_LIST: ("viewer", {"doc_id": "<doc>"}),
+    p.CHAT_POST: ("commenter", {"body": "Hello"}),
+    p.CHAT_LIST: ("viewer", {}),
+    p.DECISION_LIST: ("viewer", {}),
+    p.DECISION_GET: ("viewer", {"decision_id": "<decision>"}),
+    # Someone else's question: any editor may propose an answer or withdraw it.
+    p.DECISION_ANSWER: ("editor", {"decision_id": "<decision>", "option": 0}),
+    p.DECISION_CANCEL: ("editor", {"decision_id": "<decision>"}),
+    p.MANDATE_RESOLVE_UNKNOWN: ("editor", {"mandate_id": "<unknown_mandate>", "status": "done"}),
 }
+
+# Only a comment's author edits it and only a task's requester accepts an answer; their own tests
+# (test_blackboard_conversation.py, test_blackboard_dispatch.py) cover them.
+PERSONAL_METHODS = {p.COMMENT_EDIT, p.DECISION_ACCEPT}
 
 
 def test_the_table_covers_every_workspace_method():
     no_workspace = {p.ME, p.ME_SET_NAME, p.WORKSPACE_LIST, p.WORKSPACE_CREATE}
-    assert set(WORKSPACE_METHODS) == set(p.HOST_METHODS) - no_workspace
+    assert set(WORKSPACE_METHODS) | PERSONAL_METHODS == set(p.HOST_METHODS) - no_workspace
 
 
 async def _scene(world, role: str | None):
@@ -56,12 +75,22 @@ async def _scene(world, role: str | None):
     if role is not None:
         await world.add(workspace_id, bob, role)
     code = await world.invite(alice, workspace_id)
+    doc_id = await world.doc(alice, workspace_id)
+    resolved = (await world.thread(alice, doc_id))["thread"]["id"]
+    await world.call(alice, p.COMMENT_RESOLVE, thread_id=resolved)
+    asking = await world.mandate(alice, workspace_id, origin="workspace_chat", origin_ref={}, reply_target={"kind": "chat"})
+    unknown = await world.mandate(alice, workspace_id)
+    await world.store.transact(lambda c: mandates.set_status(c, unknown, "unknown"))
     fill = {
         "<carol>": carol.id,
         "<code>": code,
-        "<doc>": await world.doc(alice, workspace_id),
+        "<doc>": doc_id,
         "<ref>": await world.reference(alice, workspace_id),
         "<mandate>": await world.mandate(alice, workspace_id),
+        "<thread>": (await world.thread(alice, doc_id))["thread"]["id"],
+        "<resolved_thread>": resolved,
+        "<decision>": await world.ask(alice, asking),
+        "<unknown_mandate>": unknown,
     }
     return alice, bob, carol, workspace_id, fill
 
@@ -105,7 +134,17 @@ async def test_anyone_may_leave(world, role):
 async def test_an_unknown_workspace_is_not_found(world, method):
     alice, _ = await world.user("Alice")
     _, extra = WORKSPACE_METHODS[method]
-    missing = {"<carol>": "u_missing", "<code>": "c" * 20, "<doc>": "d_missing", "<ref>": "r_missing", "<mandate>": "m_missing"}
+    missing = {
+        "<carol>": "u_missing",
+        "<code>": "c" * 20,
+        "<doc>": "d_missing",
+        "<ref>": "r_missing",
+        "<mandate>": "m_missing",
+        "<thread>": "t_missing",
+        "<resolved_thread>": "t_missing",
+        "<decision>": "dc_missing",
+        "<unknown_mandate>": "m_missing",
+    }
     params = _params(extra, "ws_missing", missing)
     assert (await world.fails(alice, method, **params)).code == NOT_FOUND
 
