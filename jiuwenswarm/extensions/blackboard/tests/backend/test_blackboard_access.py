@@ -65,11 +65,15 @@ WORKSPACE_METHODS = {
 # Only a comment's author edits it and only a task's requester accepts an answer; their own tests
 # (test_blackboard_conversation.py, test_blackboard_dispatch.py) cover them.
 PERSONAL_METHODS = {p.COMMENT_EDIT, p.DECISION_ACCEPT}
+# Reading a reference's text needs a real file; test_blackboard_identities.py covers its roles.
+TESTED_ELSEWHERE = {p.REFERENCE_READ}
 
 
 def test_the_table_covers_every_workspace_method():
     no_workspace = {p.ME, p.ME_SET_NAME, p.WORKSPACE_LIST, p.WORKSPACE_CREATE}
-    assert set(WORKSPACE_METHODS) | PERSONAL_METHODS == set(p.HOST_METHODS) - no_workspace
+    # Bots are the operator's; connected IM accounts are the person's own.
+    no_workspace |= {p.BOT_CREATE, p.BOT_LIST, p.BOT_REVOKE, p.IDENTITY_LINK_CODE, p.IDENTITY_LIST, p.IDENTITY_UNLINK}
+    assert set(WORKSPACE_METHODS) | PERSONAL_METHODS | TESTED_ELSEWHERE == set(p.HOST_METHODS) - no_workspace
 
 
 async def _scene(world, role: str | None):

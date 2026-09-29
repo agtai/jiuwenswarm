@@ -13,7 +13,7 @@ flowchart LR
     B2 -->|Yjs over WebSocket, document token| D
 ```
 
-Milestones 2 to 6 are built: the host, identity, workspaces, members, invites, live documents, references, Markdown in and out, agents that edit documents from a person's chat session, comments, the workspace chat and decisions (where `@jiuwen` gives the person's agent a task), and version history with restore and export to Word, PDF and Markdown. The browser edits a document directly with the host's document service, using a short-lived document token that the host mints; everything else goes through the browser's own jiuwenswarm.
+Milestones 2 to 7 are built: the host, identity, workspaces, members, invites, live documents, references, Markdown in and out, agents that edit documents from a person's chat session, comments, the workspace chat and decisions (where `@jiuwen` gives the person's agent a task), version history with restore and export to Word, PDF and Markdown, and reading workspaces from any chat, including Slack or Feishu through a team's shared bot. The browser edits a document directly with the host's document service, using a short-lived document token that the host mints; everything else goes through the browser's own jiuwenswarm.
 
 Blackboard is always on: it ships in the package's `extensions` folder, which every instance loads, and `is_enabled()` always returns true. In the rail it sits right below Tasks (`nav_after="chat"` on its page contribution) with its own chalkboard icon (`applicationPluginNavIcon`, exported from `frontend/index.tsx`). Both are general plugin features, so other built-in plugins can use them too.
 
@@ -31,9 +31,10 @@ Blackboard is always on: it ships in the package's `extensions` folder, which ev
 | `host/api/mandates.py`, `host/api/locks.py` | Agent edits: mandates, receipts, document locks and their wait queue, suggestion decisions, the idle sweeper |
 | `host/api/comments.py`, `host/api/chat.py`, `host/api/decisions.py`, `host/api/feed.py` | Threads and comments, the workspace chat, the agent's questions, and posting replies, notices and summaries |
 | `host/api/history.py` | Version history (list, one version, diff, save, restore), exports and their download links, and the endpoint where the document service announces versions |
+| `host/api/identities.py`, `host/api/ratelimit.py`, `host/extract.py` | Shared bots and connected IM accounts, the per-minute limits on agents' reads, and the text of a reference file |
 | `host/api/dispatch.py` | Tasks from comments and the chat: beginning and queueing them, offering turns, claim and report, the turn's material, the sweeper for turns nobody picked up |
 | `host/docservice/` | The document service (TypeScript, run by Node 22.5+): Hocuspocus with SQLite, document tokens, the author guard, the shared Tiptap schema, Markdown in and out, the agent view. No npm project of its own: its packages are in the web app's `package.json` |
-| `client/` | Known hosts (`hosts.json`), host links, joining with a link, local RPC proxies, reference uploads, sessions attached to workspaces (`sessions.py`), the dispatcher that runs comment and chat tasks (`dispatcher.py`) and their prompt (`prompt.py`) |
+| `client/` | Known hosts (`hosts.json`), host links, joining with a link, local RPC proxies, reference uploads, bot links when this jiuwenswarm is a team's shared bot (`bots.py`), sessions attached to workspaces (`sessions.py`), the dispatcher that runs comment and chat tasks (`dispatcher.py`) and their prompt (`prompt.py`) |
 | `client/toolkit/` | The agent's Blackboard tools and their bridge to openjiuwen, handed to the AgentServer through the `agent_tools` hook |
 | `frontend/` | The page (bundled into the web app), its controller, dialogs, panels and rail icon. One controller lives for the app's lifetime and remembers the host, workspace, document and rail tab in `localStorage` (`blackboard.selection`), so the page opens where it was left |
 | `frontend/chat/` | The + menu item and the input tag in the chat |
@@ -89,7 +90,7 @@ A person with the editor role or above can let an agent work on a workspace. On 
 
 The chat parts use two general plugin exports from `frontend/index.tsx`: `applicationPluginTaskMenuItem` (an item in the chat's + menu, with its own panel) and `applicationPluginTaskInputTag` (a tag in the input toolbar). Both get `sessionId`, which is null until a new conversation has a session.
 
-From the next turn on, the AgentServer gives an attached session five tools: `blackboard_list_docs`, `blackboard_read`, `blackboard_edit`, `blackboard_list_references` and `blackboard_read_reference`. The two list tools group their results by workspace and take an optional `workspace`; the others take a document or reference id and find its workspace and host themselves. They call the host with the person's member token, return `{"ok": true, ...}` or `{"ok": false, code, message, details}` as JSON, and are declared `DIRECT` so progressive tool disclosure does not hide them.
+Every session has Blackboard's read tools (see [Ask about a workspace from any chat](#ask-about-a-workspace-from-any-chat-slack-or-feishu)). From the next turn on, an attached session also has `blackboard_edit` for the workspaces it is attached to. The tools call the host with the person's member token, return `{"ok": true, ...}` or `{"ok": false, code, message, details}` as JSON, and are declared `DIRECT` so progressive tool disclosure does not hide them.
 
 ```mermaid
 sequenceDiagram
@@ -153,6 +154,69 @@ The **History** tab lists the open document's versions by day. A version opens i
 
 **Export** in the document menu makes a Word (.docx), PDF or Markdown file of the accepted text, pending suggestions left out, optionally with a table of the answered decisions about the document. The host keeps the file under `exports/` and the browser downloads it through a link that works for an hour. PDF is printed by a local Chrome, Edge or Chromium in headless mode: set `BB_CHROMIUM_PATH` in the Gateway's environment to choose one, otherwise the usual install places and a Playwright download are tried.
 
+## Ask about a workspace from any chat, Slack or Feishu
+
+Every session of a jiuwenswarm that joined a host can read the person's workspaces, whether it is attached or not: a web chat, a task, or a message from one of the instance's IM channels. Only an attached session edits.
+
+| Tool | Returns |
+|---|---|
+| `blackboard_list_workspaces` | Every workspace the person can read on every joined host: `@bb:<name>`, title, host, role, and whether this session may edit it |
+| `blackboard_list_docs {workspace?}` | The documents of a workspace (all attached ones when left out) |
+| `blackboard_read {doc, range?, workspace?}` | The agent view of a document, its pending suggestions in the range, and `read_only: true` when this session may not edit it |
+| `blackboard_list_references {workspace?}`, `blackboard_read_reference {reference, workspace?}` | Reference files, and the text of one |
+| `blackboard_list_decisions {workspace, status?}` | Questions asked in the workspace, with their options and answers |
+| `blackboard_read_chat {workspace, limit?}` | The newest workspace chat messages (30 by default, at most 100) |
+
+A workspace has a short name, shown under its title as `@bb:<name>` with a copy button. A person writes it in a message ("summarize @bb:launch-plan-q4") and the model passes it as `workspace`; the tools also take the plain name, the title or the id. A missing or unknown workspace gets `workspace_required` with the list to pick from, and a name used on two hosts gets `ambiguous_workspace` with the candidates. The list is cached for 5 minutes and fetched again on a miss.
+
+The host extracts a reference's text, so every client gets the same: text files as they are, PDF with pdfplumber, Word (.docx) with python-docx, up to 200,000 characters (`truncated` says when it was cut). Images and other files get `unsupported_reference`. Agents' calls carry `X-BB-Agent` and are limited to 60 reads per minute per person and 600 per bot; more gets `rate_limited` (HTTP 429) until the minute passes. The browser's calls are not limited.
+
+### A personal jiuwenswarm
+
+The IM channels of a person's own jiuwenswarm read as that person, with the same member tokens as the web app. To answer only the owner's own IM accounts, list them in `config.yaml`:
+
+```yaml
+blackboard:
+  im_owner_ids: ["slack:U012ABCDEF", "ou_7d8a6e"]   # <platform>:<user id>, or a bare user id
+```
+
+Empty means whoever the channel itself lets in (`allow_from`). Anyone else gets `not_linked` with a message naming the setting.
+
+### A shared bot for the team
+
+One jiuwenswarm can be installed as a bot in the team's Slack or Feishu, where many people talk to it. It must then read as the person who wrote, so each person connects their IM account to their user on the host once.
+
+```mermaid
+sequenceDiagram
+    participant P as Alice's web app
+    participant H as Host
+    participant B as Bot jiuwenswarm
+    participant S as Slack
+    Note over H,B: once: the operator creates a bot; its link goes into the bot's settings
+    P->>H: blackboard.identity.link_code
+    H-->>P: @bb link 7K3M-2Q9F
+    S->>B: "@bb link 7K3M-2Q9F" from U_ALICE
+    B->>H: blackboard.identity.link {code, platform, external_id} with the bot token
+    H-->>P: blackboard.me.updated (the account shows in Settings)
+    S->>B: "summarize @bb:launch-plan-q4" from U_ALICE
+    B->>H: blackboard.doc.read, bot token, X-BB-On-Behalf-Of: slack:U_ALICE
+    H-->>B: what Alice may read
+```
+
+| Step | Who | Where |
+|---|---|---|
+| 1. Create a bot | The host's operator | Blackboard settings, **Shared IM bots**: name it and choose **Create**. The link, `<host address>/blackboard/bot#bbb_...`, is shown once |
+| 2. Make the bot jiuwenswarm use it | Whoever runs the bot | On that jiuwenswarm, Blackboard settings, **This jiuwenswarm as a shared bot**: paste the link and choose **Connect**. It is checked with the host and kept in `client/bots.json`; the web app there keeps working as its owner |
+| 3. Connect an IM account | Each person | In their own web app, Blackboard settings, **Connected IM accounts**: choose **Connect** and send the `@bb link XXXX-XXXX` line to the bot within 15 minutes. The account shows in the list at once; **Disconnect** removes it |
+
+Rules worth knowing:
+
+- On an instance with a bot link, every IM message goes through the bot. Its tools are the read tools plus `blackboard_link_identity`; the calls carry the bot token and `X-BB-On-Behalf-Of: <platform>:<user id>`, and the host authorizes them as that person's own. Member tokens are never used for IM messages there, so nobody reads through the owner's account.
+- Bot calls may only read: `blackboard.me`, `.workspace.list`, `.doc.list`, `.doc.read`, `.suggestion.list`, `.reference.list`, `.reference.read`, `.decision.list` and `.chat.list`. Bots get no events, and the host records no mandate or chat message for them.
+- A sender with no connected account gets `not_linked`, whose message says how to connect. A code works once, for 15 minutes, and only the newest one per person. Connecting an account that is already connected moves it to the new user.
+- **Revoke** on the host makes the bot's token `unauthorized` at once. **Remove** on the bot instance makes it a personal instance again.
+- IM channels are the ones whose id starts with `dingtalk`, `discord`, `feishu`, `slack`, `telegram`, `wechat`, `wecom`, `whatsapp` or `xiaoyi`.
+
 ## Join from a second instance on the same machine
 
 Run a second jiuwenswarm with its own data folder and ports, either as a named instance:
@@ -174,6 +238,7 @@ Everything lives under `<data root>/blackboard` (`~/.jiuwenswarm/blackboard` for
 |---|---|
 | `client/hosts.json` | Joined hosts with the member token for each, and the default host |
 | `client/sessions.json` | This person's chat sessions attached to a workspace, and each workspace's default session for tasks from comments and the chat |
+| `client/bots.json` | Bot links, when this jiuwenswarm is a team's shared bot: the host and the bot token, one per host |
 | `host/blackboard.db` | The host store (SQLite, WAL) |
 | `host/secrets.json` | Secrets for document tokens and the document service's internal API |
 | `host/docs.db` | Document contents (Yjs states) and their versions (SQLite, WAL), owned by the document service |
@@ -189,9 +254,11 @@ The browser calls these on its own web channel; all are local-only.
 | Method | Served by |
 |---|---|
 | `blackboard.hosts.list`, `.join {url, display_name}`, `.remove {host}`, `.set_default {host}` | client part |
+| `blackboard.bots.list`, `.bots.connect {link}`, `.bots.remove {bot}` | client part; connecting checks the link with the host (`blackboard.bot.whoami`) |
 | `blackboard.host.status`, `blackboard.host.set_settings {settings}` | this instance's host controller |
 | `blackboard.me`, `.me.set_name`, `.workspace.list/create/rename/archive/unarchive/delete`, `.member.list/set_role/remove`, `.invite.create/list/revoke` | the host, through the client part; `params.host` picks the host, else the default one |
-| `blackboard.doc.list/create/rename/archive/pin/set_instructions/import_markdown/token/read`, `blackboard.reference.list/url/remove/set_note` | the host, through the client part |
+| `blackboard.doc.list/create/rename/archive/pin/set_instructions/import_markdown/token/read`, `blackboard.reference.list/url/read/remove/set_note` | the host, through the client part |
+| `blackboard.identity.link_code`, `.identity.list`, `.identity.unlink {platform, external_id}`, and for the host's operator `blackboard.bot.create {name}`, `.bot.list`, `.bot.revoke {bot_id}` | the host, through the client part |
 | `blackboard.reference.upload {workspace_id, name, mime, data, note?}` (the file as base64) | the client part, which posts it to the host as multipart |
 | `blackboard.session.attach {host, workspace_id, session_id}`, `.session.detach {session_id, host?, workspace_id?}`, `.session.list {host?, workspace_id?, session_id?}` | client part; attaching adds a workspace to the session after asking the host for the person's role, and takes the workspace title from it; detaching without a workspace takes all of them; the list gives one row per session and workspace, with the host name |
 | `blackboard.mandate.list {workspace_id}` (with receipts and the suggestions still pending), `.mandate.cancel {mandate_id}`, `.mandate.resolve_unknown {mandate_id, status}`, `blackboard.suggestion.list {doc_id}`, `.suggestion.decide {doc_id, suggestion_ids, action}` | the host, through the client part |
@@ -200,7 +267,7 @@ The browser calls these on its own web channel; all are local-only.
 | `blackboard.history.list {doc_id, before?, limit?}`, `.history.get {doc_id, version_id, format?}` (`markdown` for the accepted text), `.history.diff {doc_id, to, from?}`, `.history.save {doc_id, label?}`, `.history.restore {doc_id, version_id}`, `blackboard.doc.export {doc_id, format: md \| docx \| pdf, include_decisions?, version_id?}` | the host, through the client part |
 | `blackboard.decision.list {workspace_id, status?}`, `.decision.get/accept/cancel {decision_id}`, `.decision.answer {decision_id, option? or text?}` | the host, through the client part |
 
-`blackboard.invite.accept` is the only host method that needs no member token; the client part calls it while joining. `blackboard.edit` and `blackboard.decision.create` are only for the agent's tools, and `blackboard.mandate.claim`, `.report` and `.pending` only for the dispatcher; they call the host directly and the browser cannot reach them. Errors come back as `{code, message, details}` with codes `unauthorized`, `not_member`, `forbidden`, `not_found`, `invalid`, `conflict`, `expired`, `disabled`, `unavailable`, `busy`, `queue_full` and `internal`, and from `blackboard.edit` also `stale`, `pending_suggestions`, `out_of_scope`, `unknown_block`, `unsupported_markdown` and `no_mandate`.
+`blackboard.invite.accept` is the only host method that needs no member token; the client part calls it while joining. `blackboard.edit` and `blackboard.decision.create` are only for the agent's tools, and `blackboard.mandate.claim`, `.report` and `.pending` only for the dispatcher; they call the host directly and the browser cannot reach them. `blackboard.identity.link` and `blackboard.bot.whoami` take a bot token and nothing else. Errors come back as `{code, message, details}` with codes `unauthorized`, `not_member`, `forbidden`, `not_found`, `invalid`, `conflict`, `expired`, `disabled`, `unavailable`, `busy`, `queue_full`, `not_linked`, `rate_limited` and `internal`, from `blackboard.edit` also `stale`, `pending_suggestions`, `out_of_scope`, `unknown_block`, `unsupported_markdown` and `no_mandate`, and from `blackboard.reference.read` `unsupported_reference`. The agent's tools add `workspace_required`, `ambiguous_workspace` and `read_only`.
 
 Events reach the browser with a `host` field: `blackboard.workspace.updated`, `blackboard.member.updated`, `blackboard.me.updated`, `blackboard.member.role_changed`, `blackboard.doc.updated`, `blackboard.reference.updated`, `blackboard.mandate.updated`, `blackboard.doc.suggestions_changed`, `blackboard.thread.updated`, `blackboard.chat.message`, `blackboard.decision.updated`, `blackboard.doc.versions`, and from the client part `blackboard.hosts.updated`, `blackboard.host.status_changed` and `blackboard.sessions.updated`. The host sends an event only to the members of the workspace concerned (and `blackboard.mandate.run` and `blackboard.mandate.stop` only to the requester's client part, which consumes them), except `blackboard.host.updated` (a new host name), which goes to every connected member; the client part turns it into an update of its host list.
 
@@ -232,7 +299,13 @@ npm run test:blackboard-docservice
 | "The document service did not start" | See `host/docservice.log`; often `doc_port` or `doc_api_port` is taken |
 | A member's document stays at "Connecting" | Their browser cannot reach `doc_port` (firewall or proxy); set `doc_public_url` |
 | An edit stays at "Saving" | The service refused the update; `host/docservice.log` names the reason (`author_mismatch` for the author guard) |
-| The agent says it has no Blackboard tools | The session is not attached (see the Agents tab), or it was attached during the current turn; the tools arrive with the next message |
+| The agent says it has no Blackboard tools | This jiuwenswarm has joined no host (and has no bot link) |
+| The agent reads a workspace but says it cannot edit it | The session is not attached to that workspace (see the Agents tab), or it was attached during the current turn; the edit tool arrives with the next message |
+| The shared bot says to connect an IM account | The sender's account is not connected on that host, or was disconnected or moved to another user; connect it from **Connected IM accounts** |
+| "This jiuwenswarm reads Blackboard only for its owner's IM accounts" | `blackboard.im_owner_ids` does not list the sender; add `<platform>:<user id>` |
+| The shared bot says `unauthorized` | The bot was revoked on the host; ask the operator for a new bot link |
+| The agent reports `rate_limited` | More than 60 reads in a minute for one person, or 600 for one bot; it clears within a minute |
+| A reference cannot be read by the agent (`unsupported_reference`) | Images and other binary files have no text; open them from the References tab |
 | An `@jiuwen` comment or message stays Queued or Running | Queued: another comment task holds the document. Running without a reply: the requester's jiuwenswarm is off or its link to the host is down; the task fails after 10 minutes |
 | A task shows Unknown | The turn did not report within 10 minutes; check its changes on the Agents tab and mark it Done or Failed |
 | PDF export says no browser was found | The host has no Chrome, Edge or Chromium in the usual places; set `BB_CHROMIUM_PATH` to one and restart jiuwenswarm |

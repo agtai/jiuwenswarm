@@ -22,7 +22,7 @@ from jiuwenswarm.extensions.blackboard.host import validation as v
 from jiuwenswarm.extensions.blackboard.host.api.access import require_member
 from jiuwenswarm.extensions.blackboard.host.api.context import HostContext
 from jiuwenswarm.extensions.blackboard.host.store import docs, invites, users, workspaces
-from jiuwenswarm.extensions.blackboard.host.store.models import Invite, User
+from jiuwenswarm.extensions.blackboard.host.store.models import Bot, Invite, User
 from jiuwenswarm.extensions.blackboard.common.clock import now_iso
 
 DEFAULT_INVITE_MINUTES = 7 * 24 * 60
@@ -35,6 +35,8 @@ class Call:
     ctx: HostContext
     user: User | None
     params: dict[str, Any]
+    # A shared bot's call: for its own methods user is None; on behalf of a person, user is them.
+    bot: Bot | None = None
 
     @property
     def uid(self) -> str:

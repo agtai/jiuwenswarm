@@ -108,6 +108,20 @@ def host_settings_from(config: Any) -> HostSettings:
     return replace(settings, **values)
 
 
+def im_owner_ids_from(config: Any) -> list[str]:
+    """``blackboard.im_owner_ids``: the IM accounts (``<platform>:<user id>`` or a bare user id) that
+    read Blackboard through this personal jiuwenswarm; empty means whoever its IM channels let in."""
+    section = config.get("blackboard") if isinstance(config, dict) else None
+    ids = section.get("im_owner_ids") if isinstance(section, dict) else None
+    return [str(i).strip() for i in ids if str(i).strip()] if isinstance(ids, list) else []
+
+
+def load_im_owner_ids() -> list[str]:
+    from jiuwenswarm.common.config import get_config
+
+    return im_owner_ids_from(get_config())
+
+
 def load_host_settings() -> HostSettings:
     from jiuwenswarm.common.config import get_config
 

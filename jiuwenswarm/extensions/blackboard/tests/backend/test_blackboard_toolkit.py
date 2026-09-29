@@ -1,4 +1,4 @@
-"""The agent's side: sessions attached to a workspace, the tools they get, and a real edit."""
+"""The agent's side: the tools a session gets, attached or not, and a real edit."""
 
 from __future__ import annotations
 
@@ -13,45 +13,66 @@ from jiuwenswarm.extensions.blackboard.extension import BlackboardApplicationPlu
 from jiuwenswarm.extensions.sdk import AgentToolContext
 from jiuwenswarm.extensions.blackboard.tests.backend.support import Instance, free_port, rpc
 
-TOOL_NAMES = {"blackboard_list_docs", "blackboard_read", "blackboard_edit", "blackboard_list_references", "blackboard_read_reference"}
+READ_TOOLS = {
+    "blackboard_list_workspaces",
+    "blackboard_list_docs",
+    "blackboard_read",
+    "blackboard_list_references",
+    "blackboard_read_reference",
+    "blackboard_list_decisions",
+    "blackboard_read_chat",
+}
+TOOL_NAMES = READ_TOOLS | {"blackboard_edit"}
 
 
-async def test_only_attached_sessions_get_the_tools(tmp_path, monkeypatch):
+async def _joined(tmp_path) -> None:
+    await HostRegistry(tmp_path / "client" / "hosts.json").upsert(HostEntry(id="h1", host_uid="u1", name="Team", url="http://x", token="t", user_id="u"))
+
+
+async def test_every_session_reads_and_attached_ones_edit(tmp_path, monkeypatch):
     monkeypatch.setattr(extension_module, "blackboard_dir", lambda: tmp_path)
     plugin = BlackboardApplicationPlugin()
     ctx = AgentToolContext(session_id="sess-1", request_id="r1")
+    # No host joined: no Blackboard tools at all.
     assert plugin.agent_tools(ctx) == []
     assert plugin.agent_tools(AgentToolContext(session_id=None)) == []
+
+    await _joined(tmp_path)
+    reading = plugin.agent_tools(ctx)
+    assert {t.card.name for t in reading} == READ_TOOLS
+    assert "Reading only" in next(t for t in reading if t.card.name == "blackboard_list_workspaces").card.description
 
     attachments = SessionAttachments(tmp_path / "client" / "sessions.json")
     await attachments.attach("sess-1", "h1", "ws1", "Launch plan")
     tools = plugin.agent_tools(ctx)
     assert {t.card.name for t in tools} == TOOL_NAMES
-    assert '"Launch plan" (ws1)' in next(t for t in tools if t.card.name == "blackboard_list_docs").card.description
+    assert '"Launch plan" (ws1)' in next(t for t in tools if t.card.name == "blackboard_list_workspaces").card.description
     # The same instances turn after turn; only the turn id moves.
     again = plugin.agent_tools(AgentToolContext(session_id="sess-1", request_id="r2"))
-    assert again is tools and plugin._toolsets["sess-1"][0].turn_id == "r2"
+    assert again is tools and plugin._toolsets["sess-1"][1].turn_id == "r2"
 
     # A second workspace rebuilds the tools for both.
     await attachments.attach("sess-1", "h2", "ws2", "Research")
     both = plugin.agent_tools(AgentToolContext(session_id="sess-1", request_id="r3"))
-    assert both is not tools and [w.workspace_id for w in plugin._toolsets["sess-1"][0].workspaces] == ["ws1", "ws2"]
+    assert both is not tools and [w.workspace_id for w in plugin._toolsets["sess-1"][1].workspaces] == ["ws1", "ws2"]
 
     await attachments.detach("sess-1")
-    assert plugin.agent_tools(ctx) == []
+    assert {t.card.name for t in plugin.agent_tools(ctx)} == READ_TOOLS
 
 
 async def test_a_dispatched_turn_edits_under_its_task_and_may_ask(tmp_path, monkeypatch):
     monkeypatch.setattr(extension_module, "blackboard_dir", lambda: tmp_path)
     plugin = BlackboardApplicationPlugin()
+    await _joined(tmp_path)
     await SessionAttachments(tmp_path / "client" / "sessions.json").attach("s1", "h1", "ws1", "Launch")
     meta = {"blackboard": {"host": "h1", "workspace_id": "ws1", "mandate_id": "m1", "origin": "comment", "workspace_title": "Launch"}}
     tools = plugin.agent_tools(AgentToolContext(session_id="s1", channel_id="__blackboard__", request_id="r1", metadata=meta))
     assert {t.card.name for t in tools} == TOOL_NAMES | {"blackboard_ask"}
-    toolkit = plugin._toolsets["s1"][0]
+    toolkit = plugin._toolsets["s1"][1]
     assert toolkit.mandate == MandateRef("h1", "ws1", "m1", "comment")
     # The same metadata on another channel is not a dispatched turn.
     plain = plugin.agent_tools(AgentToolContext(session_id="s1", channel_id="web", request_id="r2", metadata=meta))
+    toolkit = plugin._toolsets["s1"][1]
     assert {t.card.name for t in plain} == TOOL_NAMES and toolkit.mandate is None
 
     sent: list[tuple[str, dict]] = []
@@ -135,7 +156,7 @@ async def test_the_tools_read_and_edit_a_real_document(real_docservice, host, tm
     listed = await run["blackboard_list_docs"]()
     [space] = listed["workspaces"]
     assert listed["ok"] and space["instructions_doc"] and doc_id in [d["id"] for d in space["docs"]]
-    assert (await run["blackboard_list_docs"](workspace="ws_nope"))["code"] == "not_found"
+    assert (await run["blackboard_list_docs"](workspace="ws_nope"))["code"] == "workspace_required"
     block = read["blocks"][1]
     assert "<!-- block:" in read["markdown"] and "Ship it soon." in read["markdown"]
 

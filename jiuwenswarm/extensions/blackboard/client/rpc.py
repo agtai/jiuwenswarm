@@ -157,6 +157,18 @@ def register_rpcs(channel: Any, client: "ClientRuntime", host: "HostController")
             out.append({**a.to_dict(), "host_name": entry.name if entry else ""})
         return {"sessions": out}
 
+    async def bots_list(params: dict[str, Any]) -> dict[str, Any]:
+        return client.bots_view()
+
+    async def bots_connect(params: dict[str, Any]) -> dict[str, Any]:
+        return await client.connect_bot(str(params.get("link") or ""))
+
+    async def bots_remove(params: dict[str, Any]) -> dict[str, Any]:
+        return await client.remove_bot(str(params.get("bot") or ""))
+
+    add(p.BOTS_LIST, bots_list)
+    add(p.BOTS_CONNECT, bots_connect)
+    add(p.BOTS_REMOVE, bots_remove)
     add(p.SESSION_ATTACH, session_attach)
     add(p.SESSION_DETACH, session_detach)
     add(p.SESSION_LIST, session_list)

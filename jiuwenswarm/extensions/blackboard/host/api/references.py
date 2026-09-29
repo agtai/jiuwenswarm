@@ -7,6 +7,7 @@ can open a file with a plain link for an hour.
 
 from __future__ import annotations
 
+import asyncio
 import mimetypes
 import sqlite3
 from pathlib import Path
@@ -27,6 +28,7 @@ from jiuwenswarm.extensions.blackboard.common.errors import (
 from jiuwenswarm.extensions.blackboard.common.ids import new_id
 from jiuwenswarm.extensions.blackboard.common.tokens import mint_doc_token, verify_doc_token
 from jiuwenswarm.extensions.blackboard.host import validation as v
+from jiuwenswarm.extensions.blackboard.host.extract import extract_text
 from jiuwenswarm.extensions.blackboard.host.api.access import require_member
 from jiuwenswarm.extensions.blackboard.host.api.context import HostContext
 from jiuwenswarm.extensions.blackboard.host.api.methods import Call, method
@@ -84,6 +86,18 @@ async def reference_url(call: Call) -> dict[str, Any]:
     reference_id = v.required_str(call.params, "reference_id")
     reference = await call.ctx.store.read(lambda c: _reference_for(c, call.uid, reference_id, "viewer"))
     return {"reference_id": reference_id, "url": file_url(call.ctx, call.uid, reference), "expires_in": FILE_TOKEN_TTL_S}
+
+
+@method(p.REFERENCE_READ)
+async def reference_read(call: Call) -> dict[str, Any]:
+    """A reference's text for an agent: text files as they are, PDF and Word extracted (milestone 7)."""
+    reference_id = v.required_str(call.params, "reference_id")
+    reference = await call.ctx.store.read(lambda c: _reference_for(c, call.uid, reference_id, "viewer"))
+    path = _file_path(call.ctx, reference)
+    if not path.exists():
+        raise not_found("the file is missing on the host", reference_id=reference_id)
+    result = await asyncio.to_thread(extract_text, path, reference.name, reference.mime)
+    return {"reference_id": reference_id, "name": reference.name, "mime": reference.mime, **result}
 
 
 @method(p.REFERENCE_REMOVE)

@@ -66,6 +66,16 @@ HISTORY_SAVE = "blackboard.history.save"
 HISTORY_RESTORE = "blackboard.history.restore"
 DOC_EXPORT = "blackboard.doc.export"
 
+# Host methods (milestone 7): reading a reference's text, shared IM bots (the host operator's), and
+# the IM accounts a person connects to their user.
+REFERENCE_READ = "blackboard.reference.read"
+BOT_CREATE = "blackboard.bot.create"
+BOT_LIST = "blackboard.bot.list"
+BOT_REVOKE = "blackboard.bot.revoke"
+IDENTITY_LINK_CODE = "blackboard.identity.link_code"
+IDENTITY_LIST = "blackboard.identity.list"
+IDENTITY_UNLINK = "blackboard.identity.unlink"
+
 HOST_METHODS: tuple[str, ...] = (
     ME,
     ME_SET_NAME,
@@ -118,6 +128,13 @@ HOST_METHODS: tuple[str, ...] = (
     HISTORY_SAVE,
     HISTORY_RESTORE,
     DOC_EXPORT,
+    REFERENCE_READ,
+    BOT_CREATE,
+    BOT_LIST,
+    BOT_REVOKE,
+    IDENTITY_LINK_CODE,
+    IDENTITY_LIST,
+    IDENTITY_UNLINK,
 )
 
 # Methods a member's agent and dispatcher call on the host with the member's token (the toolkit
@@ -130,6 +147,19 @@ MANDATE_CLAIM = "blackboard.mandate.claim"
 MANDATE_REPORT = "blackboard.mandate.report"
 MANDATE_PENDING = "blackboard.mandate.pending"
 AGENT_METHODS: tuple[str, ...] = (EDIT, DECISION_CREATE, MANDATE_CLAIM, MANDATE_REPORT, MANDATE_PENDING)
+
+# A shared IM bot calls with its bot token. For itself it may check who it is and connect a person's
+# IM account with their link code; on behalf of a connected person (the X-BB-On-Behalf-Of header,
+# "<platform>:<platform user id>") it may only read.
+IDENTITY_LINK = "blackboard.identity.link"
+BOT_WHOAMI = "blackboard.bot.whoami"
+BOT_OWN_METHODS = frozenset({IDENTITY_LINK, BOT_WHOAMI})
+BOT_READ_METHODS = frozenset(
+    {ME, WORKSPACE_LIST, DOC_LIST, DOC_READ, SUGGESTION_LIST, REFERENCE_LIST, REFERENCE_READ, DECISION_LIST, CHAT_LIST}
+)
+ON_BEHALF_HEADER = "X-BB-On-Behalf-Of"
+# Set by the agent's tools, whose calls are rate limited; the browser's are not.
+AGENT_HEADER = "X-BB-Agent"
 
 # Methods the host serves without a member token.
 NO_AUTH_METHODS = frozenset({INVITE_ACCEPT})
@@ -147,6 +177,10 @@ REFERENCE_UPLOAD = "blackboard.reference.upload"
 SESSION_ATTACH = "blackboard.session.attach"
 SESSION_DETACH = "blackboard.session.detach"
 SESSION_LIST = "blackboard.session.list"
+# Shared-bot credentials of this jiuwenswarm (milestone 7): the bot links it was given.
+BOTS_LIST = "blackboard.bots.list"
+BOTS_CONNECT = "blackboard.bots.connect"
+BOTS_REMOVE = "blackboard.bots.remove"
 
 # Events pushed by the host (and forwarded to browsers with a `host` field).
 EV_WORKSPACE_UPDATED = "blackboard.workspace.updated"
@@ -198,6 +232,8 @@ EVENTS_PATH = "/blackboard/events"
 JOIN_PATH = "/blackboard/join/"
 HEALTH_PATH = "/blackboard/health"
 FILES_PATH = "/blackboard/files/"
+# A bot link is <host base URL><BOT_PATH>#<bot token>; the token stays out of server logs.
+BOT_PATH = "/blackboard/bot"
 # Exports, opened by the browser with a short-lived token.
 EXPORT_PATH = "/blackboard/export/"
 # The document service announces new versions here (X-BB-Secret).

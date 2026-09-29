@@ -13,11 +13,30 @@ from typing import Any
 from jiuwenswarm.extensions.blackboard.common.errors import EXPIRED, UNAUTHORIZED, BlackboardError
 
 MEMBER_TOKEN_PREFIX = "bbm_"
+BOT_TOKEN_PREFIX = "bbb_"
 _BASE32 = "abcdefghijklmnopqrstuvwxyz234567"
+# Link codes are read from a screen and typed into an IM app: no 0/O, 1/I/L.
+_LINK_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 
 
 def new_member_token() -> str:
     return MEMBER_TOKEN_PREFIX + secrets.token_urlsafe(32)
+
+
+def new_bot_token() -> str:
+    return BOT_TOKEN_PREFIX + secrets.token_urlsafe(32)
+
+
+def new_link_code() -> str:
+    """Eight characters shown as XXXX-XXXX (about 40 bits; they live 15 minutes)."""
+    chars = "".join(secrets.choice(_LINK_ALPHABET) for _ in range(8))
+    return f"{chars[:4]}-{chars[4:]}"
+
+
+def normalize_link_code(text: str) -> str:
+    """What a person typed, as the stored XXXX-XXXX: case, spaces and the dash do not matter."""
+    chars = "".join(c for c in text.upper() if c.isalnum())
+    return f"{chars[:4]}-{chars[4:]}" if len(chars) == 8 else chars
 
 
 def hash_token(token: str) -> str:

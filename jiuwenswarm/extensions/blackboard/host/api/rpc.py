@@ -13,8 +13,10 @@ from typing import Any
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-from jiuwenswarm.extensions.blackboard.common.errors import INTERNAL, INVALID, UNAUTHORIZED, BlackboardError
+from jiuwenswarm.extensions.blackboard.common import protocol as p
+from jiuwenswarm.extensions.blackboard.common.errors import INTERNAL, INVALID, RATE_LIMITED, UNAUTHORIZED, BlackboardError
 from jiuwenswarm.extensions.blackboard.common.protocol import NO_AUTH_METHODS
+from jiuwenswarm.extensions.blackboard.host.api.ratelimit import READS_PER_MINUTE
 from jiuwenswarm.extensions.blackboard.host.api.context import HostContext
 from jiuwenswarm.extensions.blackboard.host.api.methods import METHODS, Call, unknown_method
 
@@ -49,14 +51,33 @@ async def handle_rpc(ctx: HostContext, request: Request) -> JSONResponse:
         return _error(unknown_method(name))
 
     user = None
+    bot = None
     if name not in NO_AUTH_METHODS:
+        token = bearer_token(request)
         try:
-            user = await ctx.authenticate(bearer_token(request))
+            user = await ctx.authenticate(token)
         except BlackboardError as exc:
-            return _error(exc, 401 if exc.code == UNAUTHORIZED else 403)
+            # Not a member's token: perhaps a shared bot's.
+            try:
+                bot = await ctx.bot_for(token) if exc.code == UNAUTHORIZED else None
+            except BlackboardError as revoked:
+                return _error(revoked, 401)
+            if bot is None:
+                return _error(exc, 401 if exc.code == UNAUTHORIZED else 403)
+        try:
+            if bot is not None:
+                user = await ctx.acting_for(bot, name, request.headers.get(p.ON_BEHALF_HEADER))
+            elif user is not None and request.headers.get(p.AGENT_HEADER) and name in p.BOT_READ_METHODS:
+                ctx.limits.check(f"agent:{user.id}", READS_PER_MINUTE)
+        except BlackboardError as exc:
+            return _error(exc, 429 if exc.code == RATE_LIMITED else 403)
+    elif name in p.BOT_OWN_METHODS:
+        return _error(BlackboardError(UNAUTHORIZED, "a bot token is required"), 401)
+    if bot is None and name in p.BOT_OWN_METHODS:
+        return _error(BlackboardError(UNAUTHORIZED, "only a shared bot calls this"), 403)
 
     try:
-        payload = await handler(Call(ctx=ctx, user=user, params=params))
+        payload = await handler(Call(ctx=ctx, user=user, params=params, bot=bot))
     except BlackboardError as exc:
         return _error(exc)
     except Exception:  # noqa: BLE001 - the caller gets a stable code, the log gets the trace

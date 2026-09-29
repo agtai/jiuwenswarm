@@ -35,6 +35,8 @@
     },
     "workspace": {
       "handle": "@bb:{{name}}",
+      "copyHandle": "复制智能体用来识别此工作区的名称",
+      "handleCopied": "已复制 {{handle}}。在任何对话中提到它即可询问此工作区。",
       "rename": "重命名",
       "archive": "归档",
       "unarchive": "恢复",
@@ -311,7 +313,7 @@
     },
     "chat": {
       "menuItem": "Blackboard",
-      "hint": "此对话中的智能体会处理你开启的工作区，它的修改会以建议的形式出现在那里。",
+      "hint": "任何对话中的智能体都能读取你的工作区。它只修改你在这里开启的工作区，修改会以建议的形式出现在那里。",
       "loading": "正在加载工作区...",
       "empty": "还没有你可以编辑的工作区。请在 Blackboard 中创建或加入一个。",
       "openBlackboard": "打开 Blackboard",
@@ -424,6 +426,30 @@
       "md": "Markdown (.md)",
       "decisions": "附上关于此文档的已回答决策",
       "confirm": "导出"
+    },
+    "im": {
+      "accounts": "已连接的 IM 账号",
+      "accountsHint": "将你的 Slack、飞书或其他 IM 账号连接到你在 {{host}} 上的用户，团队共享的 jiuwenswarm 机器人便能在那里替你读取工作区。它只读。",
+      "connect": "连接",
+      "codeHint": "请在 15 分钟内将以下内容发送给 IM 中的共享 jiuwenswarm 机器人：",
+      "copy": "复制",
+      "copied": "已复制",
+      "noAccounts": "尚未连接 IM 账号。",
+      "disconnect": "断开",
+      "bots": "共享 IM 机器人",
+      "botsHint": "作为机器人安装在团队 IM 中的 jiuwenswarm 需要本主机的机器人链接。之后每个人连接自己的 IM 账号，机器人只读取其本人可读的内容。",
+      "botName": "机器人名称，例如：团队机器人",
+      "createBot": "创建",
+      "botLinkHint": "机器人链接，仅显示一次。请将它粘贴到机器人 jiuwenswarm 的 Blackboard 设置中的“作为共享机器人”一节。",
+      "revoked": "已撤销",
+      "lastUsed": "上次使用 {{time}}",
+      "neverUsed": "尚未使用",
+      "revoke": "撤销",
+      "botMode": "作为共享机器人",
+      "botModeHint": "如果此 jiuwenswarm 是团队 IM 中的机器人，请粘贴主机管理员提供的机器人链接。之后 IM 消息将以已连接账号的人的身份只读地回答。",
+      "botModeOn": "发给此 jiuwenswarm 的 IM 消息将以已连接账号的人的身份只读地回答。网页端仍以你的身份工作。",
+      "remove": "移除",
+      "connectBot": "连接"
     },
     "decisions": {
       "tab": "决策",

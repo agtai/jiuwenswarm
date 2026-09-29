@@ -31,6 +31,9 @@ LOCAL_METHODS = {
     p.SESSION_ATTACH,
     p.SESSION_DETACH,
     p.SESSION_LIST,
+    p.BOTS_LIST,
+    p.BOTS_CONNECT,
+    p.BOTS_REMOVE,
 }
 
 

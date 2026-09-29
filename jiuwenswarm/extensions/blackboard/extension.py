@@ -7,7 +7,9 @@ and the HTTP API that members' instances connect to.
 
 ``initialize()`` runs in the Gateway and in the AgentServer; ``bind_web_channel``
 only in the Gateway, which is where both parts live. ``agent_tools`` runs in the
-AgentServer: a session attached to a workspace gets that workspace's tools.
+AgentServer: every session of a member can read their workspaces, and a session attached to a
+workspace can also edit it. On a jiuwenswarm that serves a team's IM as a shared bot, IM requests
+read for the connected person who wrote (milestone 7).
 ``shutdown()`` is not called by either process today, so nothing here depends on it.
 """
 
@@ -23,19 +25,25 @@ from jiuwenswarm.extensions.sdk import (
     ApplicationPluginServices,
     FrontendContribution,
 )
+from jiuwenswarm.extensions.blackboard.client.bots import BotRegistry
 from jiuwenswarm.extensions.blackboard.client.hosts import HostRegistry
 from jiuwenswarm.extensions.blackboard.client.sessions import SessionAttachments
 from jiuwenswarm.extensions.blackboard.client.toolkit.bridge import to_openjiuwen
 from jiuwenswarm.extensions.blackboard.client.dispatcher import CHANNEL, MandateDispatcher
-from jiuwenswarm.extensions.blackboard.client.toolkit.tools import MandateRef, SessionTools, WorkspaceRef
+from jiuwenswarm.extensions.blackboard.client.toolkit.tools import Access, MandateRef, SessionTools, WorkspaceRef
 from jiuwenswarm.extensions.blackboard.client.rpc import register_rpcs
 from jiuwenswarm.extensions.blackboard.client.runtime import ClientRuntime
-from jiuwenswarm.extensions.blackboard.common.config import load_host_settings, save_host_settings
+from jiuwenswarm.extensions.blackboard.common.config import load_host_settings, load_im_owner_ids, save_host_settings
 from jiuwenswarm.extensions.blackboard.common.logs import setup_file_logging
 from jiuwenswarm.extensions.blackboard.common.paths import blackboard_dir, client_dir, host_dir
 from jiuwenswarm.extensions.blackboard.host.controller import HostController
 
 logger = logging.getLogger(__name__)
+
+# Channels whose messages come from people on an IM platform rather than from this instance's owner.
+IM_PLATFORMS = ("dingtalk", "discord", "feishu", "slack", "telegram", "wechat", "wecom", "whatsapp", "xiaoyi")
+NOT_OWNER = "This jiuwenswarm reads Blackboard only for its owner's IM accounts (blackboard.im_owner_ids)."
+NO_SENDER = "This IM message does not say who sent it, so nothing can be read for them."
 
 
 class BlackboardApplicationPlugin(ApplicationPluginExtension):
@@ -45,10 +53,10 @@ class BlackboardApplicationPlugin(ApplicationPluginExtension):
         self.client: ClientRuntime | None = None
         self.host: HostController | None = None
         self._tasks: set[asyncio.Task] = set()
-        # AgentServer side: per session, the toolkit and the tools handed to its agent, without and
-        # with blackboard_ask (turns of a comment or chat task).
-        self._toolsets: dict[str, tuple[SessionTools, list[Any], list[Any]]] = {}
-        self._client_files: tuple[SessionAttachments, HostRegistry] | None = None
+        # AgentServer side: per session, what its tools were made for, the toolkit, and the tools
+        # handed to its agent; made again when the attachments, the kind of access or a task change.
+        self._toolsets: dict[str, tuple[tuple[Any, ...], SessionTools, list[Any]]] = {}
+        self._client_files: tuple[SessionAttachments, HostRegistry, BotRegistry] | None = None
 
     async def initialize(self, config: Any) -> None:
         del config
@@ -108,30 +116,47 @@ class BlackboardApplicationPlugin(ApplicationPluginExtension):
             return []
         if self._client_files is None:
             base = client_dir(blackboard_dir())
-            self._client_files = (SessionAttachments(base / "sessions.json"), HostRegistry(base / "hosts.json"))
-        attachments, registry = self._client_files
-        workspaces = [WorkspaceRef(a.host, a.workspace_id, a.title) for a in attachments.for_session(ctx.session_id)]
+            self._client_files = (
+                SessionAttachments(base / "sessions.json"),
+                HostRegistry(base / "hosts.json"),
+                BotRegistry(base / "bots.json"),
+            )
+        attachments, registry, bots = self._client_files
         task = _dispatched(ctx)
-        if task is not None and not any((w.host_id, w.workspace_id) == (task.host_id, task.workspace_id) for w in workspaces):
-            title = str((ctx.metadata.get("blackboard") or {}).get("workspace_title") or "")
-            workspaces.append(WorkspaceRef(task.host_id, task.workspace_id, title))
-        if not workspaces:
+        workspaces: list[WorkspaceRef] = []
+        im = _is_im(ctx.channel_id)
+        if im and bots.entries():
+            # A shared bot: read for the person who wrote, never with a member's token, never edit.
+            sender = str(ctx.user_id or "").strip()
+            access = Access("bot", on_behalf=f"{ctx.channel_id}:{sender}") if sender else Access("denied", reason=NO_SENDER)
+            task = None
+        elif registry.entries():
+            access = Access("member")
+            if im and not _owner_allowed(ctx):
+                access = Access("denied", reason=NOT_OWNER)
+            else:
+                workspaces = [WorkspaceRef(a.host, a.workspace_id, a.title) for a in attachments.for_session(ctx.session_id)]
+                if task is not None and not any((w.host_id, w.workspace_id) == (task.host_id, task.workspace_id) for w in workspaces):
+                    title = str((ctx.metadata.get("blackboard") or {}).get("workspace_title") or "")
+                    workspaces.append(WorkspaceRef(task.host_id, task.workspace_id, title))
+        else:
+            # This jiuwenswarm has joined no host: no Blackboard tools.
             self._toolsets.pop(ctx.session_id, None)
             return []
+        shape = (tuple(workspaces), access.kind, task is not None)
         current = self._toolsets.get(ctx.session_id)
-        if current is None or current[0].workspaces != workspaces:
-            toolkit = SessionTools(registry=registry, session_id=ctx.session_id, workspaces=workspaces)
-            plain = to_openjiuwen(toolkit.specs(), owner=ctx.session_id)
-            toolkit.mandate = MandateRef("", "", "")
-            asking = to_openjiuwen(toolkit.specs(), owner=ctx.session_id)
-            current = (toolkit, plain, asking)
+        if current is None or current[0] != shape:
+            toolkit = SessionTools(registry=registry, bots=bots, session_id=ctx.session_id, workspaces=workspaces, access=access, mandate=task)
+            current = (shape, toolkit, to_openjiuwen(toolkit.specs(), owner=ctx.session_id))
             self._toolsets[ctx.session_id] = current
-        toolkit = current[0]
+        toolkit = current[1]
         # Edits of one turn share a mandate; the next turn begins another. A dispatched turn works
-        # under its task's mandate and may ask the workspace a question.
+        # under its task's mandate and may ask the workspace a question. In a group chat the sender,
+        # and so the access, can change from one message to the next.
         toolkit.turn_id = ctx.request_id or ""
         toolkit.mandate = task
-        return current[2] if task is not None else current[1]
+        toolkit.access = access
+        return current[2]
 
     def frontend_contributions(self) -> tuple[FrontendContribution, ...]:
         return (
@@ -152,6 +177,22 @@ async def register_extensions(registry: Any) -> list[BlackboardApplicationPlugin
     extension = BlackboardApplicationPlugin()
     registry.register_application_plugin(extension)
     return [extension]
+
+
+def _is_im(channel_id: str | None) -> bool:
+    return bool(channel_id) and str(channel_id).startswith(IM_PLATFORMS)
+
+
+def _owner_allowed(ctx: AgentToolContext) -> bool:
+    """On a personal jiuwenswarm, whether an IM sender may read the owner's workspaces."""
+    try:
+        owners = load_im_owner_ids()
+    except Exception:  # noqa: BLE001 - no readable config means no restriction beyond the channel's
+        return True
+    if not owners:
+        return True
+    sender = str(ctx.user_id or "")
+    return bool(sender) and (sender in owners or f"{ctx.channel_id}:{sender}" in owners)
 
 
 def _dispatched(ctx: AgentToolContext) -> MandateRef | None:

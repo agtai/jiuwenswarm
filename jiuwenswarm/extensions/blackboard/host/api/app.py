@@ -12,6 +12,7 @@ from jiuwenswarm.extensions.blackboard.host.api import decisions as _decisions  
 from jiuwenswarm.extensions.blackboard.host.api import dispatch as _dispatch  # noqa: F401 - registers methods
 from jiuwenswarm.extensions.blackboard.host.api import documents as _documents  # noqa: F401 - registers methods
 from jiuwenswarm.extensions.blackboard.host.api import history
+from jiuwenswarm.extensions.blackboard.host.api import identities as _identities  # noqa: F401 - registers methods
 from jiuwenswarm.extensions.blackboard.host.api import mandates as _mandates  # noqa: F401 - registers methods
 from jiuwenswarm.extensions.blackboard.host.api import references
 from jiuwenswarm.extensions.blackboard.host.api.context import HostContext

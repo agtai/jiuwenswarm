@@ -564,6 +564,19 @@ export function BlackboardPage() {
         hostName={host?.name ?? null}
         displayName={state.me?.display_name ?? ''}
         hostStatus={state.hostStatus}
+        isOperator={Boolean(state.me?.is_operator)}
+        profile={state.me}
+        im={{
+          accounts: () => controller.imAccounts(),
+          linkCode: () => controller.imLinkCode(),
+          unlink: (platform, externalId) => controller.imUnlink(platform, externalId),
+          bots: () => controller.hostBots(),
+          createBot: (name) => controller.createBot(name),
+          revokeBot: (botId) => controller.revokeBot(botId),
+          botLinks: () => controller.botLinks(),
+          connectBot: (link) => controller.connectBot(link),
+          removeBotLink: (id) => controller.removeBotLink(id),
+        }}
         onSaveName={(name) => controller.setDisplayName(name)}
         onApplyHosting={(settings) => controller.setHostSettings(settings)}
         onClose={close}

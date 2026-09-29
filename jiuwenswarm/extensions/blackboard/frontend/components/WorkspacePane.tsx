@@ -4,6 +4,7 @@ import {
   Archive,
   ArchiveRestore,
   BookMarked,
+  Copy,
   Download,
   FileCode2,
   FileInput,
@@ -24,6 +25,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
   Tag,
+  toast,
 } from '../../../../channels/web/frontend/src/components/ui';
 import type { CommentActions, SuggestionActions } from '../editor/DocumentEditor';
 import type { VersionActions } from '../editor/VersionView';
@@ -95,6 +97,20 @@ export function WorkspacePane({
           <h2 data-testid="blackboard-workspace-title">{workspace.title}</h2>
           <p className="bb-muted">
             <span data-testid="blackboard-workspace-handle">{t('blackboard.workspace.handle', { name: workspace.name })}</span>
+            <button
+              type="button"
+              className="bb-icon-button"
+              aria-label={t('blackboard.workspace.copyHandle')}
+              title={t('blackboard.workspace.copyHandle')}
+              data-testid="blackboard-workspace-handle-copy-btn"
+              onClick={() =>
+                void navigator.clipboard
+                  .writeText(t('blackboard.workspace.handle', { name: workspace.name }))
+                  .then(() => toast.open({ content: t('blackboard.workspace.handleCopied', { handle: `@bb:${workspace.name}` }), variant: 'success' }))
+              }
+            >
+              <Copy size={12} />
+            </button>
             <Tag variant={owner ? 'info' : 'neutral'} data-testid="blackboard-workspace-role" data-variant={workspace.role}>
               {t(`blackboard.roles.${workspace.role}`)}
             </Tag>

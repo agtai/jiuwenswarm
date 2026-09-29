@@ -550,3 +550,63 @@ class Decision:
             "accepted_at": self.accepted_at,
             "created_at": self.created_at,
         }
+
+
+@dataclass(frozen=True)
+class Bot:
+    id: str
+    name: str
+    created_by: str
+    created_at: str
+    last_used_at: str | None
+    revoked_at: str | None
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> "Bot":
+        return cls(
+            id=row["id"],
+            name=row["name"],
+            created_by=row["created_by"],
+            created_at=row["created_at"],
+            last_used_at=row["last_used_at"],
+            revoked_at=row["revoked_at"],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "created_by": self.created_by,
+            "created_at": self.created_at,
+            "last_used_at": self.last_used_at,
+            "revoked": self.revoked_at is not None,
+        }
+
+
+@dataclass(frozen=True)
+class Identity:
+    platform: str
+    external_id: str
+    user_id: str
+    display_name: str | None
+    bot_id: str | None
+    linked_at: str
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> "Identity":
+        return cls(
+            platform=row["platform"],
+            external_id=row["external_id"],
+            user_id=row["user_id"],
+            display_name=row["display_name"],
+            bot_id=row["bot_id"],
+            linked_at=row["linked_at"],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "platform": self.platform,
+            "external_id": self.external_id,
+            "display_name": self.display_name,
+            "linked_at": self.linked_at,
+        }

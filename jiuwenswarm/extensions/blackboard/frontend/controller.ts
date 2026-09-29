@@ -21,8 +21,11 @@ import type {
   WorkspaceView,
   AnchorDraft,
   ChatMessageView,
+  BotLinkView,
+  BotView,
   DecisionView,
   DiffView,
+  IdentityView,
   ExportFormat,
   ThreadView,
   VersionView,
@@ -929,6 +932,46 @@ export class BlackboardController {
     ]);
     const taken = new Set((attached.sessions ?? []).map((s) => s.session_id));
     return recent.filter((s) => !taken.has(s.session_id));
+  }
+
+  // ---- IM accounts and shared bots (milestone 7) ----
+
+  async imAccounts(): Promise<IdentityView[]> {
+    const result = await this.rpc<{ identities: IdentityView[] }>('blackboard.identity.list', { host: this.requireHost() });
+    return result.identities ?? [];
+  }
+
+  imLinkCode(): Promise<{ code: string; expires_at: string }> {
+    return this.rpc('blackboard.identity.link_code', { host: this.requireHost() });
+  }
+
+  async imUnlink(platform: string, externalId: string): Promise<void> {
+    await this.rpc('blackboard.identity.unlink', { host: this.requireHost(), platform, external_id: externalId });
+  }
+
+  async hostBots(): Promise<BotView[]> {
+    const result = await this.rpc<{ bots: BotView[] }>('blackboard.bot.list', { host: this.requireHost() });
+    return result.bots ?? [];
+  }
+
+  createBot(name: string): Promise<{ bot: BotView; link: string }> {
+    return this.rpc('blackboard.bot.create', { host: this.requireHost(), name });
+  }
+
+  async revokeBot(botId: string): Promise<void> {
+    await this.rpc('blackboard.bot.revoke', { host: this.requireHost(), bot_id: botId });
+  }
+
+  async botLinks(): Promise<BotLinkView[]> {
+    return (await this.rpc<{ bots: BotLinkView[] }>('blackboard.bots.list', {})).bots ?? [];
+  }
+
+  async connectBot(link: string): Promise<BotLinkView[]> {
+    return (await this.rpc<{ bots: BotLinkView[] }>('blackboard.bots.connect', { link })).bots ?? [];
+  }
+
+  async removeBotLink(id: string): Promise<BotLinkView[]> {
+    return (await this.rpc<{ bots: BotLinkView[] }>('blackboard.bots.remove', { bot: id })).bots ?? [];
   }
 
   async setDisplayName(displayName: string): Promise<void> {

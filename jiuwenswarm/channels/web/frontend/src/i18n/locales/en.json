@@ -35,6 +35,8 @@
     },
     "workspace": {
       "handle": "@bb:{{name}}",
+      "copyHandle": "Copy the name agents know this workspace by",
+      "handleCopied": "Copied {{handle}}. Mention it in any chat to ask about this workspace.",
       "rename": "Rename",
       "archive": "Archive",
       "unarchive": "Restore",
@@ -311,7 +313,7 @@
     },
     "chat": {
       "menuItem": "Blackboard",
-      "hint": "The agent in this chat works on the workspaces you turn on; its edits arrive there as suggestions.",
+      "hint": "The agent in any chat can read your workspaces. It edits only the ones you turn on here, and its edits arrive there as suggestions.",
       "loading": "Loading workspaces...",
       "empty": "No workspace you can edit yet. Create or join one in Blackboard.",
       "openBlackboard": "Open Blackboard",
@@ -424,6 +426,30 @@
       "md": "Markdown (.md)",
       "decisions": "Add the answered decisions about this document",
       "confirm": "Export"
+    },
+    "im": {
+      "accounts": "Connected IM accounts",
+      "accountsHint": "Connect your Slack, Feishu or other IM account to your user on {{host}}, so the team's shared jiuwenswarm bot reads your workspaces for you there. It only reads.",
+      "connect": "Connect",
+      "codeHint": "Send this to the shared jiuwenswarm bot in your IM app within 15 minutes:",
+      "copy": "Copy",
+      "copied": "Copied",
+      "noAccounts": "No IM account connected.",
+      "disconnect": "Disconnect",
+      "bots": "Shared IM bots",
+      "botsHint": "A jiuwenswarm installed as a bot in your team's IM needs a bot link from this host. Each person then connects their own IM account, and the bot reads only what they can read.",
+      "botName": "Bot name, for example Team bot",
+      "createBot": "Create",
+      "botLinkHint": "The bot link, shown once. Paste it into the bot jiuwenswarm's Blackboard settings, under This jiuwenswarm as a shared bot.",
+      "revoked": "Revoked",
+      "lastUsed": "Last used {{time}}",
+      "neverUsed": "Not used yet",
+      "revoke": "Revoke",
+      "botMode": "This jiuwenswarm as a shared bot",
+      "botModeHint": "If this jiuwenswarm is a bot in your team's IM, paste the bot link the host's operator gave you. IM messages are then answered for the people who connected their accounts, reading only.",
+      "botModeOn": "IM messages to this jiuwenswarm are answered for the people who connected their accounts, reading only. The web app still works as you.",
+      "remove": "Remove",
+      "connectBot": "Connect"
     },
     "decisions": {
       "tab": "Decisions",

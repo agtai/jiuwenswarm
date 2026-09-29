@@ -226,6 +226,38 @@ MIGRATIONS: list[tuple[int, tuple[str, ...]]] = [
             "ALTER TABLE receipts ADD COLUMN version_id TEXT",
         ),
     ),
+    (
+        6,
+        (
+            # Shared IM bots, made by the host operator (milestone 7).
+            """CREATE TABLE bots (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                token_hash TEXT NOT NULL UNIQUE,
+                created_by TEXT NOT NULL REFERENCES users(id),
+                created_at TEXT NOT NULL,
+                last_used_at TEXT,
+                revoked_at TEXT
+            )""",
+            # IM accounts people connected to their user; a bot acts for them.
+            """CREATE TABLE im_identities (
+                platform TEXT NOT NULL,
+                external_id TEXT NOT NULL,
+                user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                display_name TEXT,
+                bot_id TEXT,
+                linked_at TEXT NOT NULL,
+                PRIMARY KEY (platform, external_id)
+            )""",
+            "CREATE INDEX im_identities_user ON im_identities(user_id)",
+            """CREATE TABLE im_link_codes (
+                code TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            )""",
+        ),
+    ),
 ]
 
 LATEST_VERSION = MIGRATIONS[-1][0]

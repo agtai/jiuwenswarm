@@ -1515,3 +1515,35 @@
 }
 
 .bb-diff__fold:hover { border-color: var(--color-action-primary); }
+
+/* ---- reading from IM: connected accounts, shared bots ---- */
+
+.bb-im-list { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; list-style: none; }
+
+.bb-im-list li {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 0;
+  font-size: 13px;
+}
+
+.bb-im-list li > span { display: inline-flex; gap: 4px; align-items: center; min-width: 0; overflow-wrap: anywhere; }
+.bb-im-form { display: flex; gap: 8px; align-items: center; }
+.bb-im-form > :first-child { flex: 1 1 auto; min-width: 0; }
+
+.bb-im-code {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 8px;
+  background: var(--color-surface-panel);
+  font-size: 13px;
+}
+
+.bb-im-code p { margin: 0; }
+.bb-im-code__line { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+.bb-im-code code { overflow-wrap: anywhere; font-size: 14px; font-weight: 600; }

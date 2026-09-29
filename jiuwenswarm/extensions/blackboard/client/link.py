@@ -47,9 +47,10 @@ async def call_host(
     token: str | None = None,
     timeout: float = HTTP_TIMEOUT_S,
     retries: int = RETRIES,
+    headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """One RPC to a host. Retries only when the host cannot be reached."""
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    headers = {**({"Authorization": f"Bearer {token}"} if token else {}), **(headers or {})}
     body = {"method": method, "params": params}
     last: Exception | None = None
     for attempt in range(retries):

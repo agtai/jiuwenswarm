@@ -293,8 +293,10 @@ class HostWorld:
         return reference_id
 
 
-async def rpc(base: str, method: str, params: dict | None = None, token: str | None = None) -> tuple[int, dict]:
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
+async def rpc(
+    base: str, method: str, params: dict | None = None, token: str | None = None, headers: dict[str, str] | None = None
+) -> tuple[int, dict]:
+    headers = {**({"Authorization": f"Bearer {token}"} if token else {}), **(headers or {})}
     async with httpx.AsyncClient() as client:
         response = await client.post(f"{base}{p.RPC_PATH}", json={"method": method, "params": params or {}}, headers=headers)
     return response.status_code, response.json()

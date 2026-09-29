@@ -7,19 +7,33 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
+from jiuwenswarm.extensions.blackboard.common import protocol as p
 from jiuwenswarm.extensions.blackboard.common.config import HostSettings
-from jiuwenswarm.extensions.blackboard.common.errors import DISABLED, UNAUTHORIZED, UNAVAILABLE, BlackboardError
+from jiuwenswarm.extensions.blackboard.common.errors import (
+    DISABLED,
+    FORBIDDEN,
+    NOT_LINKED,
+    UNAUTHORIZED,
+    UNAVAILABLE,
+    BlackboardError,
+)
 from jiuwenswarm.extensions.blackboard.common.tokens import hash_token
 from jiuwenswarm.extensions.blackboard.host.api.events import EventHub
 from jiuwenswarm.extensions.blackboard.host.api.locks import LockWaits
+from jiuwenswarm.extensions.blackboard.host.api.ratelimit import BOT_CALLS_PER_MINUTE, READS_PER_MINUTE, RateLimiter
 from jiuwenswarm.extensions.blackboard.host.secrets import HostSecrets
-from jiuwenswarm.extensions.blackboard.host.store import Store, users
-from jiuwenswarm.extensions.blackboard.host.store.models import User
+from jiuwenswarm.extensions.blackboard.host.store import Store, bots, users
+from jiuwenswarm.extensions.blackboard.host.store.models import Bot, User
 
 if TYPE_CHECKING:
     from jiuwenswarm.extensions.blackboard.host.docservice_manager import DocServiceClient, DocServiceManager
 
 _TOUCH_INTERVAL_S = 60.0
+
+NOT_LINKED_MESSAGE = (
+    "This IM account is not connected to a Blackboard user on this host. In the jiuwenswarm web app, open "
+    "Blackboard settings, choose Connect under Connected IM accounts, and send the code to this bot."
+)
 
 
 @dataclass
@@ -37,6 +51,7 @@ class HostContext:
     # Where exports wait to be downloaded: <exports_dir>/<export id>/<file name>.
     exports_dir: Path | None = None
     lock_waits: LockWaits = field(default_factory=LockWaits)
+    limits: RateLimiter = field(default_factory=RateLimiter)
     _last_touch: dict[str, float] = field(default_factory=dict)
 
     @property
@@ -80,4 +95,39 @@ class HostContext:
         if now - self._last_touch.get(user.id, 0.0) > _TOUCH_INTERVAL_S:
             self._last_touch[user.id] = now
             await self.store.transact(lambda c: users.touch(c, user.id))
+        return user
+
+    async def bot_for(self, token: str | None) -> Bot | None:
+        """The shared bot a token belongs to, or None when it is no bot's."""
+        if not token:
+            return None
+        bot = await self.store.read(lambda c: bots.by_token_hash(c, hash_token(token)))
+        if bot is None:
+            return None
+        if bot.revoked_at is not None:
+            raise BlackboardError(UNAUTHORIZED, "this bot was revoked on the host")
+        now = time.monotonic()
+        if now - self._last_touch.get(bot.id, 0.0) > _TOUCH_INTERVAL_S:
+            self._last_touch[bot.id] = now
+            await self.store.transact(lambda c: bots.touch(c, bot.id))
+        return bot
+
+    async def acting_for(self, bot: Bot, method: str, on_behalf: str | None) -> User | None:
+        """Who a bot's call runs as: nobody for the bot's own methods, else the connected person named
+        by the on-behalf-of header, for reading only."""
+        self.limits.check(f"bot:{bot.id}", BOT_CALLS_PER_MINUTE)
+        if method in p.BOT_OWN_METHODS:
+            return None
+        if method not in p.BOT_READ_METHODS:
+            raise BlackboardError(FORBIDDEN, "a shared bot can only read", {"method": method})
+        platform, _, external_id = (on_behalf or "").partition(":")
+        if not platform or not external_id:
+            raise BlackboardError(NOT_LINKED, NOT_LINKED_MESSAGE)
+        self.limits.check(f"identity:{bot.id}:{platform}:{external_id}", READS_PER_MINUTE)
+        found = await self.store.read(lambda c: bots.identity(c, platform, external_id))
+        if found is None:
+            raise BlackboardError(NOT_LINKED, NOT_LINKED_MESSAGE, {"platform": platform})
+        user = await self.store.read(lambda c: users.get(c, found.user_id))
+        if user is None or user.status != "active":
+            raise BlackboardError(DISABLED, "this user is disabled on the host")
         return user

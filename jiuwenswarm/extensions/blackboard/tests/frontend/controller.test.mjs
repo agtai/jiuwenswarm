@@ -60,6 +60,11 @@ function fakeWorld() {
         return { versions: structuredClone(world.history?.[params.doc_id] ?? []), has_more: false };
       case 'blackboard.history.restore':
         return { version: { id: 'v_restore', doc_id: params.doc_id, reason: 'restore', created_at: '2026-09-29T12:00:00Z', authors: [] } };
+      case 'blackboard.identity.list':
+        return { identities: [{ platform: 'slack', external_id: 'U1', display_name: null, linked_at: 't' }] };
+      case 'blackboard.bots.connect':
+      case 'blackboard.bots.remove':
+        return { bots: [{ id: 'hb1', host_name: 'Team', bot_name: 'Team bot' }] };
       case 'blackboard.doc.export':
         return { url: 'http://host/blackboard/export/x_1?t=abc', file_name: 'Plan.docx' };
       case 'blackboard.chat.post':
@@ -442,4 +447,23 @@ test('the history follows the open document, and pushed versions join it once', 
   assert.equal(exported.file_name, 'Plan.docx');
   const sent = f.calls.find(([method]) => method === 'blackboard.doc.export')[1];
   assert.deepEqual(sent, { host: 'h1', doc_id: 'd2', format: 'docx', include_decisions: true });
+});
+
+test('IM accounts and bots go to the selected host; bot links stay on this jiuwenswarm', async () => {
+  const f = fakeWorld();
+  const c = new BlackboardController(f.rpc, f.subscribe);
+  await c.start();
+  assert.deepEqual((await c.imAccounts()).map((a) => a.external_id), ['U1']);
+  await c.imLinkCode();
+  await c.imUnlink('slack', 'U1');
+  await c.createBot('Team bot');
+  await c.revokeBot('bot_1');
+  assert.deepEqual((await c.connectBot('https://x/blackboard/bot#bbb_1')).map((b) => b.id), ['hb1']);
+  await c.removeBotLink('hb1');
+  const sent = Object.fromEntries(f.calls.filter(([m]) => m.startsWith('blackboard.identity.') || m.startsWith('blackboard.bot')).map(([m, p]) => [m, p]));
+  assert.deepEqual(sent['blackboard.identity.unlink'], { host: 'h1', platform: 'slack', external_id: 'U1' });
+  assert.deepEqual(sent['blackboard.bot.create'], { host: 'h1', name: 'Team bot' });
+  assert.deepEqual(sent['blackboard.bot.revoke'], { host: 'h1', bot_id: 'bot_1' });
+  assert.deepEqual(sent['blackboard.bots.connect'], { link: 'https://x/blackboard/bot#bbb_1' });
+  assert.deepEqual(sent['blackboard.bots.remove'], { bot: 'hb1' });
 });

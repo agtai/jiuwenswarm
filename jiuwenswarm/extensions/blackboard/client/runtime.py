@@ -8,6 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from jiuwenswarm.extensions.blackboard.client.bots import BotEntry, BotRegistry, parse_bot_link
 from jiuwenswarm.extensions.blackboard.client.hosts import HostEntry, HostRegistry
 from jiuwenswarm.extensions.blackboard.client.invite_link import parse_invite_link
 from jiuwenswarm.extensions.blackboard.client.link import HostLink, call_host
@@ -27,6 +28,7 @@ class ClientRuntime:
     def __init__(self, hosts_file: Path, broadcast: Broadcast) -> None:
         self.registry = HostRegistry(hosts_file)
         self.sessions = SessionAttachments(Path(hosts_file).parent / "sessions.json")
+        self.bots = BotRegistry(Path(hosts_file).parent / "bots.json")
         # Runs comment and chat tasks on this jiuwenswarm's agent; set where the agent client exists.
         self.dispatcher: Any = None
         self._broadcast = broadcast
@@ -125,6 +127,34 @@ class ClientRuntime:
         entry = self._entry(host_id)
         link = self._links.get(entry.id) or self._open_link(entry)
         return await link.upload(workspace_id, **file)
+
+    # ---- shared-bot credentials ----
+
+    def bots_view(self) -> dict[str, Any]:
+        return {"bots": [b.public() for b in self.bots.entries()]}
+
+    async def connect_bot(self, link: str) -> dict[str, Any]:
+        """Keep a bot link after the host confirms it; IM requests then read as connected accounts."""
+        base_url, token = parse_bot_link(link)
+        result = await call_host(base_url, p.BOT_WHOAMI, {}, token=token)
+        bot = result.get("bot") if isinstance(result.get("bot"), dict) else {}
+        host = result.get("host") if isinstance(result.get("host"), dict) else {}
+        entry = BotEntry(
+            id=new_id("hb"),
+            host_uid=str(host.get("host_uid") or base_url),
+            host_name=str(host.get("name") or ""),
+            url=base_url,
+            token=token,
+            bot_id=str(bot.get("id") or ""),
+            bot_name=str(bot.get("name") or ""),
+        )
+        await self.bots.upsert(entry)
+        return {"bot": entry.public(), **self.bots_view()}
+
+    async def remove_bot(self, entry_id: str) -> dict[str, Any]:
+        if not await self.bots.remove(entry_id):
+            raise not_found("this jiuwenswarm has no such bot link", bot=entry_id)
+        return self.bots_view()
 
     # ---- changes ----
 

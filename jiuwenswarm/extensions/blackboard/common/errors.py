@@ -15,6 +15,9 @@ DISABLED = "disabled"
 UNAVAILABLE = "unavailable"
 # Another mandate holds the document.
 BUSY = "busy"
+# Milestone 7: an IM account nobody connected, and too many calls in a minute.
+NOT_LINKED = "not_linked"
+RATE_LIMITED = "rate_limited"
 INTERNAL = "internal"
 
 

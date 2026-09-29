@@ -301,5 +301,33 @@ export interface DiffView {
 
 export type ExportFormat = 'md' | 'docx' | 'pdf';
 
+// An IM account connected to this person's user on a host (milestone 7).
+export interface IdentityView {
+  platform: string;
+  external_id: string;
+  display_name: string | null;
+  linked_at: string;
+}
+
+// A shared bot made by the host's operator.
+export interface BotView {
+  id: string;
+  name: string;
+  created_at: string;
+  last_used_at: string | null;
+  revoked: boolean;
+}
+
+// A bot link this jiuwenswarm keeps, to answer IM messages as a shared bot.
+export interface BotLinkView {
+  id: string;
+  host_uid: string;
+  host_name: string;
+  url: string;
+  bot_id: string;
+  bot_name: string;
+  added_at: string;
+}
+
 export type Rpc = <T = unknown>(method: string, params?: Record<string, unknown>) => Promise<T>;
 export type Subscribe = (event: string, handler: (payload: Record<string, unknown>) => void) => () => void;

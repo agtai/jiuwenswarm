@@ -8,6 +8,7 @@ import { describeError } from '../errors';
 import { isValidWorkspaceName, parseInviteLink, suggestWorkspaceName } from '../inviteLink';
 import type { HostStatus, InviteRole, InviteView } from '../types';
 import { Field } from './Field';
+import { BotMode, ConnectedAccounts, HostBots, type ImActions } from './ImSettings';
 
 // Runs `action`, keeps the dialog open with the error if it throws.
 export function useSubmit(onDone: () => void) {
@@ -397,6 +398,9 @@ export function SettingsDialog({
   hostName,
   displayName,
   hostStatus,
+  isOperator,
+  profile,
+  im,
   onSaveName,
   onApplyHosting,
   onClose,
@@ -405,6 +409,11 @@ export function SettingsDialog({
   hostName: string | null;
   displayName: string;
   hostStatus: HostStatus | null;
+  // The person runs the current host: they make its shared bots.
+  isOperator: boolean;
+  // Changes when the profile reloads, so connected accounts load again.
+  profile: unknown;
+  im: ImActions;
   onSaveName: (name: string) => Promise<unknown>;
   onApplyHosting: (settings: Record<string, unknown>) => Promise<unknown>;
   onClose: () => void;
@@ -570,6 +579,9 @@ export function SettingsDialog({
           </p>
         ) : null}
       </section>
+      {open && hostName ? <ConnectedAccounts hostName={hostName} changed={profile} actions={im} /> : null}
+      {open && hostName && isOperator ? <HostBots actions={im} /> : null}
+      {open ? <BotMode actions={im} /> : null}
     </FormDialog>
   );
 }
