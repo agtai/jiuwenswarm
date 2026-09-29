@@ -58,6 +58,14 @@ DECISION_ACCEPT = "blackboard.decision.accept"
 DECISION_CANCEL = "blackboard.decision.cancel"
 MANDATE_RESOLVE_UNKNOWN = "blackboard.mandate.resolve_unknown"
 
+# Host methods (milestone 6): version history and export.
+HISTORY_LIST = "blackboard.history.list"
+HISTORY_GET = "blackboard.history.get"
+HISTORY_DIFF = "blackboard.history.diff"
+HISTORY_SAVE = "blackboard.history.save"
+HISTORY_RESTORE = "blackboard.history.restore"
+DOC_EXPORT = "blackboard.doc.export"
+
 HOST_METHODS: tuple[str, ...] = (
     ME,
     ME_SET_NAME,
@@ -104,6 +112,12 @@ HOST_METHODS: tuple[str, ...] = (
     DECISION_ACCEPT,
     DECISION_CANCEL,
     MANDATE_RESOLVE_UNKNOWN,
+    HISTORY_LIST,
+    HISTORY_GET,
+    HISTORY_DIFF,
+    HISTORY_SAVE,
+    HISTORY_RESTORE,
+    DOC_EXPORT,
 )
 
 # Methods a member's agent and dispatcher call on the host with the member's token (the toolkit
@@ -148,6 +162,7 @@ EV_SUGGESTIONS_CHANGED = "blackboard.doc.suggestions_changed"
 EV_THREAD_UPDATED = "blackboard.thread.updated"
 EV_CHAT_MESSAGE = "blackboard.chat.message"
 EV_DECISION_UPDATED = "blackboard.decision.updated"
+EV_DOC_VERSIONS = "blackboard.doc.versions"
 # To the requester's own jiuwenswarm only: run a turn of a mandate, or stop it. The client part
 # handles them and does not forward them to browsers.
 EV_MANDATE_RUN = "blackboard.mandate.run"
@@ -171,6 +186,7 @@ HOST_EVENTS = frozenset(
         EV_THREAD_UPDATED,
         EV_CHAT_MESSAGE,
         EV_DECISION_UPDATED,
+        EV_DOC_VERSIONS,
         EV_MANDATE_RUN,
         EV_MANDATE_STOP,
     }
@@ -182,3 +198,7 @@ EVENTS_PATH = "/blackboard/events"
 JOIN_PATH = "/blackboard/join/"
 HEALTH_PATH = "/blackboard/health"
 FILES_PATH = "/blackboard/files/"
+# Exports, opened by the browser with a short-lived token.
+EXPORT_PATH = "/blackboard/export/"
+# The document service announces new versions here (X-BB-Secret).
+VERSIONS_HOOK_PATH = "/blackboard/internal/versions"

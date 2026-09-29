@@ -112,6 +112,7 @@ class HostRuntime:
                     on_change=self._on_docs_change,
                 ),
                 files_dir=self._data_dir / "references",
+                exports_dir=self._data_dir / "exports",
             )
             try:
                 sock = _bind(settings.bind, settings.port)
@@ -146,6 +147,9 @@ class HostRuntime:
         # The host serves members without the document service too; documents wait for it.
         assert self.docs is not None
         self.docs.start()
+        from jiuwenswarm.extensions.blackboard.host.api.history import prune_exports
+
+        prune_exports(ctx.exports_dir)
         self._sweeper = asyncio.create_task(self._sweep(ctx), name="blackboard.host.sweeper")
         return ctx
 

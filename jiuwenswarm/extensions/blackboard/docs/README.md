@@ -13,7 +13,7 @@ flowchart LR
     B2 -->|Yjs over WebSocket, document token| D
 ```
 
-Milestones 2 to 5 are built: the host, identity, workspaces, members, invites, live documents, references, Markdown in and out, agents that edit documents from a person's chat session, and comments, the workspace chat and decisions, where `@jiuwen` gives the person's agent a task. The browser edits a document directly with the host's document service, using a short-lived document token that the host mints; everything else goes through the browser's own jiuwenswarm.
+Milestones 2 to 6 are built: the host, identity, workspaces, members, invites, live documents, references, Markdown in and out, agents that edit documents from a person's chat session, comments, the workspace chat and decisions (where `@jiuwen` gives the person's agent a task), and version history with restore and export to Word, PDF and Markdown. The browser edits a document directly with the host's document service, using a short-lived document token that the host mints; everything else goes through the browser's own jiuwenswarm.
 
 Blackboard is always on: it ships in the package's `extensions` folder, which every instance loads, and `is_enabled()` always returns true. In the rail it sits right below Tasks (`nav_after="chat"` on its page contribution) with its own chalkboard icon (`applicationPluginNavIcon`, exported from `frontend/index.tsx`). Both are general plugin features, so other built-in plugins can use them too.
 
@@ -30,6 +30,7 @@ Blackboard is always on: it ships in the package's `extensions` folder, which ev
 | `host/api/documents.py`, `host/api/references.py` | Document and reference methods, the upload and download routes |
 | `host/api/mandates.py`, `host/api/locks.py` | Agent edits: mandates, receipts, document locks and their wait queue, suggestion decisions, the idle sweeper |
 | `host/api/comments.py`, `host/api/chat.py`, `host/api/decisions.py`, `host/api/feed.py` | Threads and comments, the workspace chat, the agent's questions, and posting replies, notices and summaries |
+| `host/api/history.py` | Version history (list, one version, diff, save, restore), exports and their download links, and the endpoint where the document service announces versions |
 | `host/api/dispatch.py` | Tasks from comments and the chat: beginning and queueing them, offering turns, claim and report, the turn's material, the sweeper for turns nobody picked up |
 | `host/docservice/` | The document service (TypeScript, run by Node 22.5+): Hocuspocus with SQLite, document tokens, the author guard, the shared Tiptap schema, Markdown in and out, the agent view. No npm project of its own: its packages are in the web app's `package.json` |
 | `client/` | Known hosts (`hosts.json`), host links, joining with a link, local RPC proxies, reference uploads, sessions attached to workspaces (`sessions.py`), the dispatcher that runs comment and chat tasks (`dispatcher.py`) and their prompt (`prompt.py`) |
@@ -144,6 +145,14 @@ Rules worth knowing:
 - The first task in a workspace creates a session named after it and records it as the workspace's default in `client/sessions.json`; the composer can pick another attached session.
 - Tasks offered while the requester's jiuwenswarm is off are picked up when its link to the host is back; after 10 minutes unclaimed they fail. A claimed turn with no report after 10 minutes becomes Unknown, and an editor marks it Done or Failed from the Agents tab after checking its changes. Stop on a running task cancels the chat turn.
 
+## History and export
+
+Every document has a version history, kept by the document service in `docs.db` as full snapshots (suggestion and author marks included). A version is taken when the document is created, after each agent batch, on import and restore, when someone saves one by name, and 30 seconds after people stop editing, with everyone who edited since the last version as its authors. Nothing is recorded when the content did not change. The service announces each version to the host (`POST /blackboard/internal/versions` with the API secret), which pushes `blackboard.doc.versions` to the workspace.
+
+The **History** tab lists the open document's versions by day. A version opens in place of the editor: **Changes** compares it with the version before (or a chosen older one) block by block, with the changed words marked; **Document** shows it as it read. Editors and owners restore a version (the document becomes that version again, pending suggestions included, and the restore is itself a version) or save a named one; anyone can download a version as Markdown.
+
+**Export** in the document menu makes a Word (.docx), PDF or Markdown file of the accepted text, pending suggestions left out, optionally with a table of the answered decisions about the document. The host keeps the file under `exports/` and the browser downloads it through a link that works for an hour. PDF is printed by a local Chrome, Edge or Chromium in headless mode: set `BB_CHROMIUM_PATH` in the Gateway's environment to choose one, otherwise the usual install places and a Playwright download are tried.
+
 ## Join from a second instance on the same machine
 
 Run a second jiuwenswarm with its own data folder and ports, either as a named instance:
@@ -167,7 +176,8 @@ Everything lives under `<data root>/blackboard` (`~/.jiuwenswarm/blackboard` for
 | `client/sessions.json` | This person's chat sessions attached to a workspace, and each workspace's default session for tasks from comments and the chat |
 | `host/blackboard.db` | The host store (SQLite, WAL) |
 | `host/secrets.json` | Secrets for document tokens and the document service's internal API |
-| `host/docs.db` | Document contents (Yjs states, SQLite, WAL), owned by the document service |
+| `host/docs.db` | Document contents (Yjs states) and their versions (SQLite, WAL), owned by the document service |
+| `host/exports/<export id>/` | Exported files waiting to be downloaded; removed after a day |
 | `host/docservice.log` | The document service's output |
 | `host/references/<workspace id>/` | Uploaded reference files |
 | `blackboard.log` | Blackboard's own log, rotated at 20 MB |
@@ -187,13 +197,14 @@ The browser calls these on its own web channel; all are local-only.
 | `blackboard.mandate.list {workspace_id}` (with receipts and the suggestions still pending), `.mandate.cancel {mandate_id}`, `.mandate.resolve_unknown {mandate_id, status}`, `blackboard.suggestion.list {doc_id}`, `.suggestion.decide {doc_id, suggestion_ids, action}` | the host, through the client part |
 | `blackboard.comment.create {doc_id, anchor, body, mentions, scope_switch?, session_id?}`, `.comment.reply {thread_id, body, mentions, scope_switch?, session_id?}`, `.comment.edit {comment_id, body}`, `.comment.resolve/reopen {thread_id}`, `.comment.list {doc_id, include_resolved?}` | the host, through the client part |
 | `blackboard.chat.post {workspace_id, body, mentions, session_id?}`, `.chat.list {workspace_id, before?, limit?}` (50 per page by default) | the host, through the client part |
+| `blackboard.history.list {doc_id, before?, limit?}`, `.history.get {doc_id, version_id, format?}` (`markdown` for the accepted text), `.history.diff {doc_id, to, from?}`, `.history.save {doc_id, label?}`, `.history.restore {doc_id, version_id}`, `blackboard.doc.export {doc_id, format: md \| docx \| pdf, include_decisions?, version_id?}` | the host, through the client part |
 | `blackboard.decision.list {workspace_id, status?}`, `.decision.get/accept/cancel {decision_id}`, `.decision.answer {decision_id, option? or text?}` | the host, through the client part |
 
 `blackboard.invite.accept` is the only host method that needs no member token; the client part calls it while joining. `blackboard.edit` and `blackboard.decision.create` are only for the agent's tools, and `blackboard.mandate.claim`, `.report` and `.pending` only for the dispatcher; they call the host directly and the browser cannot reach them. Errors come back as `{code, message, details}` with codes `unauthorized`, `not_member`, `forbidden`, `not_found`, `invalid`, `conflict`, `expired`, `disabled`, `unavailable`, `busy`, `queue_full` and `internal`, and from `blackboard.edit` also `stale`, `pending_suggestions`, `out_of_scope`, `unknown_block`, `unsupported_markdown` and `no_mandate`.
 
-Events reach the browser with a `host` field: `blackboard.workspace.updated`, `blackboard.member.updated`, `blackboard.me.updated`, `blackboard.member.role_changed`, `blackboard.doc.updated`, `blackboard.reference.updated`, `blackboard.mandate.updated`, `blackboard.doc.suggestions_changed`, `blackboard.thread.updated`, `blackboard.chat.message`, `blackboard.decision.updated`, and from the client part `blackboard.hosts.updated`, `blackboard.host.status_changed` and `blackboard.sessions.updated`. The host sends an event only to the members of the workspace concerned (and `blackboard.mandate.run` and `blackboard.mandate.stop` only to the requester's client part, which consumes them), except `blackboard.host.updated` (a new host name), which goes to every connected member; the client part turns it into an update of its host list.
+Events reach the browser with a `host` field: `blackboard.workspace.updated`, `blackboard.member.updated`, `blackboard.me.updated`, `blackboard.member.role_changed`, `blackboard.doc.updated`, `blackboard.reference.updated`, `blackboard.mandate.updated`, `blackboard.doc.suggestions_changed`, `blackboard.thread.updated`, `blackboard.chat.message`, `blackboard.decision.updated`, `blackboard.doc.versions`, and from the client part `blackboard.hosts.updated`, `blackboard.host.status_changed` and `blackboard.sessions.updated`. The host sends an event only to the members of the workspace concerned (and `blackboard.mandate.run` and `blackboard.mandate.stop` only to the requester's client part, which consumes them), except `blackboard.host.updated` (a new host name), which goes to every connected member; the client part turns it into an update of its host list.
 
-The host also serves `POST /blackboard/files/<workspace id>` (multipart upload with the member token) and `GET /blackboard/files/<workspace id>/<reference id>?t=<file token>`; `blackboard.reference.url` returns such a link, valid for one hour.
+The host also serves `POST /blackboard/files/<workspace id>` (multipart upload with the member token) and `GET /blackboard/files/<workspace id>/<reference id>?t=<file token>`; `blackboard.reference.url` returns such a link, valid for one hour. `blackboard.doc.export` returns a link of the same kind, `GET /blackboard/export/<export id>?t=<token>`, which also checks that the person is still a member. `POST /blackboard/internal/versions` is for the document service only (X-BB-Secret).
 
 ## Tests
 
@@ -224,4 +235,6 @@ npm run test:blackboard-docservice
 | The agent says it has no Blackboard tools | The session is not attached (see the Agents tab), or it was attached during the current turn; the tools arrive with the next message |
 | An `@jiuwen` comment or message stays Queued or Running | Queued: another comment task holds the document. Running without a reply: the requester's jiuwenswarm is off or its link to the host is down; the task fails after 10 minutes |
 | A task shows Unknown | The turn did not report within 10 minutes; check its changes on the Agents tab and mark it Done or Failed |
+| PDF export says no browser was found | The host has no Chrome, Edge or Chromium in the usual places; set `BB_CHROMIUM_PATH` to one and restart jiuwenswarm |
+| Restore says an agent is editing | A run holds the document; restore when it ends |
 | The agent reports `busy` | Another agent's run holds the document; the lock frees when that run ends, about 2 minutes after its last edit |

@@ -1,4 +1,5 @@
-// Routes for documents: create, delete, agent view, import, presence, token recheck.
+// Routes for documents: create, delete, agent view, import, edits, suggestions, presence, token
+// recheck. Every change made here is also a version (docs/versions.ts).
 import type { Hocuspocus } from '@hocuspocus/server'
 import type { Node as PMNode } from '@tiptap/pm/model'
 import { applySuggestion, revertSuggestion } from '@handlewithcare/prosemirror-suggest-changes'
@@ -11,6 +12,7 @@ import { EditError, planEdit, readOps, type EditRequest } from '../docs/edits.ts
 import { MarkdownError, agentView, hasRawHtml, importDoc, type View } from '../docs/markdown.ts'
 import { FIELD, readDoc, writeDoc, type DocPool } from '../docs/pool.ts'
 import { suggestionsIn, type SuggestionSummary } from '../docs/suggestions.ts'
+import type { Versions } from '../docs/versions.ts'
 import type { DocStorage } from '../storage.ts'
 import { ApiError, type Route } from './http.ts'
 
@@ -96,11 +98,12 @@ export interface DocRoutesDeps {
   hocuspocus: Hocuspocus
   pool: DocPool
   storage: DocStorage
+  versions: Versions
   version: string
   shutdown: () => void
 }
 
-export function docRoutes({ hocuspocus, pool, storage, version, shutdown }: DocRoutesDeps): Route[] {
+export function docRoutes({ hocuspocus, pool, storage, versions, version, shutdown }: DocRoutesDeps): Route[] {
   const requireDoc = (docId: string) => {
     if (!storage.exists(docId) && !hocuspocus.documents.has(docId)) {
       throw new ApiError(404, 'not_found', 'no such document', { doc_id: docId })
@@ -122,9 +125,17 @@ export function docRoutes({ hocuspocus, pool, storage, version, shutdown }: DocR
         if (!new RegExp(`^${DOC_ID}$`).test(docId)) throw new ApiError(400, 'invalid', 'docId is required', { field: 'docId' })
         if (storage.exists(docId)) throw new ApiError(409, 'conflict', 'the document already exists', { doc_id: docId })
         const markdown = readMarkdown(body.markdown, false)
-        const doc = contentFor(markdown, readAuthor(body.author))
+        const author = readAuthor(body.author)
+        const doc = contentFor(markdown, author)
         storage.revive(docId)
-        await pool.replace(docId, doc, { immediate: true })
+        await pool.run(
+          docId,
+          (ydoc) => {
+            writeDoc(ydoc, doc)
+            versions.record(docId, readDoc(ydoc), { reason: 'created', authors: [{ id: author.id, kind: author.kind }] })
+          },
+          { immediate: true },
+        )
         return { docId, rawHtml: markdown ? hasRawHtml(markdown) : false }
       },
     },
@@ -133,6 +144,7 @@ export function docRoutes({ hocuspocus, pool, storage, version, shutdown }: DocR
       path: new RegExp(`^/api/docs/${DOC_ID}$`),
       handler: async ({ params: [docId] }) => {
         // Delete first, so the save a closing connection attempts is ignored.
+        versions.forget(docId)
         storage.delete(docId)
         hocuspocus.closeConnections(docId)
         const loaded = hocuspocus.documents.get(docId)
@@ -162,9 +174,18 @@ export function docRoutes({ hocuspocus, pool, storage, version, shutdown }: DocR
       handler: async ({ params: [docId], body }) => {
         requireDoc(docId)
         const markdown = readMarkdown(body.markdown, true) as string
-        const doc = contentFor(markdown, readAuthor(body.author))
-        await pool.replace(docId, doc, { immediate: true })
-        return { ...agentView(doc), rawHtml: hasRawHtml(markdown) }
+        const author = readAuthor(body.author)
+        const doc = contentFor(markdown, author)
+        await versions.flush(docId)
+        const version = await pool.run(
+          docId,
+          (ydoc) => {
+            writeDoc(ydoc, doc)
+            return versions.record(docId, readDoc(ydoc), { reason: 'import', authors: [{ id: author.id, kind: author.kind }] })
+          },
+          { immediate: true },
+        )
+        return { ...agentView(doc), rawHtml: hasRawHtml(markdown), versionId: version?.id ?? null }
       },
     },
     {
@@ -221,12 +242,20 @@ export function docRoutes({ hocuspocus, pool, storage, version, shutdown }: DocR
         }
         try {
           req.ops = readOps(body.ops)
+          // People's edits before the batch get their own version, so this one holds only the agent's.
+          await versions.flush(docId)
           return await pool.run(
             docId,
             (ydoc) => {
               const { doc, result } = planEdit(readDoc(ydoc), req)
-              if (result.changed) writeDoc(ydoc, doc)
-              return result
+              if (!result.changed) return { ...result, versionId: null }
+              writeDoc(ydoc, doc)
+              const version = versions.record(docId, readDoc(ydoc), {
+                reason: 'agent_turn',
+                authors: [{ id: author.id, kind: 'agent' }],
+                mandateId: req.mandateId,
+              })
+              return { ...result, versionId: version?.id ?? null }
             },
             { immediate: true },
           )
@@ -293,6 +322,8 @@ export function docRoutes({ hocuspocus, pool, storage, version, shutdown }: DocR
           { immediate: true },
         )
         if (!decided) throw new ApiError(404, 'not_found', 'no pending suggestion has this id', { suggestion_id: suggestionId })
+        // A decision is the deciding person's change, and joins their next idle version.
+        if (typeof body.actor === 'string' && body.actor) versions.touched(docId, { id: body.actor, kind: 'person' })
         return { suggestionId, action }
       },
     },

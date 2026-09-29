@@ -76,7 +76,7 @@ export function viewJSON(json: Json, view: View): Json | null {
   return walk(json)
 }
 
-function hasSuggestionMarks(json: Json): boolean {
+export function hasSuggestionMarks(json: Json): boolean {
   if ((json.marks || []).some((m) => SUGGESTION_TYPES.includes(m.type))) return true
   return (json.content || []).some(hasSuggestionMarks)
 }

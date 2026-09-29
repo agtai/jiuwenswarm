@@ -22,9 +22,13 @@ import type {
   AnchorDraft,
   ChatMessageView,
   DecisionView,
+  DiffView,
+  ExportFormat,
   ThreadView,
+  VersionView,
 } from './types';
 import { mentionsIn, sortThreads } from './conversation';
+import { withVersion } from './history';
 
 export interface BlackboardState {
   hosts: HostView[];
@@ -52,6 +56,11 @@ export interface BlackboardState {
   activeThread: string | null;
   draftAnchor: AnchorDraft | null;
   decisions: DecisionView[];
+  // Versions of the open document, newest first; whether older ones exist; the one shown instead of
+  // the editor.
+  history: VersionView[];
+  historyHasMore: boolean;
+  openVersion: string | null;
   hostStatus: HostStatus | null;
   // The right rail's tab.
   rail: RailTab;
@@ -59,7 +68,7 @@ export interface BlackboardState {
   loadError: string | null;
 }
 
-export type RailTab = 'chat' | 'comments' | 'decisions' | 'agents' | 'references' | 'members';
+export type RailTab = 'chat' | 'comments' | 'decisions' | 'history' | 'agents' | 'references' | 'members';
 
 type ChatPage = { messages: ChatMessageView[]; has_more: boolean };
 
@@ -92,6 +101,9 @@ export const INITIAL_STATE: BlackboardState = {
   activeThread: null,
   draftAnchor: null,
   decisions: [],
+  history: [],
+  historyHasMore: false,
+  openVersion: null,
   hostStatus: null,
   rail: 'members',
   loaded: false,
@@ -114,7 +126,13 @@ const WORKSPACE_CONTENT = {
   activeThread: null,
   draftAnchor: null,
   decisions: [],
+  history: [],
+  historyHasMore: false,
+  openVersion: null,
 };
+
+// What belongs to the open document; cleared when another one opens.
+const DOC_CONTENT = { threads: [], activeThread: null, draftAnchor: null, history: [], historyHasMore: false, openVersion: null };
 
 // Chat sessions live in the web app; the page reaches them through these.
 export interface SessionPort {
@@ -138,7 +156,7 @@ export interface SelectionMemory {
 }
 
 const NO_MEMORY: SelectionMemory = { load: () => null, save: () => undefined };
-const RAIL_TABS: readonly RailTab[] = ['chat', 'comments', 'decisions', 'agents', 'references', 'members'];
+const RAIL_TABS: readonly RailTab[] = ['chat', 'comments', 'decisions', 'history', 'agents', 'references', 'members'];
 
 function selectionOf(state: BlackboardState): Selection {
   return { hostId: state.hostId, workspaceId: state.workspaceId, docId: state.docId, rail: state.rail };
@@ -170,6 +188,7 @@ const HOST_EVENTS = [
   'blackboard.chat.message',
   'blackboard.thread.updated',
   'blackboard.decision.updated',
+  'blackboard.doc.versions',
 ] as const;
 
 export function currentWorkspace(state: BlackboardState): WorkspaceView | null {
@@ -327,7 +346,7 @@ export class BlackboardController {
       this.refreshChat(),
       this.refreshDecisions(),
     ]);
-    await this.refreshThreads();
+    await Promise.all([this.refreshThreads(), this.refreshHistory()]);
   }
 
   async refreshMandates(): Promise<void> {
@@ -368,8 +387,8 @@ export class BlackboardController {
       const keep = docs.some((d) => d.id === this.state.docId);
       const docId = keep ? this.state.docId : (docs[0]?.id ?? null);
       const moved = docId !== this.state.docId;
-      this.set({ docs, docservice: result.docservice ?? null, docId, ...(moved ? { threads: [], activeThread: null, draftAnchor: null } : {}) });
-      if (moved) void this.refreshThreads();
+      this.set({ docs, docservice: result.docservice ?? null, docId, ...(moved ? DOC_CONTENT : {}) });
+      if (moved) void Promise.all([this.refreshThreads(), this.refreshHistory()]);
     } catch (error) {
       this.set({ loadError: errorText(error) });
     }
@@ -406,8 +425,8 @@ export class BlackboardController {
 
   selectDoc(docId: string | null): void {
     if (docId === this.state.docId) return;
-    this.set({ docId, threads: [], activeThread: null, draftAnchor: null });
-    void this.refreshThreads();
+    this.set({ docId, ...DOC_CONTENT });
+    void Promise.all([this.refreshThreads(), this.refreshHistory()]);
   }
 
   selectRail(rail: RailTab): void {
@@ -458,6 +477,10 @@ export class BlackboardController {
       if (payload.doc_id === this.state.docId) await this.refreshThreads();
     } else if (event === 'blackboard.decision.updated') {
       if (workspaceId === this.state.workspaceId) await this.refreshDecisions();
+    } else if (event === 'blackboard.doc.versions') {
+      if (payload.doc_id === this.state.docId && payload.version) {
+        this.set({ history: withVersion(this.state.history, payload.version as VersionView) });
+      }
     } else if (event === 'blackboard.member.updated' || event === 'blackboard.member.role_changed') {
       if (event === 'blackboard.member.role_changed') await this.refreshWorkspaces();
       else if (workspaceId === this.state.workspaceId) await this.refreshMembers();
@@ -674,6 +697,79 @@ export class BlackboardController {
     const at = this.state.chat.findIndex((m) => m.id === message.id);
     const chat = at >= 0 ? this.state.chat.map((m, i) => (i === at ? message : m)) : [...this.state.chat, message];
     this.set({ chat });
+  }
+
+  // ---- history and export of the open document ----
+
+  async refreshHistory(): Promise<void> {
+    const { hostId, docId } = this.state;
+    if (!hostId || !docId) return;
+    try {
+      const result = await this.rpc<{ versions: VersionView[]; has_more: boolean }>('blackboard.history.list', { host: hostId, doc_id: docId });
+      if (hostId !== this.state.hostId || docId !== this.state.docId) return;
+      this.set({ history: result.versions ?? [], historyHasMore: Boolean(result.has_more) });
+    } catch (error) {
+      this.set({ loadError: errorText(error) });
+    }
+  }
+
+  async loadOlderHistory(): Promise<void> {
+    const { hostId, docId, history } = this.state;
+    const oldest = history[history.length - 1];
+    if (!hostId || !docId || !oldest) return;
+    const result = await this.rpc<{ versions: VersionView[]; has_more: boolean }>('blackboard.history.list', {
+      host: hostId,
+      doc_id: docId,
+      before: oldest.id,
+    });
+    if (hostId !== this.state.hostId || docId !== this.state.docId) return;
+    const known = new Set(this.state.history.map((v) => v.id));
+    this.set({ history: [...this.state.history, ...(result.versions ?? []).filter((v) => !known.has(v.id))], historyHasMore: Boolean(result.has_more) });
+  }
+
+  // Show a version instead of the editor, or null to go back to the document.
+  openVersion(versionId: string | null): void {
+    this.set({ openVersion: versionId, ...(versionId ? { rail: 'history' as RailTab } : {}) });
+  }
+
+  private requireDoc(): { host: string; doc_id: string } {
+    const host = this.requireHost();
+    if (!this.state.docId) throw new Error('No document selected');
+    return { host, doc_id: this.state.docId };
+  }
+
+  versionContent(versionId: string): Promise<{ version: VersionView; previous: string | null; doc: Record<string, unknown> }> {
+    return this.rpc('blackboard.history.get', { ...this.requireDoc(), version_id: versionId });
+  }
+
+  async versionMarkdown(versionId: string): Promise<string> {
+    const result = await this.rpc<{ markdown: string }>('blackboard.history.get', { ...this.requireDoc(), version_id: versionId, format: 'markdown' });
+    return result.markdown ?? '';
+  }
+
+  versionDiff(to: string, from: string | null = null): Promise<DiffView> {
+    return this.rpc('blackboard.history.diff', { ...this.requireDoc(), to, ...(from ? { from } : {}) });
+  }
+
+  async saveVersion(label: string): Promise<VersionView> {
+    const result = await this.rpc<{ version: VersionView }>('blackboard.history.save', { ...this.requireDoc(), label });
+    this.set({ history: withVersion(this.state.history, result.version) });
+    return result.version;
+  }
+
+  async restoreVersion(versionId: string): Promise<void> {
+    const result = await this.rpc<{ version: VersionView | null }>('blackboard.history.restore', { ...this.requireDoc(), version_id: versionId });
+    this.set({ openVersion: null, ...(result.version ? { history: withVersion(this.state.history, result.version) } : {}) });
+  }
+
+  // A file of the document (or of one version) to download; the link works for an hour.
+  exportDoc(format: ExportFormat, options: { includeDecisions?: boolean; versionId?: string | null } = {}): Promise<{ url: string; file_name: string }> {
+    return this.rpc('blackboard.doc.export', {
+      ...this.requireDoc(),
+      format,
+      include_decisions: Boolean(options.includeDecisions),
+      ...(options.versionId ? { version_id: options.versionId } : {}),
+    });
   }
 
   // ---- comments on the open document ----

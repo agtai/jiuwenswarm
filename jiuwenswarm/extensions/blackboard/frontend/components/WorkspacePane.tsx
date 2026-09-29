@@ -4,10 +4,12 @@ import {
   Archive,
   ArchiveRestore,
   BookMarked,
+  Download,
   FileCode2,
   FileInput,
   FilePlus2,
   FileText,
+  History,
   MoreHorizontal,
   Pencil,
   Pin,
@@ -24,9 +26,11 @@ import {
   Tag,
 } from '../../../../channels/web/frontend/src/components/ui';
 import type { CommentActions, SuggestionActions } from '../editor/DocumentEditor';
-import type { DocServiceStatus, DocToken, DocView, WorkspaceView } from '../types';
+import type { VersionActions } from '../editor/VersionView';
+import type { DocServiceStatus, DocToken, DocView, VersionView as Version, WorkspaceView } from '../types';
 
 const DocumentEditor = lazy(() => import('../editor/DocumentEditor'));
+const VersionView = lazy(() => import('../editor/VersionView'));
 
 export interface DocActions {
   rename: (doc: DocView, title: string) => Promise<void>;
@@ -34,6 +38,8 @@ export interface DocActions {
   setInstructions: (doc: DocView) => void;
   importMarkdown: (doc: DocView) => void;
   viewMarkdown: (doc: DocView) => void;
+  showHistory: (doc: DocView) => void;
+  exportDoc: (doc: DocView) => void;
   archive: (doc: DocView) => void;
 }
 
@@ -49,6 +55,9 @@ export function WorkspacePane({
   docActions,
   suggestionActions,
   commentActions,
+  openVersion,
+  versions,
+  versionActions,
   onNewDoc,
   onRename,
   onArchive,
@@ -66,6 +75,10 @@ export function WorkspacePane({
   docActions: DocActions;
   suggestionActions: SuggestionActions;
   commentActions: CommentActions;
+  // A version shown in place of the editor, and the document's versions to compare it with.
+  openVersion: Version | null;
+  versions: Version[];
+  versionActions: VersionActions;
   onNewDoc: () => void;
   onRename: () => void;
   onArchive: () => void;
@@ -125,7 +138,18 @@ export function WorkspacePane({
           {t(`blackboard.docservice.${docservice.reason ?? docservice.status}`, { defaultValue: t('blackboard.docservice.down') })}
         </p>
       ) : null}
-      {doc && me ? (
+      {doc && me && openVersion ? (
+        <Suspense fallback={<div className="bb-doc__loading" data-testid="blackboard-doc-loading" />}>
+          <VersionView
+            key={doc.id}
+            title={doc.title}
+            header={<DocHeader doc={doc} canEdit={canEdit} actions={docActions} />}
+            version={openVersion}
+            versions={versions}
+            actions={versionActions}
+          />
+        </Suspense>
+      ) : doc && me ? (
         <Suspense fallback={<div className="bb-doc__loading" data-testid="blackboard-doc-loading" />}>
           <DocumentEditor
             key={doc.id}
@@ -252,6 +276,8 @@ function DocHeader({ doc, canEdit, actions }: { doc: DocView; canEdit: boolean; 
     },
     { key: 'import', icon: <FileInput size={14} />, label: t('blackboard.docs.import'), run: () => actions.importMarkdown(doc), show: canEdit },
     { key: 'markdown', icon: <FileCode2 size={14} />, label: t('blackboard.docs.viewMarkdown'), run: () => actions.viewMarkdown(doc), show: true },
+    { key: 'history', icon: <History size={14} />, label: t('blackboard.history.open'), run: () => actions.showHistory(doc), show: true },
+    { key: 'export', icon: <Download size={14} />, label: t('blackboard.export.open'), run: () => actions.exportDoc(doc), show: true },
     {
       key: 'archive',
       icon: <Archive size={14} />,

@@ -87,7 +87,9 @@ test('the keys built at runtime exist for every value they take', () => {
   for (const reason of ['not_picked_up', 'no_result', 'not_an_editor', 'timeout', 'already_handled']) {
     assert.ok(en.has(`blackboard.notices.reason.${reason}`), reason);
   }
-  for (const tab of ['messages', 'comments', 'decisions', 'agents', 'references', 'members']) assert.ok(en.has(`blackboard.${tab}.tab`), tab);
+  for (const tab of ['messages', 'comments', 'decisions', 'history', 'agents', 'references', 'members']) assert.ok(en.has(`blackboard.${tab}.tab`), tab);
+  for (const reason of ['created', 'agent_turn', 'idle', 'import', 'restore', 'manual']) assert.ok(en.has(`blackboard.history.reason.${reason}`), reason);
+  for (const status of ['changed', 'added', 'removed', 'moved']) assert.ok(en.has(`blackboard.history.status.${status}`), status);
   for (const reason of ['not_built', 'node_missing', 'node_too_old', 'start_failed', 'exited', 'not_configured', 'stopped', 'starting']) {
     assert.ok(en.has(`blackboard.docservice.${reason}`), reason);
   }

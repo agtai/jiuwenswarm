@@ -80,3 +80,20 @@ test('the active card stays level with its passage and earlier cards move up', (
   // An unknown active card lays out as if none were active.
   assert.deepEqual([...placeCards(wanted, heights, 'gone')], [...placeCards(wanted, heights, null)]);
 });
+
+test('versions group by the local day, newest first, and a pushed one joins once', async () => {
+  const { groupByDay, withVersion, localDay } = await import('../../../../channels/web/frontend/node_modules/.cache/blackboard/history.js');
+  const at = (y, m, d, h) => new Date(y, m - 1, d, h).toISOString();
+  const versions = [
+    { id: 'c', created_at: at(2026, 9, 29, 15) },
+    { id: 'b', created_at: at(2026, 9, 29, 9) },
+    { id: 'a', created_at: at(2026, 9, 28, 18) },
+  ];
+  assert.deepEqual(groupByDay(versions).map((g) => [g.day, g.versions.map((v) => v.id)]), [
+    ['2026-09-29', ['c', 'b']],
+    ['2026-09-28', ['a']],
+  ]);
+  assert.equal(localDay('not a time'), '');
+  assert.deepEqual(withVersion(versions, { id: 'd', created_at: at(2026, 9, 29, 16) }).map((v) => v.id), ['d', 'c', 'b', 'a']);
+  assert.equal(withVersion(versions, versions[1]), versions);
+});

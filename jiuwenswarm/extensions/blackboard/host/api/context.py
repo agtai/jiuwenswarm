@@ -34,6 +34,8 @@ class HostContext:
     docs: "DocServiceManager | None" = None
     # Where reference files are kept: <files_dir>/<workspace id>/<reference id><ext>.
     files_dir: Path | None = None
+    # Where exports wait to be downloaded: <exports_dir>/<export id>/<file name>.
+    exports_dir: Path | None = None
     lock_waits: LockWaits = field(default_factory=LockWaits)
     _last_touch: dict[str, float] = field(default_factory=dict)
 

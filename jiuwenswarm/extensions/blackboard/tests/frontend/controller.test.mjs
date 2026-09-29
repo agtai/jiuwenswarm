@@ -56,6 +56,12 @@ function fakeWorld() {
         return { docs: world.docs?.[params.workspace_id] ?? [], docservice: null };
       case 'blackboard.chat.list':
         return { messages: structuredClone(world.chat ?? []), has_more: false };
+      case 'blackboard.history.list':
+        return { versions: structuredClone(world.history?.[params.doc_id] ?? []), has_more: false };
+      case 'blackboard.history.restore':
+        return { version: { id: 'v_restore', doc_id: params.doc_id, reason: 'restore', created_at: '2026-09-29T12:00:00Z', authors: [] } };
+      case 'blackboard.doc.export':
+        return { url: 'http://host/blackboard/export/x_1?t=abc', file_name: 'Plan.docx' };
       case 'blackboard.chat.post':
         return { message: { id: 'cm_new', workspace_id: params.workspace_id, kind: 'message', author_kind: 'person', body: params.body } };
       case 'blackboard.comment.list':
@@ -90,7 +96,7 @@ test('start loads the hosts, picks the default host and its workspaces', async (
   assert.equal(s.hostId, 'h1');
   assert.deepEqual(s.workspaces.map((w) => w.id), ['ws1', 'ws2']);
   assert.equal(s.workspaceId, null);
-  assert.equal(f.handlers.size, 14);
+  assert.equal(f.handlers.size, 15);
   c.stop();
   assert.equal(f.handlers.size, 0);
 });
@@ -400,4 +406,40 @@ test('opening a thread keeps the rail, unless the margin cannot show that thread
   assert.deepEqual([c.getState().activeThread, c.getState().rail], ['here', 'members']);
   c.openThread('gone');
   assert.deepEqual([c.getState().activeThread, c.getState().rail], ['gone', 'comments']);
+});
+
+function version(id, docId = 'd1', extra = {}) {
+  return { id, doc_id: docId, created_at: '2026-09-29T10:00:00Z', reason: 'idle', authors: [], mandate_id: null, label: null, ...extra };
+}
+
+test('the history follows the open document, and pushed versions join it once', async () => {
+  const f = fakeWorld();
+  f.world.docs = { ws1: [{ id: 'd1', title: 'One' }, { id: 'd2', title: 'Two' }] };
+  f.world.history = { d1: [version('v2'), version('v1')], d2: [version('w1', 'd2')] };
+  const c = new BlackboardController(f.rpc, f.subscribe);
+  await c.start();
+  await c.selectWorkspace('ws1');
+  await flush();
+  assert.deepEqual(c.getState().history.map((v) => v.id), ['v2', 'v1']);
+
+  f.emit('blackboard.doc.versions', { host: 'h1', workspace_id: 'ws1', doc_id: 'd1', version: version('v3') });
+  f.emit('blackboard.doc.versions', { host: 'h1', workspace_id: 'ws1', doc_id: 'd1', version: version('v3') });
+  f.emit('blackboard.doc.versions', { host: 'h1', workspace_id: 'ws1', doc_id: 'd2', version: version('w2', 'd2') });
+  await flush();
+  assert.deepEqual(c.getState().history.map((v) => v.id), ['v3', 'v2', 'v1']);
+
+  c.openVersion('v1');
+  assert.deepEqual([c.getState().openVersion, c.getState().rail], ['v1', 'history']);
+  await c.restoreVersion('v1');
+  assert.deepEqual([c.getState().openVersion, c.getState().history[0].id], [null, 'v_restore']);
+
+  c.openVersion('v2');
+  c.selectDoc('d2');
+  await flush();
+  assert.deepEqual([c.getState().openVersion, c.getState().history.map((v) => v.id)], [null, ['w1']]);
+
+  const exported = await c.exportDoc('docx', { includeDecisions: true });
+  assert.equal(exported.file_name, 'Plan.docx');
+  const sent = f.calls.find(([method]) => method === 'blackboard.doc.export')[1];
+  assert.deepEqual(sent, { host: 'h1', doc_id: 'd2', format: 'docx', include_decisions: true });
 });

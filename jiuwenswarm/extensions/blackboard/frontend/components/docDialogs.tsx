@@ -3,7 +3,8 @@ import { useTranslation } from 'react-i18next';
 import { Copy, FileUp } from 'lucide-react';
 
 import { FormDialog } from '../../../../channels/web/frontend/src/components/form';
-import { Button, Input, Textarea, toast } from '../../../../channels/web/frontend/src/components/ui';
+import { Button, Input, RadioGroup, Switch, Textarea, toast } from '../../../../channels/web/frontend/src/components/ui';
+import type { ExportFormat } from '../types';
 import { Field } from './Field';
 import { Status, useSubmit } from './dialogs';
 
@@ -188,6 +189,59 @@ export function MarkdownDialog({
       <Button size="sm" icon={<Copy size={14} />} disabled={text === null} data-testid="blackboard-markdown-copy-btn" onClick={() => void copy()}>
         {t('blackboard.docs.copy')}
       </Button>
+    </FormDialog>
+  );
+}
+
+// The document as a file: Markdown, Word or PDF of the accepted text, and optionally the decisions
+// about it. The file downloads when it is ready.
+export function ExportDialog({
+  open,
+  docTitle,
+  onExport,
+  onClose,
+}: {
+  open: boolean;
+  docTitle: string;
+  onExport: (format: ExportFormat, includeDecisions: boolean) => Promise<unknown>;
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+  const [format, setFormat] = useState<ExportFormat>('docx');
+  const [decisions, setDecisions] = useState(false);
+  const { busy, error, setError, run } = useSubmit(onClose);
+  useEffect(() => {
+    if (open) setError(null);
+  }, [open]);
+  return (
+    <FormDialog
+      open={open}
+      title={t('blackboard.export.title', { title: docTitle })}
+      confirmLabel={t('blackboard.export.confirm')}
+      cancelLabel={t('common.cancel')}
+      confirmLoading={busy}
+      submitting={busy}
+      status={<Status error={error} />}
+      testIdPrefix="blackboard-export-dialog"
+      onConfirm={() => void run(() => onExport(format, decisions))}
+      onCancel={onClose}
+    >
+      <Field label={t('blackboard.export.format')} hint={t('blackboard.export.hint')}>
+        <RadioGroup
+          aria-label={t('blackboard.export.format')}
+          value={format}
+          options={[
+            { value: 'docx', label: t('blackboard.export.docx') },
+            { value: 'pdf', label: t('blackboard.export.pdf') },
+            { value: 'md', label: t('blackboard.export.md') },
+          ]}
+          onChange={(value) => setFormat(value as ExportFormat)}
+        />
+      </Field>
+      <label className="bb-export__option">
+        <Switch checked={decisions} data-testid="blackboard-export-decisions" onChange={setDecisions} />
+        <span>{t('blackboard.export.decisions')}</span>
+      </label>
     </FormDialog>
   );
 }

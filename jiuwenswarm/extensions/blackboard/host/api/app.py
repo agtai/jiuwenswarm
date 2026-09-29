@@ -11,6 +11,7 @@ from jiuwenswarm.extensions.blackboard.host.api import comments as _comments  # 
 from jiuwenswarm.extensions.blackboard.host.api import decisions as _decisions  # noqa: F401 - registers methods
 from jiuwenswarm.extensions.blackboard.host.api import dispatch as _dispatch  # noqa: F401 - registers methods
 from jiuwenswarm.extensions.blackboard.host.api import documents as _documents  # noqa: F401 - registers methods
+from jiuwenswarm.extensions.blackboard.host.api import history
 from jiuwenswarm.extensions.blackboard.host.api import mandates as _mandates  # noqa: F401 - registers methods
 from jiuwenswarm.extensions.blackboard.host.api import references
 from jiuwenswarm.extensions.blackboard.host.api.context import HostContext
@@ -54,6 +55,14 @@ def build_app(ctx: HostContext) -> FastAPI:
     @app.get(p.FILES_PATH + "{workspace_id}/{reference_id}")
     async def download(workspace_id: str, reference_id: str, t: str | None = None) -> Response:
         return await references.download(ctx, workspace_id, reference_id, t)
+
+    @app.get(p.EXPORT_PATH + "{export_id}")
+    async def export_download(export_id: str, t: str | None = None) -> Response:
+        return await history.download_export(ctx, export_id, t)
+
+    @app.post(p.VERSIONS_HOOK_PATH)
+    async def versions_hook(request: Request) -> JSONResponse:
+        return await history.versions_hook(ctx, request)
 
     @app.get(p.HEALTH_PATH)
     async def health() -> JSONResponse:

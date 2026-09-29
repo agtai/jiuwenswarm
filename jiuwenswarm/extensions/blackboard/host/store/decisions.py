@@ -64,6 +64,16 @@ def open_for_mandate(conn: sqlite3.Connection, mandate_id: str) -> Decision | No
     return Decision.from_row(row) if row else None
 
 
+def answered_for_doc(conn: sqlite3.Connection, workspace_id: str, doc_id: str) -> list[Decision]:
+    """Answered questions about a document, or asked by a run that changed it, oldest first."""
+    rows = conn.execute(
+        "SELECT * FROM decisions WHERE workspace_id = ? AND status = 'answered' AND (doc_id = ? OR mandate_id IN"
+        " (SELECT mandate_id FROM receipts WHERE doc_id = ? AND status = 'applied')) ORDER BY rowid",
+        (workspace_id, doc_id, doc_id),
+    ).fetchall()
+    return [Decision.from_row(r) for r in rows]
+
+
 def list_for_workspace(conn: sqlite3.Connection, workspace_id: str, *, status: str | None = None, limit: int = 100) -> list[Decision]:
     query = "SELECT * FROM decisions WHERE workspace_id = ?"
     args: list[Any] = [workspace_id]

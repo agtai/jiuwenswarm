@@ -51,6 +51,7 @@ async def world(store, tmp_path):
         get_settings=lambda: HostSettings(port=19999),
         docs=FakeDocs(),  # type: ignore[arg-type]
         files_dir=tmp_path / "references",
+        exports_dir=tmp_path / "exports",
     )
     return HostWorld(ctx, hub)
 

@@ -202,9 +202,11 @@ def finish_receipt(
     after: list[dict[str, Any]] | None = None,
     suggestion_ids: list[str] | None = None,
     error: dict[str, Any] | None = None,
+    version_id: str | None = None,
 ) -> Receipt:
     conn.execute(
-        "UPDATE receipts SET status = ?, before = ?, after = ?, suggestion_ids = ?, error = ?, applied_at = ? WHERE id = ?",
+        "UPDATE receipts SET status = ?, before = ?, after = ?, suggestion_ids = ?, error = ?, applied_at = ?, version_id = ?"
+        " WHERE id = ?",
         (
             "applied" if applied else "aborted",
             json.dumps(before) if before is not None else None,
@@ -212,6 +214,7 @@ def finish_receipt(
             json.dumps(suggestion_ids or []),
             json.dumps(error) if error is not None else None,
             now_iso() if applied else None,
+            version_id,
             receipt_id,
         ),
     )

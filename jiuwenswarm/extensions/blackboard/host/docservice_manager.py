@@ -75,6 +75,13 @@ def locate_node(configured: str = "") -> tuple[str, str]:
     return candidate, version
 
 
+def _host_url(bind: str, port: int) -> str:
+    """The host's API as seen from this machine: loopback, unless it listens on one address only."""
+    if bind in ("0.0.0.0", "::", "", "localhost", "127.0.0.1"):
+        return f"http://127.0.0.1:{port}"
+    return f"http://[{bind}]:{port}" if ":" in bind else f"http://{bind}:{port}"
+
+
 class DocServiceClient:
     """The service's internal HTTP API (127.0.0.1 only, X-BB-Secret)."""
 
@@ -129,8 +136,32 @@ class DocServiceClient:
     async def suggestions(self, doc_id: str) -> dict:
         return await self.request("GET", f"/api/docs/{doc_id}/suggestions")
 
-    async def decide(self, doc_id: str, suggestion_id: str, action: str) -> dict:
-        return await self.request("POST", f"/api/docs/{doc_id}/suggestions/{suggestion_id}", json={"action": action})
+    async def versions(self, doc_id: str, *, limit: int = 50, before: str | None = None) -> dict:
+        params: dict[str, Any] = {"limit": limit}
+        if before:
+            params["before"] = before
+        return await self.request("GET", f"/api/docs/{doc_id}/versions", params=params)
+
+    async def version(self, doc_id: str, version_id: str, *, markdown: bool = False) -> dict:
+        params = {"format": "markdown"} if markdown else None
+        return await self.request("GET", f"/api/docs/{doc_id}/versions/{version_id}", params=params)
+
+    async def diff(self, doc_id: str, to: str, from_: str | None = None) -> dict:
+        params = {"to": to, **({"from": from_} if from_ else {})}
+        return await self.request("GET", f"/api/docs/{doc_id}/diff", params=params)
+
+    async def save_version(self, doc_id: str, author: dict, label: str | None) -> dict:
+        return await self.request("POST", f"/api/docs/{doc_id}/versions", json={"author": author, "label": label})
+
+    async def restore(self, doc_id: str, version_id: str, author: dict) -> dict:
+        return await self.request("POST", f"/api/docs/{doc_id}/restore", json={"versionId": version_id, "author": author})
+
+    async def export(self, doc_id: str, body: dict) -> dict:
+        return await self.request("POST", f"/api/docs/{doc_id}/export", json=body)
+
+    async def decide(self, doc_id: str, suggestion_id: str, action: str, actor: str | None = None) -> dict:
+        body = {"action": action, **({"actor": actor} if actor else {})}
+        return await self.request("POST", f"/api/docs/{doc_id}/suggestions/{suggestion_id}", json=body)
 
     async def agent_presence(self, doc_id: str, body: dict) -> dict:
         return await self.request("POST", f"/api/docs/{doc_id}/presence", json=body)
@@ -246,6 +277,8 @@ class DocServiceManager:
             "BB_API_SECRET": self._secrets.api_secret,
             "BB_PARENT_PID": str(os.getpid()),
             "BB_VERSION": self._version,
+            # New versions are announced to this host's API.
+            "BB_HOST_URL": _host_url(settings.bind, settings.port),
         }
         log = open(self._data_dir / "docservice.log", "ab")  # noqa: SIM115 - handed to the child
         flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0

@@ -54,6 +54,12 @@ WORKSPACE_METHODS = {
     p.DECISION_ANSWER: ("editor", {"decision_id": "<decision>", "option": 0}),
     p.DECISION_CANCEL: ("editor", {"decision_id": "<decision>"}),
     p.MANDATE_RESOLVE_UNKNOWN: ("editor", {"mandate_id": "<unknown_mandate>", "status": "done"}),
+    p.HISTORY_LIST: ("viewer", {"doc_id": "<doc>"}),
+    p.HISTORY_GET: ("viewer", {"doc_id": "<doc>", "version_id": "<version>"}),
+    p.HISTORY_DIFF: ("viewer", {"doc_id": "<doc>", "to": "<version>"}),
+    p.HISTORY_SAVE: ("editor", {"doc_id": "<doc>", "label": "Checkpoint"}),
+    p.HISTORY_RESTORE: ("editor", {"doc_id": "<doc>", "version_id": "<version>"}),
+    p.DOC_EXPORT: ("viewer", {"doc_id": "<doc>", "format": "md"}),
 }
 
 # Only a comment's author edits it and only a task's requester accepts an answer; their own tests
@@ -91,6 +97,7 @@ async def _scene(world, role: str | None):
         "<resolved_thread>": resolved,
         "<decision>": await world.ask(alice, asking),
         "<unknown_mandate>": unknown,
+        "<version>": world.ctx.docs.add_version(doc_id, "created", [{"id": alice.id, "kind": "person"}])["id"],
     }
     return alice, bob, carol, workspace_id, fill
 
@@ -144,6 +151,7 @@ async def test_an_unknown_workspace_is_not_found(world, method):
         "<resolved_thread>": "t_missing",
         "<decision>": "dc_missing",
         "<unknown_mandate>": "m_missing",
+        "<version>": "v_missing",
     }
     params = _params(extra, "ws_missing", missing)
     assert (await world.fails(alice, method, **params)).code == NOT_FOUND

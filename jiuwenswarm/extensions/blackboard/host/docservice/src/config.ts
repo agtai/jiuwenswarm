@@ -8,6 +8,12 @@ export interface Config {
   apiSecret: string
   parentPid: number | null
   version: string
+  // Where new versions are announced (the host's API), or null to announce nothing.
+  hostUrl: string | null
+  // How long a document stays quiet after people's edits before they become a version.
+  idleMs: number
+  // A Chrome, Edge or Chromium binary for PDF export, when not found in the usual places.
+  chromium: string | null
 }
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -26,5 +32,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     apiSecret: required(env, 'BB_API_SECRET'),
     parentPid: env.BB_PARENT_PID ? Number(env.BB_PARENT_PID) : null,
     version: env.BB_VERSION || '0.1.0',
+    hostUrl: env.BB_HOST_URL || null,
+    idleMs: Number(env.BB_VERSION_IDLE_MS || 30000),
+    chromium: env.BB_CHROMIUM_PATH || null,
   }
 }

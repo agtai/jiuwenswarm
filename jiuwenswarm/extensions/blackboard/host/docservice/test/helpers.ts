@@ -38,7 +38,10 @@ export interface TestService extends Service {
   call: (method: string, path: string, body?: unknown, secret?: string) => Promise<{ status: number; body: any }>
 }
 
-export async function startTestService(dir = mkdtempSync(join(tmpdir(), 'bb-docservice-'))): Promise<TestService> {
+export async function startTestService(
+  dir = mkdtempSync(join(tmpdir(), 'bb-docservice-')),
+  overrides: Partial<Config> = {},
+): Promise<TestService> {
   const config: Config = {
     port: await freePort(),
     bind: '127.0.0.1',
@@ -48,6 +51,10 @@ export async function startTestService(dir = mkdtempSync(join(tmpdir(), 'bb-docs
     apiSecret: API_SECRET,
     parentPid: null,
     version: 'test',
+    hostUrl: null,
+    idleMs: 200,
+    chromium: null,
+    ...overrides,
   }
   const service = await startService(config)
   const call = async (method: string, path: string, body?: unknown, secret = API_SECRET) => {

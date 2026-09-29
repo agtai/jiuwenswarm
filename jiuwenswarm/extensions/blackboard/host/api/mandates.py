@@ -208,7 +208,7 @@ async def suggestion_decide(call: Call) -> dict[str, Any]:
     missing: list[str] = []
     for suggestion_id in dict.fromkeys(ids):
         try:
-            await client.decide(doc_id, suggestion_id, action)
+            await client.decide(doc_id, suggestion_id, action, actor=call.uid)
             decided.append(suggestion_id)
         except BlackboardError as exc:
             if exc.code != "not_found":
@@ -362,6 +362,7 @@ async def edit(call: Call) -> dict[str, Any]:
             before=result.get("before"),
             after=result.get("after"),
             suggestion_ids=result.get("suggestionIds"),
+            version_id=result.get("versionId"),
         )
 
     first = await ctx.store.transact(lambda c: (applied(c), _applied_count(c, mandate.id) == 1)[1])

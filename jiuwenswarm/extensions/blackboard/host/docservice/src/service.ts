@@ -6,8 +6,10 @@ import { Database } from '@hocuspocus/extension-database'
 import { WRITE_ROLES, TokenError, verifyDocToken, type DocClaims } from './auth.ts'
 import { docRoutes } from './api/docs.ts'
 import { createApi } from './api/http.ts'
+import { versionRoutes } from './api/versions.ts'
 import type { Config } from './config.ts'
 import { DocPool } from './docs/pool.ts'
+import { Versions, versionAnnouncer } from './docs/versions.ts'
 import { authorGuard } from './hooks/authorGuard.ts'
 import { DocStorage } from './storage.ts'
 
@@ -19,6 +21,7 @@ export interface Service {
   server: Server
   pool: DocPool
   storage: DocStorage
+  versions: Versions
   api: HttpServer
   stop: () => Promise<void>
 }
@@ -69,10 +72,17 @@ export async function startService(config: Config, { onShutdown = () => {} }: { 
     async beforeHandleMessage(payload: any) {
       authorGuard(payload)
     },
+    // A person's edit starts the idle wait for a version; the API's own changes take theirs directly.
+    async onChange({ documentName, context }: any) {
+      if (context?.kind === 'person' && typeof context.userId === 'string') {
+        versions.touched(documentName, { id: context.userId, kind: 'person' })
+      }
+    },
   } as any)
   await server.listen()
 
   const pool = new DocPool(server.hocuspocus)
+  const versions = new Versions(storage, pool, config.idleMs, versionAnnouncer(config.hostUrl, config.apiSecret))
   const recheck = setInterval(() => {
     for (const document of server.hocuspocus.documents.values()) {
       for (const connection of document.getConnections()) (connection as any).requestToken()
@@ -84,6 +94,7 @@ export async function startService(config: Config, { onShutdown = () => {} }: { 
     stopping ??= (async () => {
       clearInterval(recheck)
       await new Promise<void>((resolve) => api.close(() => resolve()))
+      await versions.flushAll()
       // destroy() closes connections and stores every loaded document first.
       await server.destroy()
       storage.close()
@@ -91,20 +102,21 @@ export async function startService(config: Config, { onShutdown = () => {} }: { 
     return stopping
   }
 
-  const api = createApi(
-    config.apiSecret,
-    docRoutes({
+  const api = createApi(config.apiSecret, [
+    ...docRoutes({
       hocuspocus: server.hocuspocus,
       pool,
       storage,
+      versions,
       version: config.version,
       shutdown: () => void stop().then(onShutdown),
     }),
-  )
+    ...versionRoutes({ hocuspocus: server.hocuspocus, pool, storage, versions, chromium: config.chromium }),
+  ])
   await new Promise<void>((resolve, reject) => {
     api.once('error', reject)
     api.listen(config.apiPort, '127.0.0.1', () => resolve())
   })
 
-  return { server, pool, storage, api, stop }
+  return { server, pool, storage, versions, api, stop }
 }

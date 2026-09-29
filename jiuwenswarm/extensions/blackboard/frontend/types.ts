@@ -265,5 +265,41 @@ export interface DecisionView {
   passage_changed?: boolean;
 }
 
+export type VersionReason = 'created' | 'agent_turn' | 'idle' | 'import' | 'restore' | 'manual';
+
+export interface VersionView {
+  id: string;
+  doc_id: string;
+  created_at: string;
+  reason: VersionReason;
+  authors: Array<{ id: string; kind: 'person' | 'agent'; name: string }>;
+  mandate_id: string | null;
+  mandate_instruction: string | null;
+  restored_from: string | null;
+  label: string | null;
+  size: number;
+}
+
+export type DiffStatus = 'unchanged' | 'changed' | 'added' | 'removed' | 'moved';
+
+export interface DiffBlockView {
+  id: string | null;
+  type: string;
+  status: DiffStatus;
+  markdown: string;
+  inline: Array<{ op: 'eq' | 'ins' | 'del'; text: string }> | null;
+  pending: boolean;
+  was_pending: boolean;
+}
+
+export interface DiffView {
+  from: string | null;
+  to: string;
+  blocks: DiffBlockView[];
+  summary: Partial<Record<DiffStatus, number>>;
+}
+
+export type ExportFormat = 'md' | 'docx' | 'pdf';
+
 export type Rpc = <T = unknown>(method: string, params?: Record<string, unknown>) => Promise<T>;
 export type Subscribe = (event: string, handler: (payload: Record<string, unknown>) => void) => () => void;

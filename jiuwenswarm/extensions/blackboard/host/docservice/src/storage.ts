@@ -1,6 +1,24 @@
 // Yjs document states in SQLite through node:sqlite, so the service has no native module and
-// bundles into one file. Hocuspocus's Database extension calls fetch and store.
+// bundles into one file. Hocuspocus's Database extension calls fetch and store. Versions (full
+// snapshots of a document) live in the same file.
 import { DatabaseSync } from 'node:sqlite'
+import type { VersionInfo } from './docs/versions.ts'
+
+const VERSION_COLUMNS = 'id, doc_id, created_at, reason, authors, mandate_id, restored_from, label, size'
+
+function versionRow(row: any): VersionInfo {
+  return {
+    id: row.id,
+    docId: row.doc_id,
+    createdAt: row.created_at,
+    reason: row.reason,
+    authors: JSON.parse(row.authors),
+    mandateId: row.mandate_id ?? null,
+    restoredFrom: row.restored_from ?? null,
+    label: row.label ?? null,
+    size: Number(row.size),
+  }
+}
 
 export class DocStorage {
   private db: DatabaseSync
@@ -19,6 +37,13 @@ export class DocStorage {
     this.db.exec(
       'CREATE TABLE IF NOT EXISTS access (doc TEXT NOT NULL, uid TEXT NOT NULL, role TEXT, at INTEGER NOT NULL, PRIMARY KEY (doc, uid))',
     )
+    // Ordered by rowid: ids made in the same millisecond do not sort by time.
+    this.db.exec(
+      'CREATE TABLE IF NOT EXISTS versions (id TEXT PRIMARY KEY, doc_id TEXT NOT NULL, created_at TEXT NOT NULL,' +
+        ' reason TEXT NOT NULL, authors TEXT NOT NULL, mandate_id TEXT, restored_from TEXT, label TEXT,' +
+        ' digest TEXT NOT NULL, snapshot BLOB NOT NULL, size INTEGER NOT NULL)',
+    )
+    this.db.exec('CREATE INDEX IF NOT EXISTS versions_doc ON versions(doc_id)')
   }
 
   fetch(name: string): Uint8Array | null {
@@ -44,6 +69,55 @@ export class DocStorage {
     this.deleted.add(name)
     this.db.prepare('DELETE FROM documents WHERE name = ?').run(name)
     this.db.prepare('DELETE FROM access WHERE doc = ?').run(name)
+    this.db.prepare('DELETE FROM versions WHERE doc_id = ?').run(name)
+  }
+
+  addVersion(info: VersionInfo, digest: string, snapshot: Uint8Array): void {
+    this.db
+      .prepare(`INSERT INTO versions (${VERSION_COLUMNS}, digest, snapshot) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(
+        info.id,
+        info.docId,
+        info.createdAt,
+        info.reason,
+        JSON.stringify(info.authors),
+        info.mandateId,
+        info.restoredFrom,
+        info.label,
+        info.size,
+        digest,
+        snapshot,
+      )
+  }
+
+  lastDigest(docId: string): string | null {
+    const row = this.db.prepare('SELECT digest FROM versions WHERE doc_id = ? ORDER BY rowid DESC LIMIT 1').get(docId) as any
+    return row ? String(row.digest) : null
+  }
+
+  // Newest first; `before` is a version id, for the next page.
+  listVersions(docId: string, limit: number, before: string | null): VersionInfo[] {
+    const rows = before
+      ? this.db
+          .prepare(
+            `SELECT ${VERSION_COLUMNS} FROM versions WHERE doc_id = ? AND rowid < (SELECT rowid FROM versions WHERE id = ?) ORDER BY rowid DESC LIMIT ?`,
+          )
+          .all(docId, before, limit)
+      : this.db.prepare(`SELECT ${VERSION_COLUMNS} FROM versions WHERE doc_id = ? ORDER BY rowid DESC LIMIT ?`).all(docId, limit)
+    return rows.map(versionRow)
+  }
+
+  getVersion(docId: string, id: string): { info: VersionInfo; snapshot: Uint8Array } | null {
+    const row = this.db.prepare(`SELECT ${VERSION_COLUMNS}, snapshot FROM versions WHERE doc_id = ? AND id = ?`).get(docId, id) as any
+    return row ? { info: versionRow(row), snapshot: new Uint8Array(row.snapshot) } : null
+  }
+
+  // The version just before `id`, for "changes since the previous version".
+  previousVersionId(docId: string, id: string): string | null {
+    const row = this.db
+      .prepare('SELECT id FROM versions WHERE doc_id = ? AND rowid < (SELECT rowid FROM versions WHERE id = ?) ORDER BY rowid DESC LIMIT 1')
+      .get(docId, id) as any
+    return row ? String(row.id) : null
   }
 
   setAccess(doc: string, uid: string, role: string | null, at: number): void {

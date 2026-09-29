@@ -219,6 +219,13 @@ MIGRATIONS: list[tuple[int, tuple[str, ...]]] = [
             "CREATE INDEX mandates_requester ON mandates(requester_id, status)",
         ),
     ),
+    (
+        5,
+        (
+            # The version the document service took after the batch (milestone 6).
+            "ALTER TABLE receipts ADD COLUMN version_id TEXT",
+        ),
+    ),
 ]
 
 LATEST_VERSION = MIGRATIONS[-1][0]

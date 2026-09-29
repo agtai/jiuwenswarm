@@ -55,6 +55,8 @@ The browser-free runtime archive contains the following production packages reso
 | @tiptap/y-tiptap | 3.0.9 | MIT | npm package `@tiptap/y-tiptap` |
 | async-mutex | 0.5.0 | MIT | npm package `async-mutex` |
 | crossws | 0.4.12 | MIT | npm package `crossws` |
+| diff | 9.0.0 | BSD-3-Clause | npm package `diff` |
+| docx | 9.8.1 | MIT | npm package `docx`; its published build embeds JSZip (MIT or GPL-3.0, used under MIT; with pako, MIT and Zlib), sax (ISC), xml-js (MIT), xml (MIT), nanoid (MIT), hash.js (MIT) and Node.js polyfills from vite-plugin-node-polyfills (buffer, events, util, stream-browserify and their helpers; MIT, ISC or BSD-3-Clause) |
 | kleur | 4.1.5 | MIT | npm package `kleur` |
 | lib0 | 0.2.118 | MIT | npm package `lib0` |
 | linkifyjs | 4.3.3 | MIT | npm package `linkifyjs` |

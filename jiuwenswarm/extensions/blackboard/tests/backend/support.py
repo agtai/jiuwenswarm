@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import socket
 from dataclasses import replace
 from pathlib import Path
@@ -81,6 +82,8 @@ class FakeDocs:
         self.pending: dict[str, set[str]] = {}
         # Per anchor quote, what resolve_anchors reports instead of an unchanged, ok anchor.
         self.anchor_results: dict[str, dict[str, Any]] = {}
+        # Versions per document, oldest first, as the service reports them.
+        self.history: dict[str, list[dict[str, Any]]] = {}
 
     def require_client(self) -> "FakeDocs":
         if not self.running:
@@ -128,13 +131,66 @@ class FakeDocs:
         self.pending.setdefault(doc_id, set()).update(ids)
         before = [{"id": op["blockId"], "digest": "d0", "markdown": "old"} for op in body["ops"]]
         after = [{"id": op["blockId"], "digest": "d1", "markdown": "new"} for op in body["ops"]]
-        return {"changed": True, "suggestionIds": ids, "before": before, "after": after}
+        version = self.add_version(doc_id, "agent_turn", [{"id": body["author"]["id"], "kind": "agent"}], mandateId=body.get("mandateId"))
+        return {"changed": True, "suggestionIds": ids, "before": before, "after": after, "versionId": version["id"]}
+
+    def add_version(self, doc_id: str, reason: str, authors: list[dict], **extra: Any) -> dict[str, Any]:
+        versions = self.history.setdefault(doc_id, [])
+        version = {
+            "id": f"v{len(versions) + 1}_{doc_id}",
+            "docId": doc_id,
+            "createdAt": f"2026-09-29T10:00:{len(versions):02d}.000Z",
+            "reason": reason,
+            "authors": authors,
+            "mandateId": None,
+            "restoredFrom": None,
+            "label": None,
+            "size": 100,
+            **extra,
+        }
+        versions.append(version)
+        return version
+
+    def _version(self, doc_id: str, version_id: str) -> dict[str, Any]:
+        for version in self.history.get(doc_id, []):
+            if version["id"] == version_id:
+                return version
+        raise BlackboardError("not_found", "no such version", {"version_id": version_id})
+
+    async def versions(self, doc_id: str, *, limit: int = 50, before: str | None = None) -> dict:
+        self.calls.append(("versions", doc_id, {"limit": limit, "before": before}))
+        newest = list(reversed(self.history.get(doc_id, [])))
+        return {"versions": newest[:limit], "hasMore": len(newest) > limit}
+
+    async def version(self, doc_id: str, version_id: str, *, markdown: bool = False) -> dict:
+        version = self._version(doc_id, version_id)
+        if markdown:
+            return {"version": version, "markdown": f"# {version_id}\n"}
+        return {"version": version, "previous": None, "doc": {"type": "doc", "content": []}}
+
+    async def diff(self, doc_id: str, to: str, from_: str | None = None) -> dict:
+        self._version(doc_id, to)
+        blocks = [{"id": "b1", "type": "paragraph", "status": "changed", "markdown": "new", "inline": [{"op": "ins", "text": "new"}], "pending": True, "wasPending": False}]
+        return {"from": from_, "to": to, "blocks": blocks, "summary": {"changed": 1}}
+
+    async def save_version(self, doc_id: str, author: dict, label: str | None) -> dict:
+        return {"version": self.add_version(doc_id, "manual", [author], label=label)}
+
+    async def restore(self, doc_id: str, version_id: str, author: dict) -> dict:
+        self._version(doc_id, version_id)
+        self.calls.append(("restore", doc_id, {"version_id": version_id, "author": author}))
+        return {"version": self.add_version(doc_id, "restore", [author], restoredFrom=version_id)}
+
+    async def export(self, doc_id: str, body: dict) -> dict:
+        self.calls.append(("export", doc_id, body))
+        data = f"{body['format']}:{body['title']}:{len(body.get('decisions', []))}".encode()
+        return {"fileName": f"{body['title']}.{body['format']}", "contentType": "text/plain", "size": len(data), "data": base64.b64encode(data).decode()}
 
     async def suggestions(self, doc_id: str) -> dict:
         return {"suggestions": [{"id": s, "blockIds": ["b1"]} for s in sorted(self.pending.get(doc_id, set()))]}
 
-    async def decide(self, doc_id: str, suggestion_id: str, action: str) -> dict:
-        self.calls.append(("decide", doc_id, {"suggestion_id": suggestion_id, "action": action}))
+    async def decide(self, doc_id: str, suggestion_id: str, action: str, actor: str | None = None) -> dict:
+        self.calls.append(("decide", doc_id, {"suggestion_id": suggestion_id, "action": action, "actor": actor}))
         if suggestion_id not in self.pending.get(doc_id, set()):
             raise BlackboardError("not_found", "no pending suggestion has this id")
         self.pending[doc_id].discard(suggestion_id)

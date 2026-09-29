@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Bot, CircleHelp, Link2, MessageSquare, MessagesSquare, Paperclip, Server, Users } from 'lucide-react';
+import { Bot, CircleHelp, History, Link2, MessageSquare, MessagesSquare, Paperclip, Server, Users } from 'lucide-react';
 
 import { Button, Tabs, toast } from '../../../channels/web/frontend/src/components/ui';
 import { FormDialog } from '../../../channels/web/frontend/src/components/form';
@@ -12,6 +12,7 @@ import { AgentsPanel } from './components/AgentsPanel';
 import { ChatPanel } from './components/ChatPanel';
 import { CommentDraft, CommentsPanel, ThreadCard, type CommentsActions, type ThreadProps } from './components/CommentsPanel';
 import { DecisionsPanel, type DecisionActions } from './components/Decisions';
+import { HistoryPanel } from './components/HistoryPanel';
 import { MembersPanel } from './components/MembersPanel';
 import { ReferencePreview, ReferencesPanel } from './components/ReferencesPanel';
 import { Sidebar } from './components/Sidebar';
@@ -24,7 +25,8 @@ import {
   RenameDialog,
   SettingsDialog,
 } from './components/dialogs';
-import { ImportMarkdownDialog, MarkdownDialog, NewDocumentDialog } from './components/docDialogs';
+import { ExportDialog, ImportMarkdownDialog, MarkdownDialog, NewDocumentDialog } from './components/docDialogs';
+import type { VersionActions } from './editor/VersionView';
 import './blackboard.css';
 
 // The file as base64, for the upload RPC.
@@ -52,15 +54,17 @@ const RAIL_ICONS: Record<RailTab, typeof Users> = {
   chat: MessageSquare,
   comments: MessagesSquare,
   decisions: CircleHelp,
+  history: History,
   agents: Bot,
   references: Paperclip,
   members: Users,
 };
-const RAIL_ORDER: RailTab[] = ['chat', 'comments', 'decisions', 'agents', 'references', 'members'];
+const RAIL_ORDER: RailTab[] = ['chat', 'comments', 'decisions', 'history', 'agents', 'references', 'members'];
 const RAIL_LABELS: Record<RailTab, string> = {
   chat: 'blackboard.messages.tab',
   comments: 'blackboard.comments.tab',
   decisions: 'blackboard.decisions.tab',
+  history: 'blackboard.history.tab',
   agents: 'blackboard.agents.tab',
   references: 'blackboard.references.tab',
   members: 'blackboard.members.tab',
@@ -70,7 +74,17 @@ const RAIL_LABELS: Record<RailTab, string> = {
 function canTalk(role: Role | undefined, archived: boolean): boolean {
   return !archived && (role === 'owner' || role === 'editor' || role === 'commenter');
 }
-type DocDialog = { kind: 'import' | 'markdown'; doc: DocView } | null;
+type DocDialog = { kind: 'import' | 'markdown' | 'export'; doc: DocView } | null;
+
+// Opens a download the browser saves as a file (the host sends it as an attachment).
+function download(url: string): void {
+  const link = document.createElement('a');
+  link.href = url;
+  link.rel = 'noopener';
+  document.body.append(link);
+  link.click();
+  link.remove();
+}
 
 export function BlackboardPage() {
   const { t } = useTranslation();
@@ -184,6 +198,8 @@ export function BlackboardPage() {
     setInstructions: (d) => void controller.setInstructions(d.id).catch(report),
     importMarkdown: (d) => setDocDialog({ kind: 'import', doc: d }),
     viewMarkdown: (d) => setDocDialog({ kind: 'markdown', doc: d }),
+    showHistory: () => controller.selectRail('history'),
+    exportDoc: (d) => setDocDialog({ kind: 'export', doc: d }),
     archive: (d) =>
       setConfirm({
         title: t('blackboard.docs.archive'),
@@ -307,6 +323,27 @@ export function BlackboardPage() {
     renderDraft: () => <CommentDraft {...threadProps} />,
   };
 
+  const openVersion = state.history.find((v) => v.id === state.openVersion) ?? null;
+  const versionActions: VersionActions = {
+    content: (id) => controller.versionContent(id),
+    diff: (to, from) => controller.versionDiff(to, from),
+    markdown: (id) => controller.versionMarkdown(id),
+    restore:
+      editable && doc && !doc.archived
+        ? (version) =>
+            setConfirm({
+              title: t('blackboard.history.restoreTitle'),
+              message: t('blackboard.history.restoreConfirm', {
+                time: new Date(version.created_at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }),
+              }),
+              confirmLabel: t('blackboard.history.restore'),
+              action: () => controller.restoreVersion(version.id),
+              testId: 'blackboard-restore-dialog',
+            })
+        : null,
+    close: () => controller.openVersion(null),
+  };
+
   const openThreadFromChat = (docId: string, threadId: string) => {
     controller.selectDoc(docId);
     controller.openThread(threadId);
@@ -359,6 +396,9 @@ export function BlackboardPage() {
                 docActions={docActions}
                 suggestionActions={suggestionActions}
                 commentActions={commentActions}
+                openVersion={openVersion}
+                versions={state.history}
+                versionActions={versionActions}
                 onNewDoc={() => setOpen('newDoc')}
                 onRename={() => setOpen('rename')}
                 onArchive={() => void controller.setArchived(true).catch(report)}
@@ -442,6 +482,17 @@ export function BlackboardPage() {
                   meId={state.me?.user_id ?? null}
                   docTitles={docTitles}
                   actions={decisionActions}
+                />
+              ) : railTab === 'history' ? (
+                <HistoryPanel
+                  doc={doc}
+                  versions={state.history}
+                  hasMore={state.historyHasMore}
+                  openVersion={state.openVersion}
+                  canSave={editable && Boolean(doc && !doc.archived)}
+                  onOpen={(id) => controller.openVersion(id)}
+                  onSave={(label) => controller.saveVersion(label).then(() => undefined, rethrow)}
+                  onMore={() => void controller.loadOlderHistory().catch(report)}
                 />
               ) : railTab === 'members' ? (
                 <MembersPanel
@@ -528,6 +579,15 @@ export function BlackboardPage() {
         open={docDialog?.kind === 'markdown'}
         docTitle={docDialog?.doc.title ?? ''}
         load={loadMarkdown}
+        onClose={() => setDocDialog(null)}
+      />
+      <ExportDialog
+        open={docDialog?.kind === 'export'}
+        docTitle={docDialog?.doc.title ?? ''}
+        onExport={async (format, includeDecisions) => {
+          const result = await controller.exportDoc(format, { includeDecisions });
+          download(result.url);
+        }}
         onClose={() => setDocDialog(null)}
       />
       <FormDialog

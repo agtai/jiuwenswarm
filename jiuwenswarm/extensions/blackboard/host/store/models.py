@@ -305,6 +305,7 @@ class Receipt:
     error: dict[str, Any] | None
     created_at: str
     applied_at: str | None
+    version_id: str | None = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Receipt":
@@ -321,6 +322,7 @@ class Receipt:
             error=_json(row["error"], None),
             created_at=row["created_at"],
             applied_at=row["applied_at"],
+            version_id=row["version_id"] if "version_id" in row.keys() else None,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -337,6 +339,7 @@ class Receipt:
             "error": self.error,
             "created_at": self.created_at,
             "applied_at": self.applied_at,
+            "version_id": self.version_id,
         }
 
 
