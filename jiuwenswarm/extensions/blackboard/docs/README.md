@@ -13,7 +13,7 @@ flowchart LR
     B2 -->|Yjs over WebSocket, document token| D
 ```
 
-Milestones 2 to 7 are built: the host, identity, workspaces, members, invites, live documents, references, Markdown in and out, agents that edit documents from a person's chat session, comments, the workspace chat and decisions (where `@jiuwen` gives the person's agent a task), version history with restore and export to Word, PDF and Markdown, and reading workspaces from any chat, including Slack or Feishu through a team's shared bot. The browser edits a document directly with the host's document service, using a short-lived document token that the host mints; everything else goes through the browser's own jiuwenswarm.
+Milestones 2 to 8 are built: the host, identity, workspaces, members, invites, live documents, references, Markdown in and out, agents that edit documents from a person's chat session, comments, the workspace chat and decisions (where `@jiuwen` gives the person's agent a task), version history with restore and export to Word, PDF and Markdown, reading workspaces from any chat, including Slack or Feishu through a team's shared bot, and the hardening for a team release (see [Security](#security) and [Operations](#operations)). The user guide is `docs/en/Blackboard.md` (and `docs/zh/Blackboard.md`) in the repository. The browser edits a document directly with the host's document service, using a short-lived document token that the host mints; everything else goes through the browser's own jiuwenswarm.
 
 Blackboard is always on: it ships in the package's `extensions` folder, which every instance loads, and `is_enabled()` always returns true. In the rail it sits right below Tasks (`nav_after="chat"` on its page contribution) with its own chalkboard icon (`applicationPluginNavIcon`, exported from `frontend/index.tsx`). Both are general plugin features, so other built-in plugins can use them too.
 
@@ -31,7 +31,8 @@ Blackboard is always on: it ships in the package's `extensions` folder, which ev
 | `host/api/mandates.py`, `host/api/locks.py` | Agent edits: mandates, receipts, document locks and their wait queue, suggestion decisions, the idle sweeper |
 | `host/api/comments.py`, `host/api/chat.py`, `host/api/decisions.py`, `host/api/feed.py` | Threads and comments, the workspace chat, the agent's questions, and posting replies, notices and summaries |
 | `host/api/history.py` | Version history (list, one version, diff, save, restore), exports and their download links, and the endpoint where the document service announces versions |
-| `host/api/identities.py`, `host/api/ratelimit.py`, `host/extract.py` | Shared bots and connected IM accounts, the per-minute limits on agents' reads, and the text of a reference file |
+| `host/api/identities.py`, `host/api/ratelimit.py`, `host/extract.py` | Shared bots and connected IM accounts, the per-minute limits, and the text of a reference file |
+| `host/api/people.py`, `host/api/ops.py`, `common/origins.py` | Replacing a member token and the operator's people list; health and the metrics line; which web pages may open the host's WebSockets |
 | `host/api/dispatch.py` | Tasks from comments and the chat: beginning and queueing them, offering turns, claim and report, the turn's material, the sweeper for turns nobody picked up |
 | `host/docservice/` | The document service (TypeScript, run by Node 22.5+): Hocuspocus with SQLite, document tokens, the author guard, the shared Tiptap schema, Markdown in and out, the agent view. No npm project of its own: its packages are in the web app's `package.json` |
 | `client/` | Known hosts (`hosts.json`), host links, joining with a link, local RPC proxies, reference uploads, bot links when this jiuwenswarm is a team's shared bot (`bots.py`), sessions attached to workspaces (`sessions.py`), the dispatcher that runs comment and chat tasks (`dispatcher.py`) and their prompt (`prompt.py`) |
@@ -58,8 +59,13 @@ In the web app, open **Blackboard** and choose **Host workspaces on this machine
 | `doc_public_url` | empty | The address browsers use for documents, such as `wss://bb.example.com/docs`; without it, `ws://` or `wss://` on the `public_url` host with `doc_port` |
 | `node_path` | empty | Node to run the document service with; empty means `node` on `PATH` |
 | `max_upload_mb` | `25` | Largest reference file |
+| `allowed_origins` | empty | Web pages besides loopback ones whose browsers may open the live documents and the events socket, such as `https://jiuwen.example.com` (see [Security](#security)) |
+| `allow_any_origin` | `false` | Skip the origin check, for a LAN where web apps are opened at many addresses |
+| `version_retention_days` | `0` | Remove versions older than this, except named ones and each document's latest; 0 keeps every version |
 
-Members on other machines need `bind: 0.0.0.0` and a `public_url`, and their browsers must reach `doc_port` too (or `doc_public_url` behind the proxy). Plain `http://` works on a LAN, but the traffic is not encrypted; a reverse proxy with TLS in front of the host is the recommended team setup.
+Members on other machines need `bind: 0.0.0.0` and a `public_url`, and their browsers must reach `doc_port` too (or `doc_public_url` behind the proxy). Plain `http://` works on a LAN, but the traffic is not encrypted; a reverse proxy with TLS in front of the host is the recommended team setup (the user guide has an nginx example), and a member's settings warn when their host address is plain `http://` on another machine.
+
+`BLACKBOARD_HOST_<KEY>` environment variables override these keys, for containers: `BLACKBOARD_HOST_ENABLED=1`, `BLACKBOARD_HOST_BIND=0.0.0.0`, `BLACKBOARD_HOST_PUBLIC_URL=...`, `BLACKBOARD_HOST_ALLOWED_ORIGINS=https://a.example,https://b.example`. The host status lists the overridden keys (`env_overrides`), and the settings dialog says that changing them there has no effect. Both Dockerfiles expose ports 19011 and 19010.
 
 ## The document service
 
@@ -80,7 +86,8 @@ Rules worth knowing:
 
 - Only the host creates and deletes documents (internal API with the `api_secret`). A browser connects with a document token `{uid, ws, doc, role, iat, exp}` signed with the `doc_secret`, valid for one hour; viewers, commenters and archived documents or workspaces get a read-only connection.
 - When a role changes or a member leaves, the host tells the service at once. The service applies the new role to open connections (or closes them) and ignores tokens issued before the change, so an old token cannot bring the old role back.
-- The author guard: a person's update may not add text credited to anyone else, whether through author marks, suggestion authors or block-level suggestion marks. It compares credits before and after the update on a copy of the document, so splitting, joining and moving other people's text still works.
+- The author guard: a person's update may not add text credited to anyone else, whether through author marks, suggestion authors or block-level suggestion marks. It compares credits before and after the update, so splitting, joining and moving other people's text still works. A ledger per open document (`CreditLedger` in `hooks/authorGuard.ts`) keeps a shadow copy and each top-level block's credits, and counts again only the blocks an update touches: 2 to 6 ms per keystroke on a 1,600-block document, where comparing whole copies took 110 to 240 ms and let a fast typist's updates queue up for seconds. The whole-document check stays as the reference the ledger is tested against.
+- Carets: the service overwrites the `user` of every awareness state a person's connection sends with the id and name from their document token, so nobody can show another name or an agent's caret.
 - In the browser, everything a person types or pastes carries their author mark; text that undo or redo brings back is credited to the person who undid.
 - `@tiptap/y-tiptap` is a vendored copy with a patch that keeps node marks (whole-block suggestions) in Yjs: `vendor/y-tiptap-nodemarks.js`, produced by `node host/docservice/scripts/make-ytiptap-nodemarks.mjs` from the pinned package; a test fails when the copy no longer matches. The web app's Vite config points `@tiptap/y-tiptap` at the same file, and resolves bare imports in plugin code from the web app's own `node_modules`.
 
@@ -217,6 +224,33 @@ Rules worth knowing:
 - **Revoke** on the host makes the bot's token `unauthorized` at once. **Remove** on the bot instance makes it a personal instance again.
 - IM channels are the ones whose id starts with `dingtalk`, `discord`, `feishu`, `slack`, `telegram`, `wechat`, `wecom`, `whatsapp` or `xiaoyi`.
 
+## Security
+
+| Item | How it is handled |
+|---|---|
+| Member tokens | `bbm_` plus 32 random bytes, stored on the host as a SHA-256 hash, kept by the client in `client/hosts.json` and never sent to a browser. **Replace key** in Blackboard settings (`blackboard.hosts.rotate_token`, which calls `blackboard.me.rotate_token` on the host) gives a new one at once; the old one stops working and its event connections are closed |
+| Disabled people | The operator's **People on this host** list (`blackboard.user.list`, `.user.set_status`) turns a person off: every call gets `disabled`, their event connections close, their open documents lose access, and a shared bot's reads for them stop. Memberships stay, so enabling restores everything. When a refused link's next call works again, it reconnects at once instead of after 5 minutes |
+| Bot tokens and link codes | See the shared bot section: operator-made, revocable, read methods only, always on behalf of a connected person; codes last 15 minutes, work once, and only the newest counts |
+| Document and file tokens | HMAC-SHA256 with a host secret, one hour, bound to the person, workspace, document or file and role; a role change or removal takes effect on open connections at once. The host mints and checks them on its own machine and clock, so there is no clock skew to allow for |
+| Author guard and carets | See the document service rules above |
+| Document service API | On `127.0.0.1:doc_api_port` only, with the API secret; the host exposes no raw document operations |
+| WebSocket origins | The live documents and the events socket accept connections without an `Origin` (members' instances) and from loopback pages (people's own web apps), plus `allowed_origins`; any other page gets 403 (documents) or 4403 (events), unless `allow_any_origin` is set |
+| Rate limits (per minute) | An agent's reads: 60 per person and 60 per connected IM account; a bot: 600; an agent's edit batches: 10 per run; reference uploads: 5 per person. Over the limit gets `rate_limited` (HTTP 429). The browser's own calls are not limited |
+| Logs | `blackboard.log` passes every line through a filter that replaces member and bot tokens, signed tokens, `t=` link tokens and bearer headers with `[redacted]` |
+| Paths | Reference files and exports are stored and served by generated ids; names from uploads are only shown, never used as paths |
+| TLS | A reverse proxy in front of the host (the user guide has an nginx example); members see a warning for a plain `http://` host on another machine |
+
+## Operations
+
+- **Logs.** `blackboard.log` (host and client, 20 MB, 5 files, tokens redacted) and `host/docservice.log` (the document service's output).
+- **Health.** `GET /blackboard/health` gives the document service's status, open documents and connections, whether PDF export has a browser, the members connected to the events socket, the active agent runs by status, and the queue depth (comment tasks waiting for a document plus edits waiting for a lock). Counts only, no names. The settings dialog of the instance running the host shows the same in one line (`blackboard.host.health`).
+- **Metrics.** Every 10 minutes the host writes one line to `blackboard.log`: runs finished by status, runs still active, edit batches applied and refused by reason, and the average run time.
+- **Restart.** Documents, versions, locks, runs and receipts are in SQLite and survive a restart. A run that was working when its requester's jiuwenswarm or the host went away becomes Unknown once its turn goes quiet (10 minutes) and an editor resolves it; a workspace-session run ends 2 minutes after its last edit. People's unsaved changes come back when their browsers reconnect.
+- **Retention.** Exports are removed after a day; versions are kept unless `version_retention_days` is set; archived workspaces stay until an owner deletes them.
+- **Backup.** Stop the host (or jiuwenswarm) and copy `<data root>/blackboard`; restoring is copying it back.
+- **Node and browsers.** The host runs the document service with `node` from `PATH` (the desktop builds put their bundled Node 22.11 first, and it runs with `--experimental-sqlite`) or `node_path`. PDF export looks for Chrome, Edge or Chromium, including a Playwright download; without one, health reports `pdf_export: false` and the settings line says so.
+- **Performance.** On one machine with the scripted model, a keystroke reaches another editor in about 130 ms on documents up to a few hundred blocks. On a 1,600-block document it takes about 0.7 s with two editors, most of it the browser's y-tiptap rebuild of the whole document on every remote change (y-tiptap issue #54); take the upstream fix when it is released. `notes/blackboard/e2e/typing-bench.mjs` measures it.
+
 ## Join from a second instance on the same machine
 
 Run a second jiuwenswarm with its own data folder and ports, either as a named instance:
@@ -255,6 +289,9 @@ The browser calls these on its own web channel; all are local-only.
 |---|---|
 | `blackboard.hosts.list`, `.join {url, display_name}`, `.remove {host}`, `.set_default {host}` | client part |
 | `blackboard.bots.list`, `.bots.connect {link}`, `.bots.remove {bot}` | client part; connecting checks the link with the host (`blackboard.bot.whoami`) |
+| `blackboard.hosts.rotate_token {host}` | client part: a new member token from the host (`blackboard.me.rotate_token`), kept in `hosts.json`, and the host link reopened with it |
+| `blackboard.host.health` | this instance's host: what `/blackboard/health` reports |
+| `blackboard.user.list`, `.user.set_status {user_id, status: active \| disabled}` | the host, through the client part; the host's operator only |
 | `blackboard.host.status`, `blackboard.host.set_settings {settings}` | this instance's host controller |
 | `blackboard.me`, `.me.set_name`, `.workspace.list/create/rename/archive/unarchive/delete`, `.member.list/set_role/remove`, `.invite.create/list/revoke` | the host, through the client part; `params.host` picks the host, else the default one |
 | `blackboard.doc.list/create/rename/archive/pin/set_instructions/import_markdown/token/read`, `blackboard.reference.list/url/read/remove/set_note` | the host, through the client part |
@@ -267,7 +304,7 @@ The browser calls these on its own web channel; all are local-only.
 | `blackboard.history.list {doc_id, before?, limit?}`, `.history.get {doc_id, version_id, format?}` (`markdown` for the accepted text), `.history.diff {doc_id, to, from?}`, `.history.save {doc_id, label?}`, `.history.restore {doc_id, version_id}`, `blackboard.doc.export {doc_id, format: md \| docx \| pdf, include_decisions?, version_id?}` | the host, through the client part |
 | `blackboard.decision.list {workspace_id, status?}`, `.decision.get/accept/cancel {decision_id}`, `.decision.answer {decision_id, option? or text?}` | the host, through the client part |
 
-`blackboard.invite.accept` is the only host method that needs no member token; the client part calls it while joining. `blackboard.edit` and `blackboard.decision.create` are only for the agent's tools, and `blackboard.mandate.claim`, `.report` and `.pending` only for the dispatcher; they call the host directly and the browser cannot reach them. `blackboard.identity.link` and `blackboard.bot.whoami` take a bot token and nothing else. Errors come back as `{code, message, details}` with codes `unauthorized`, `not_member`, `forbidden`, `not_found`, `invalid`, `conflict`, `expired`, `disabled`, `unavailable`, `busy`, `queue_full`, `not_linked`, `rate_limited` and `internal`, from `blackboard.edit` also `stale`, `pending_suggestions`, `out_of_scope`, `unknown_block`, `unsupported_markdown` and `no_mandate`, and from `blackboard.reference.read` `unsupported_reference`. The agent's tools add `workspace_required`, `ambiguous_workspace` and `read_only`.
+`blackboard.invite.accept` is the only host method that needs no member token; the client part calls it while joining. `blackboard.edit` and `blackboard.decision.create` are only for the agent's tools, and `blackboard.mandate.claim`, `.report` and `.pending` only for the dispatcher; they call the host directly and the browser cannot reach them. `blackboard.identity.link` and `blackboard.bot.whoami` take a bot token and nothing else; `blackboard.me.rotate_token` is for the client part only, so a new token never reaches a browser. Errors come back as `{code, message, details}` with codes `unauthorized`, `not_member`, `forbidden`, `not_found`, `invalid`, `conflict`, `expired`, `disabled`, `unavailable`, `busy`, `queue_full`, `not_linked`, `rate_limited` and `internal`, from `blackboard.edit` also `stale`, `pending_suggestions`, `out_of_scope`, `unknown_block`, `unsupported_markdown` and `no_mandate`, and from `blackboard.reference.read` `unsupported_reference`. The agent's tools add `workspace_required`, `ambiguous_workspace` and `read_only`.
 
 Events reach the browser with a `host` field: `blackboard.workspace.updated`, `blackboard.member.updated`, `blackboard.me.updated`, `blackboard.member.role_changed`, `blackboard.doc.updated`, `blackboard.reference.updated`, `blackboard.mandate.updated`, `blackboard.doc.suggestions_changed`, `blackboard.thread.updated`, `blackboard.chat.message`, `blackboard.decision.updated`, `blackboard.doc.versions`, and from the client part `blackboard.hosts.updated`, `blackboard.host.status_changed` and `blackboard.sessions.updated`. The host sends an event only to the members of the workspace concerned (and `blackboard.mandate.run` and `blackboard.mandate.stop` only to the requester's client part, which consumes them), except `blackboard.host.updated` (a new host name), which goes to every connected member; the client part turns it into an update of its host list.
 
@@ -297,7 +334,10 @@ npm run test:blackboard-docservice
 | An invite link works only on the host's machine | `bind` is `127.0.0.1` or `public_url` is empty |
 | "Documents are unavailable: the document service is not built" | A source checkout whose web app was never built: run `npm install` and `npm run build` (or `npm run dev`) in `jiuwenswarm/channels/web/frontend` |
 | "The document service did not start" | See `host/docservice.log`; often `doc_port` or `doc_api_port` is taken |
-| A member's document stays at "Connecting" | Their browser cannot reach `doc_port` (firewall or proxy); set `doc_public_url` |
+| A member's document stays at "Connecting" | Their browser cannot reach `doc_port` (firewall or proxy); set `doc_public_url`. If `host/docservice.log` says "refused a connection from origin", the web app is opened at an address the host does not allow: add it to `allowed_origins` |
+| A member's page says the account is disabled | The operator disabled them under **People on this host**; enabling restores access at once |
+| Replace key fails or the page shows "The host did not accept this member" afterwards | The key was replaced from another copy of `hosts.json`; join again with a new invite |
+| The agent reports `rate_limited` on edits | More than 10 edit batches in a minute in one run; the agent should batch its operations |
 | An edit stays at "Saving" | The service refused the update; `host/docservice.log` names the reason (`author_mismatch` for the author guard) |
 | The agent says it has no Blackboard tools | This jiuwenswarm has joined no host (and has no bot link) |
 | The agent reads a workspace but says it cannot edit it | The session is not attached to that workspace (see the Agents tab), or it was attached during the current turn; the edit tool arrives with the next message |

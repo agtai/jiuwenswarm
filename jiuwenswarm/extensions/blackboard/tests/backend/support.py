@@ -58,6 +58,10 @@ class RecordingHub:
 
     def __init__(self) -> None:
         self.published: list[tuple[str, dict[str, Any], str | None, tuple[str, ...]]] = []
+        self.closed_users: list[str] = []
+
+    async def close_user(self, user_id: str, reason: str) -> None:
+        self.closed_users.append(user_id)
 
     async def publish(self, event, payload, *, workspace_id=None, user_ids=()):  # noqa: ANN001
         self.published.append((event, dict(payload), workspace_id, tuple(user_ids)))

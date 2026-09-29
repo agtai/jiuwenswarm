@@ -83,6 +83,10 @@ COPY --from=frontend --chown=app:app /app/jiuwenswarm/jiuwenswarm/channels/web/f
 # Keep the source-tree copy as well, so running straight from the checkout works.
 COPY --from=frontend --chown=app:app /app/jiuwenswarm/jiuwenswarm/channels/web/frontend/dist /app/jiuwenswarm/jiuwenswarm/channels/web/frontend/dist
 COPY --from=frontend --chown=app:app /app/jiuwenswarm/jiuwenswarm/channels/web/frontend/node_modules /app/jiuwenswarm/jiuwenswarm/channels/web/frontend/node_modules
+# The web build also writes Blackboard's document service bundle; like dist, it must reach
+# site-packages and the source tree.
+COPY --from=frontend --chown=app:app /app/jiuwenswarm/jiuwenswarm/extensions/blackboard/host/docservice/dist /app/.venv/lib/python3.11/site-packages/jiuwenswarm/extensions/blackboard/host/docservice/dist
+COPY --from=frontend --chown=app:app /app/jiuwenswarm/jiuwenswarm/extensions/blackboard/host/docservice/dist /app/jiuwenswarm/jiuwenswarm/extensions/blackboard/host/docservice/dist
 
 USER app
 
@@ -97,4 +101,7 @@ ENV PATH=/app/.venv/bin:/home/app/.local/bin:$PATH
 #RUN pip install -i  https://mirrors.aliyun.com/pypi/simple/ . --no-cache-dir
 # Start claw app
 EXPOSE 5173
+# Blackboard's host API and live documents, when started with BLACKBOARD_HOST_ENABLED=1,
+# BLACKBOARD_HOST_BIND=0.0.0.0 and BLACKBOARD_HOST_PUBLIC_URL set to the address members use.
+EXPOSE 19011 19010
 CMD ["jiuwenswarm-start"]

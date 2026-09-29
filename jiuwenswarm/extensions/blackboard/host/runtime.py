@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import getpass
 import logging
+import os
 import socket
 from pathlib import Path
 from typing import Any, Callable
@@ -25,7 +26,8 @@ from jiuwenswarm.extensions.blackboard.host.store.models import User
 logger = logging.getLogger(__name__)
 
 STARTUP_TIMEOUT_S = 10.0
-SWEEP_INTERVAL_S = 30.0
+# BB_SWEEP_INTERVAL_S shortens it for the end-to-end checks.
+SWEEP_INTERVAL_S = float(os.environ.get("BB_SWEEP_INTERVAL_S") or 30.0)
 
 
 class _Server(uvicorn.Server):
@@ -159,7 +161,10 @@ class HostRuntime:
         up or that never reported."""
         from jiuwenswarm.extensions.blackboard.host.api.dispatch import sweep_dispatched
         from jiuwenswarm.extensions.blackboard.host.api.mandates import sweep_idle_mandates
+        from jiuwenswarm.extensions.blackboard.host.api.ops import METRICS_INTERVAL_S, log_metrics
+        from jiuwenswarm.extensions.blackboard.host.store.store import now_iso
 
+        since, last_metrics = now_iso(), asyncio.get_running_loop().time()
         while True:
             await asyncio.sleep(SWEEP_INTERVAL_S)
             try:
@@ -167,6 +172,12 @@ class HostRuntime:
                 await sweep_dispatched(ctx)
             except Exception:  # noqa: BLE001 - the next round tries again
                 logger.exception("blackboard: sweeping mandates failed")
+            if asyncio.get_running_loop().time() - last_metrics >= METRICS_INTERVAL_S:
+                try:
+                    await log_metrics(ctx, since)
+                except Exception:  # noqa: BLE001 - metrics never stop the sweeper
+                    logger.exception("blackboard: writing metrics failed")
+                since, last_metrics = now_iso(), asyncio.get_running_loop().time()
 
     async def restart_docs(self) -> None:
         if self.docs is not None:

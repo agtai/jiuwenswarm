@@ -156,3 +156,42 @@ def _invite(**overrides) -> Invite:
 )
 def test_invite_state(overrides, state):
     assert _invite(**overrides).state("2026-01-15T00:00:00.000Z") == state
+
+
+@pytest.mark.parametrize("start", range(1, LATEST_VERSION))
+async def test_a_store_from_any_earlier_milestone_upgrades_with_its_data(tmp_path, start):
+    """A host last run at an earlier milestone's schema opens at the latest one, rows intact."""
+    from jiuwenswarm.extensions.blackboard.host.store.migrations import MIGRATIONS
+
+    path = tmp_path / "blackboard.db"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE schema_version (version INTEGER NOT NULL)")
+    for number, statements in MIGRATIONS:
+        if number <= start:
+            for statement in statements:
+                conn.execute(statement)
+            conn.execute("INSERT INTO schema_version (version) VALUES (?)", (number,))
+    now = "2026-09-01T00:00:00.000+00:00"
+    conn.execute(
+        "INSERT INTO users (id, display_name, token_hash, is_operator, created_at) VALUES ('u_a', 'Alice', ?, 1, ?)",
+        (hash_token("bbm_old"), now),
+    )
+    conn.execute("INSERT INTO workspaces (id, name, title, created_by, created_at) VALUES ('w_1', 'launch', 'Launch', 'u_a', ?)", (now,))
+    conn.execute("INSERT INTO memberships (workspace_id, user_id, role, joined_at) VALUES ('w_1', 'u_a', 'owner', ?)", (now,))
+    conn.execute("INSERT INTO invites (code, workspace_id, role, created_by, created_at) VALUES ('code1', 'w_1', 'editor', 'u_a', ?)", (now,))
+    if start >= 2:
+        conn.execute("INSERT INTO docs (id, workspace_id, title, created_by, created_at) VALUES ('d_1', 'w_1', 'Plan', 'u_a', ?)", (now,))
+    conn.commit()
+    conn.close()
+
+    store = Store(path)
+    assert await store.open() == LATEST_VERSION
+    try:
+        user = await store.read(lambda c: users.by_token_hash(c, hash_token("bbm_old")))
+        assert user is not None and user.display_name == "Alice" and user.status == "active"
+        assert [(w.title, role) for w, role in await store.read(lambda c: workspaces.list_for_user(c, "u_a"))] == [("Launch", "owner")]
+        assert (await store.read(lambda c: invites.get(c, "code1"))).role == "editor"
+        if start >= 2:
+            assert await store.read(lambda c: c.execute("SELECT title FROM docs WHERE id = 'd_1'").fetchone()["title"]) == "Plan"
+    finally:
+        await store.close()

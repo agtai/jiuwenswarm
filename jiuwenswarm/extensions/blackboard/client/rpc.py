@@ -108,8 +108,15 @@ def register_rpcs(channel: Any, client: "ClientRuntime", host: "HostController")
         await client.set_default(str(params.get("host") or ""))
         return client.hosts_view()
 
+    async def hosts_rotate_token(params: dict[str, Any]) -> dict[str, Any]:
+        await client.rotate_token(params.get("host") or None)
+        return client.hosts_view()
+
     async def host_status(params: dict[str, Any]) -> dict[str, Any]:
         return host.status()
+
+    async def host_health(params: dict[str, Any]) -> dict[str, Any]:
+        return await host.health()
 
     async def host_set_settings(params: dict[str, Any]) -> dict[str, Any]:
         settings = params.get("settings")
@@ -121,8 +128,10 @@ def register_rpcs(channel: Any, client: "ClientRuntime", host: "HostController")
     add(p.HOSTS_JOIN, hosts_join)
     add(p.HOSTS_REMOVE, hosts_remove)
     add(p.HOSTS_SET_DEFAULT, hosts_set_default)
+    add(p.HOSTS_ROTATE_TOKEN, hosts_rotate_token)
     add(p.HOST_STATUS, host_status)
     add(p.HOST_SET_SETTINGS, host_set_settings)
+    add(p.HOST_HEALTH, host_health)
     add(p.REFERENCE_UPLOAD, _reference_upload(client))
 
     async def session_attach(params: dict[str, Any]) -> dict[str, Any]:

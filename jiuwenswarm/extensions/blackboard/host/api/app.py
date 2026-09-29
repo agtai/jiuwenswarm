@@ -6,6 +6,7 @@ from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from jiuwenswarm.extensions.blackboard.common import protocol as p
+from jiuwenswarm.extensions.blackboard.common.origins import origin_allowed
 from jiuwenswarm.extensions.blackboard.host.api import chat as _chat  # noqa: F401 - registers methods
 from jiuwenswarm.extensions.blackboard.host.api import comments as _comments  # noqa: F401 - registers methods
 from jiuwenswarm.extensions.blackboard.host.api import decisions as _decisions  # noqa: F401 - registers methods
@@ -14,6 +15,8 @@ from jiuwenswarm.extensions.blackboard.host.api import documents as _documents  
 from jiuwenswarm.extensions.blackboard.host.api import history
 from jiuwenswarm.extensions.blackboard.host.api import identities as _identities  # noqa: F401 - registers methods
 from jiuwenswarm.extensions.blackboard.host.api import mandates as _mandates  # noqa: F401 - registers methods
+from jiuwenswarm.extensions.blackboard.host.api import ops
+from jiuwenswarm.extensions.blackboard.host.api import people as _people  # noqa: F401 - registers methods
 from jiuwenswarm.extensions.blackboard.host.api import references
 from jiuwenswarm.extensions.blackboard.host.api.context import HostContext
 from jiuwenswarm.extensions.blackboard.host.api.pages import join_page
@@ -32,6 +35,11 @@ def build_app(ctx: HostContext) -> FastAPI:
 
     @app.websocket(p.EVENTS_PATH)
     async def events(websocket: WebSocket) -> None:
+        # Members' instances send no Origin; a web page must be one the host allows.
+        settings = ctx.settings
+        if not origin_allowed(websocket.headers.get("origin"), settings.allowed_origins, settings.allow_any_origin):
+            await websocket.close(code=4403, reason="origin not allowed")
+            return
         await ctx.hub.serve(websocket, ctx.authenticate, ctx.host_info)
 
     @app.get(p.JOIN_PATH + "{code}")
@@ -67,8 +75,6 @@ def build_app(ctx: HostContext) -> FastAPI:
 
     @app.get(p.HEALTH_PATH)
     async def health() -> JSONResponse:
-        return JSONResponse(
-            {"ok": True, "version": ctx.version, "host_uid": ctx.host_uid, "docservice": ctx.docservice_status()}
-        )
+        return JSONResponse(await ops.health(ctx))
 
     return app

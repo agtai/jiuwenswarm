@@ -11,6 +11,7 @@ import { readAnchors, resolveAnchors } from '../docs/anchors.ts'
 import { EditError, planEdit, readOps, type EditRequest } from '../docs/edits.ts'
 import { MarkdownError, agentView, hasRawHtml, importDoc, type View } from '../docs/markdown.ts'
 import { FIELD, readDoc, writeDoc, type DocPool } from '../docs/pool.ts'
+import { findChromium } from '../docs/export.ts'
 import { suggestionsIn, type SuggestionSummary } from '../docs/suggestions.ts'
 import type { Versions } from '../docs/versions.ts'
 import type { DocStorage } from '../storage.ts'
@@ -101,9 +102,19 @@ export interface DocRoutesDeps {
   versions: Versions
   version: string
   shutdown: () => void
+  // A browser for PDF export, when configured (see findChromium).
+  chromium?: string | null
 }
 
-export function docRoutes({ hocuspocus, pool, storage, versions, version, shutdown }: DocRoutesDeps): Route[] {
+// Looking for a browser touches the disk; health is asked often, so the answer is kept a minute.
+const PDF_CHECK_MS = 60_000
+
+export function docRoutes({ hocuspocus, pool, storage, versions, version, shutdown, chromium = null }: DocRoutesDeps): Route[] {
+  let pdf: { at: number; found: boolean } | null = null
+  const pdfAvailable = () => {
+    if (!pdf || Date.now() - pdf.at > PDF_CHECK_MS) pdf = { at: Date.now(), found: findChromium(chromium) !== null }
+    return pdf.found
+  }
   const requireDoc = (docId: string) => {
     if (!storage.exists(docId) && !hocuspocus.documents.has(docId)) {
       throw new ApiError(404, 'not_found', 'no such document', { doc_id: docId })
@@ -115,7 +126,13 @@ export function docRoutes({ hocuspocus, pool, storage, versions, version, shutdo
     {
       method: 'GET',
       path: /^\/api\/health$/,
-      handler: async () => ({ ok: true, openDocuments: hocuspocus.getDocumentsCount(), version }),
+      handler: async () => ({
+        ok: true,
+        openDocuments: hocuspocus.getDocumentsCount(),
+        connections: hocuspocus.getConnectionsCount(),
+        pdf: pdfAvailable(),
+        version,
+      }),
     },
     {
       method: 'POST',

@@ -279,6 +279,9 @@ class DocServiceManager:
             "BB_VERSION": self._version,
             # New versions are announced to this host's API.
             "BB_HOST_URL": _host_url(settings.bind, settings.port),
+            "BB_ALLOWED_ORIGINS": ",".join(settings.allowed_origins),
+            "BB_ALLOW_ANY_ORIGIN": "1" if settings.allow_any_origin else "0",
+            "BB_VERSION_RETENTION_DAYS": str(settings.version_retention_days),
         }
         log = open(self._data_dir / "docservice.log", "ab")  # noqa: SIM115 - handed to the child
         flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0

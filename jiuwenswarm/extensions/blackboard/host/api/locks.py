@@ -15,6 +15,10 @@ class LockWaits:
         self._released = asyncio.Condition()
         self._queues: dict[str, list[str]] = {}
 
+    def waiting(self) -> int:
+        """Edits waiting for a document, on every document."""
+        return sum(len(queue) for queue in self._queues.values())
+
     def position(self, doc_id: str, mandate_id: str) -> int:
         queue = self._queues.get(doc_id, [])
         return queue.index(mandate_id) + 1 if mandate_id in queue else 0

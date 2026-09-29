@@ -65,6 +65,8 @@ function fakeWorld() {
       case 'blackboard.bots.connect':
       case 'blackboard.bots.remove':
         return { bots: [{ id: 'hb1', host_name: 'Team', bot_name: 'Team bot' }] };
+      case 'blackboard.user.list':
+        return { users: [{ id: 'u_bob', display_name: 'Bob', is_operator: false, disabled: false, workspaces: 1 }] };
       case 'blackboard.doc.export':
         return { url: 'http://host/blackboard/export/x_1?t=abc', file_name: 'Plan.docx' };
       case 'blackboard.chat.post':
@@ -466,4 +468,16 @@ test('IM accounts and bots go to the selected host; bot links stay on this jiuwe
   assert.deepEqual(sent['blackboard.bot.revoke'], { host: 'h1', bot_id: 'bot_1' });
   assert.deepEqual(sent['blackboard.bots.connect'], { link: 'https://x/blackboard/bot#bbb_1' });
   assert.deepEqual(sent['blackboard.bots.remove'], { bot: 'hb1' });
+});
+
+test('replacing the key and managing people go to the selected host', async () => {
+  const f = fakeWorld();
+  const c = new BlackboardController(f.rpc, f.subscribe);
+  await c.start();
+  await c.rotateToken();
+  assert.deepEqual((await c.hostUsers()).map((u) => u.display_name), ['Bob']);
+  await c.setUserStatus('u_bob', 'disabled');
+  const sent = Object.fromEntries(f.calls.filter(([m]) => m.startsWith('blackboard.user.') || m === 'blackboard.hosts.rotate_token'));
+  assert.deepEqual(sent['blackboard.hosts.rotate_token'], { host: 'h1' });
+  assert.deepEqual(sent['blackboard.user.set_status'], { host: 'h1', user_id: 'u_bob', status: 'disabled' });
 });

@@ -23,6 +23,8 @@ import type {
   ChatMessageView,
   BotLinkView,
   BotView,
+  HostHealth,
+  UserView,
   DecisionView,
   DiffView,
   IdentityView,
@@ -972,6 +974,23 @@ export class BlackboardController {
 
   async removeBotLink(id: string): Promise<BotLinkView[]> {
     return (await this.rpc<{ bots: BotLinkView[] }>('blackboard.bots.remove', { bot: id })).bots ?? [];
+  }
+
+  hostHealth(): Promise<HostHealth> {
+    return this.rpc('blackboard.host.health', {});
+  }
+
+  // A new member token for the current host; this jiuwenswarm keeps it, the old one stops working.
+  async rotateToken(): Promise<void> {
+    await this.rpc('blackboard.hosts.rotate_token', { host: this.requireHost() });
+  }
+
+  async hostUsers(): Promise<UserView[]> {
+    return (await this.rpc<{ users: UserView[] }>('blackboard.user.list', { host: this.requireHost() })).users ?? [];
+  }
+
+  async setUserStatus(userId: string, status: 'active' | 'disabled'): Promise<void> {
+    await this.rpc('blackboard.user.set_status', { host: this.requireHost(), user_id: userId, status });
   }
 
   async setDisplayName(displayName: string): Promise<void> {

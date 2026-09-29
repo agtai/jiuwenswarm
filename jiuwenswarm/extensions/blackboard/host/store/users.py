@@ -33,6 +33,10 @@ def get(conn: sqlite3.Connection, user_id: str) -> User | None:
     return User.from_row(row) if row else None
 
 
+def list_all(conn: sqlite3.Connection) -> list[User]:
+    return [User.from_row(r) for r in conn.execute("SELECT * FROM users ORDER BY created_at").fetchall()]
+
+
 def by_token_hash(conn: sqlite3.Connection, token_hash: str) -> User | None:
     row = conn.execute("SELECT * FROM users WHERE token_hash = ?", (token_hash,)).fetchone()
     return User.from_row(row) if row else None

@@ -90,6 +90,17 @@ export class DocStorage {
       )
   }
 
+  // Versions made before `cutoff` (ISO time), except named ones and each document's latest.
+  pruneVersions(cutoff: string): number {
+    const result = this.db
+      .prepare(
+        'DELETE FROM versions WHERE created_at < ? AND label IS NULL' +
+          ' AND rowid NOT IN (SELECT MAX(rowid) FROM versions GROUP BY doc_id)',
+      )
+      .run(cutoff)
+    return Number(result.changes)
+  }
+
   lastDigest(docId: string): string | null {
     const row = this.db.prepare('SELECT digest FROM versions WHERE doc_id = ? ORDER BY rowid DESC LIMIT 1').get(docId) as any
     return row ? String(row.digest) : null

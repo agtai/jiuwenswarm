@@ -15,8 +15,17 @@ from jiuwenswarm.extensions.blackboard.client.link import HostLink, call_host
 from jiuwenswarm.extensions.blackboard.client.sessions import Attachment, SessionAttachments
 from jiuwenswarm.extensions.blackboard.common import protocol as p
 from jiuwenswarm.extensions.blackboard.common.clock import now_iso
-from jiuwenswarm.extensions.blackboard.common.errors import CONFLICT, FORBIDDEN, INVALID, NOT_MEMBER, BlackboardError, not_found
+from jiuwenswarm.extensions.blackboard.common.errors import (
+    CONFLICT,
+    FORBIDDEN,
+    INTERNAL,
+    INVALID,
+    NOT_MEMBER,
+    BlackboardError,
+    not_found,
+)
 from jiuwenswarm.extensions.blackboard.common.roles import role_at_least
+from jiuwenswarm.extensions.blackboard.common.tokens import MEMBER_TOKEN_PREFIX
 from jiuwenswarm.extensions.blackboard.common.ids import new_id
 
 logger = logging.getLogger(__name__)
@@ -256,6 +265,21 @@ class ClientRuntime:
         for attachment in removed:
             await self._broadcast(p.EV_SESSIONS_UPDATED, {"host": attachment.host, "workspace_id": attachment.workspace_id})
         return bool(removed)
+
+    async def rotate_token(self, host_id: str | None) -> dict[str, Any]:
+        """Replace this person's member token on a host: the old one stops working at once, and
+        connections made with it (a copy of hosts.json elsewhere, say) are closed."""
+        entry = self._entry(host_id)
+        link = self._links.get(entry.id) or self._open_link(entry)
+        result = await link.call(p.ME_ROTATE_TOKEN, {})
+        token = str(result.get("token") or "")
+        if not token.startswith(MEMBER_TOKEN_PREFIX):
+            raise BlackboardError(INTERNAL, "the host sent no new token")
+        updated = replace(entry, token=token)
+        await self.registry.upsert(updated)
+        await self._reopen_link(updated)
+        await self._broadcast(p.EV_HOSTS_UPDATED, {"host": entry.id})
+        return {"host": entry.id, "rotated": True}
 
     async def set_default(self, host_id: str) -> None:
         if self.registry.get(host_id) is None:

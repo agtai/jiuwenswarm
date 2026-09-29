@@ -14,6 +14,9 @@ from jiuwenswarm.extensions.blackboard.common.errors import RATE_LIMITED, Blackb
 WINDOW_S = 60.0
 # Read calls of one agent (per member token) or of one person through a bot.
 READS_PER_MINUTE = 60
+# An agent's edit batches per mandate, and reference uploads per person.
+EDITS_PER_MINUTE = 10
+UPLOADS_PER_MINUTE = 5
 # Everything one bot sends, for all the people it serves.
 BOT_CALLS_PER_MINUTE = 600
 

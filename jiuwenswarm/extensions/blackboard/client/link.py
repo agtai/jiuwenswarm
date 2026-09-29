@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from typing import Any, Awaitable, Callable
@@ -102,7 +103,8 @@ class HostLink:
     """RPC calls and a live event stream for one known host.
 
     Status: ``connecting``, ``connected``, ``offline`` (retrying with backoff),
-    ``unauthorized`` (the token was refused; retried rarely), ``stopped``.
+    ``unauthorized`` (the token was refused; retried rarely, or at once when a call with the token
+    works again, say after the operator enabled the person again), ``stopped``.
     """
 
     def __init__(
@@ -122,9 +124,13 @@ class HostLink:
         self._on_ready = on_ready
         self.status = "connecting"
         self._task: asyncio.Task | None = None
+        self._wake = asyncio.Event()
 
     async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        return await call_host(self.base_url, method, params, token=self._token)
+        result = await call_host(self.base_url, method, params, token=self._token)
+        if self.status == "unauthorized":
+            self._wake.set()
+        return result
 
     async def upload(self, workspace_id: str, **file: Any) -> dict[str, Any]:
         return await upload_to_host(self.base_url, self._token, workspace_id, **file)
@@ -188,7 +194,9 @@ class HostLink:
                 logger.debug("blackboard: event stream to %s ended: %s", self.base_url, exc)
             if self.status != "unauthorized":
                 await self._set_status("offline")
-            await asyncio.sleep(retry_after)
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self._wake.wait(), retry_after)
+            self._wake.clear()
             delay = min(delay * 2, BACKOFF_MAX_S)
 
 

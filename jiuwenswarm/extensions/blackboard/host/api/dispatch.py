@@ -14,6 +14,7 @@ a queue; chat mandates take documents as they edit them, like workspace-session 
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -39,7 +40,8 @@ MAX_QUEUE = 20
 # An offered turn nobody picked up fails after this long (the requester's jiuwenswarm is off).
 CLAIM_TIMEOUT_S = 600.0
 # A picked-up turn with no report becomes Unknown after this long; the dispatcher gives up at 540 s.
-TURN_TIMEOUT_S = 600.0
+# BB_TURN_TIMEOUT_S shortens it for the end-to-end checks.
+TURN_TIMEOUT_S = float(os.environ.get("BB_TURN_TIMEOUT_S") or 600.0)
 # The chat context of a chat mandate's turn: people's messages since the agent's last turn.
 CHAT_CONTEXT_MESSAGES = 40
 CHAT_CONTEXT_CHARS = 8000

@@ -42,4 +42,7 @@ RUN python -c "from jiuwenswarm.common.playwright_mcp_runtime import materialize
 
 # Start claw app
 EXPOSE 5173
+# Blackboard's host API and live documents, when started with BLACKBOARD_HOST_ENABLED=1,
+# BLACKBOARD_HOST_BIND=0.0.0.0 and BLACKBOARD_HOST_PUBLIC_URL set to the address members use.
+EXPOSE 19011 19010
 CMD ["jiuwenswarm-start"]

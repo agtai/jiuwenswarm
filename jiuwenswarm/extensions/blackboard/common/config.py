@@ -7,11 +7,13 @@ and ``host/secrets.py``), so they never show up where config is displayed.
 
 from __future__ import annotations
 
+import os
 from dataclasses import asdict, dataclass, replace
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 from urllib.parse import urlparse
 
 from jiuwenswarm.extensions.blackboard.common.errors import invalid
+from jiuwenswarm.extensions.blackboard.common.origins import normalize_origin
 
 
 @dataclass(frozen=True)
@@ -29,6 +31,13 @@ class HostSettings:
     node_path: str = ""
     operator_name: str = ""
     max_upload_mb: int = 25
+    # Web pages besides loopback ones whose browsers may open the host's WebSockets (live documents
+    # and events), such as a web app served at https://jiuwen.example.com; see common/origins.py.
+    allowed_origins: tuple[str, ...] = ()
+    allow_any_origin: bool = False
+    # Versions older than this many days are removed, except named ones and each document's
+    # latest; 0 keeps every version.
+    version_retention_days: int = 0
 
     def local_url(self) -> str:
         return f"http://127.0.0.1:{self.port}"
@@ -51,19 +60,41 @@ class HostSettings:
         return asdict(self)
 
 
-_BOOL_FIELDS = {"enabled"}
-_INT_FIELDS = {"port", "doc_port", "doc_api_port", "max_upload_mb"}
+_BOOL_FIELDS = {"enabled", "allow_any_origin"}
+_INT_FIELDS = {"port", "doc_port", "doc_api_port", "max_upload_mb", "version_retention_days"}
 _STR_FIELDS = {"name", "bind", "public_url", "doc_public_url", "node_path", "operator_name"}
+_LIST_FIELDS = {"allowed_origins"}
 MAX_NAME_LENGTH = 60
-EDITABLE_FIELDS = _BOOL_FIELDS | _INT_FIELDS | _STR_FIELDS
+EDITABLE_FIELDS = _BOOL_FIELDS | _INT_FIELDS | _STR_FIELDS | _LIST_FIELDS
+# BLACKBOARD_HOST_<FIELD> in the environment overrides config.yaml, for containers
+# (BLACKBOARD_HOST_ENABLED=1, BLACKBOARD_HOST_BIND=0.0.0.0, ...).
+ENV_PREFIX = "BLACKBOARD_HOST_"
+
+
+def _origins(name: str, value: Any) -> tuple[str, ...]:
+    items = value.split(",") if isinstance(value, str) else value
+    if not isinstance(items, (list, tuple)):
+        raise invalid(f"{name} must be a list of origins", field=name)
+    origins: list[str] = []
+    for item in items:
+        text = normalize_origin(str(item or ""))
+        if not text:
+            continue
+        parsed = urlparse(text)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc or parsed.path or parsed.query:
+            raise invalid(f"{name}: {item!r} is not an origin such as https://jiuwen.example.com", field=name)
+        origins.append(text)
+    return tuple(dict.fromkeys(origins))
 
 
 def _coerce(name: str, value: Any) -> Any:
+    if name in _LIST_FIELDS:
+        return _origins(name, value)
     if name in _BOOL_FIELDS:
         if isinstance(value, bool):
             return value
-        if isinstance(value, str) and value.strip().lower() in {"true", "false"}:
-            return value.strip().lower() == "true"
+        if isinstance(value, str) and value.strip().lower() in {"true", "false", "1", "0"}:
+            return value.strip().lower() in {"true", "1"}
         raise invalid(f"{name} must be true or false", field=name)
     if name in _INT_FIELDS:
         try:
@@ -73,6 +104,9 @@ def _coerce(name: str, value: Any) -> Any:
         if name == "max_upload_mb":
             if not 1 <= number <= 1024:
                 raise invalid("max_upload_mb must be between 1 and 1024", field=name)
+        elif name == "version_retention_days":
+            if not 0 <= number <= 36500:
+                raise invalid("version_retention_days must be between 0 (keep all) and 36500", field=name)
         elif not 1 <= number <= 65535:
             raise invalid(f"{name} must be a port between 1 and 65535", field=name)
         return number
@@ -91,21 +125,29 @@ def _coerce(name: str, value: Any) -> Any:
     return text
 
 
-def host_settings_from(config: Any) -> HostSettings:
-    """Settings from a parsed config; unknown or broken values fall back to defaults."""
+def host_settings_from(config: Any, env: Mapping[str, str] | None = None) -> HostSettings:
+    """Settings from a parsed config, then ``BLACKBOARD_HOST_*`` variables in ``env``; unknown or
+    broken values fall back to defaults."""
     section = config.get("blackboard") if isinstance(config, dict) else None
     host = section.get("host") if isinstance(section, dict) else None
-    settings = HostSettings()
-    if not isinstance(host, dict):
-        return settings
+    sources: dict[str, Any] = dict(host) if isinstance(host, dict) else {}
+    for name in env_overrides(env):
+        sources[name] = (env or {})[ENV_PREFIX + name.upper()]
     values: dict[str, Any] = {}
     for name in EDITABLE_FIELDS:
-        if name in host and host[name] is not None:
+        if name in sources and sources[name] is not None:
             try:
-                values[name] = _coerce(name, host[name])
+                values[name] = _coerce(name, sources[name])
             except Exception:  # noqa: BLE001 - a broken value falls back to its default
                 continue
-    return replace(settings, **values)
+    return replace(HostSettings(), **values)
+
+
+def env_overrides(env: Mapping[str, str] | None) -> list[str]:
+    """The settings that environment variables fix, whatever config.yaml says."""
+    if not env:
+        return []
+    return sorted(name for name in EDITABLE_FIELDS if env.get(ENV_PREFIX + name.upper(), "") != "")
 
 
 def im_owner_ids_from(config: Any) -> list[str]:
@@ -125,7 +167,7 @@ def load_im_owner_ids() -> list[str]:
 def load_host_settings() -> HostSettings:
     from jiuwenswarm.common.config import get_config
 
-    return host_settings_from(get_config())
+    return host_settings_from(get_config(), os.environ)
 
 
 def validate_updates(updates: dict[str, Any]) -> dict[str, Any]:
@@ -158,8 +200,8 @@ def save_host_settings(
             section["host"] = {}
             host = section["host"]
         for name, value in clean.items():
-            host[name] = value
+            host[name] = list(value) if isinstance(value, tuple) else value
         return data
 
     written = update_config(mutate)
-    return host_settings_from(written)
+    return host_settings_from(written, os.environ)

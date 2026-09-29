@@ -1048,7 +1048,8 @@
 
 /* ---- right rail: tabs as icons, the panel's title ---- */
 
-.bb-rail__tabs.tabs { justify-content: space-between; }
+/* Seven icons fit the rail only with a small gap; space-between spreads them out. */
+.bb-rail__tabs.tabs { justify-content: space-between; gap: 4px; }
 
 .bb-rail__tab {
   position: relative;

@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from jiuwenswarm.extensions.blackboard.common import protocol as p
-from jiuwenswarm.extensions.blackboard.common.config import HostSettings
+from jiuwenswarm.extensions.blackboard.common.config import HostSettings, env_overrides
 from jiuwenswarm.extensions.blackboard.host.runtime import HostRuntime, default_operator_name
 
 if TYPE_CHECKING:
@@ -116,7 +117,7 @@ class HostController:
         else:
             if new.name != old.name:
                 await self._announce_name()
-            if (new.doc_port, new.doc_api_port, new.node_path) != (old.doc_port, old.doc_api_port, old.node_path):
+            if _docs_settings(new) != _docs_settings(old):
                 assert self.runtime is not None
                 await self.runtime.restart_docs()
             await self._broadcast(p.EV_HOST_STATUS, self.status())
@@ -131,6 +132,15 @@ class HostController:
         await self._client.rename_host(ctx.host_uid, self.name)
         await ctx.hub.publish_all(p.EV_HOST_UPDATED, {"name": self.name})
 
+    async def health(self) -> dict[str, Any]:
+        """What /blackboard/health reports, for the settings dialog."""
+        ctx = self.runtime.ctx if self.runtime is not None else None
+        if ctx is None:
+            return {"ok": False}
+        from jiuwenswarm.extensions.blackboard.host.api.ops import health
+
+        return await health(ctx)
+
     def status(self) -> dict[str, Any]:
         runtime_status = self.runtime.status() if self.runtime is not None else {"running": False}
         settings = self._settings
@@ -143,4 +153,18 @@ class HostController:
             "error": self.error,
             # A loopback bind or a missing public address keeps other machines out.
             "reachable_from_other_machines": bool(settings.public_url) and settings.bind not in _LOOPBACK,
+            # Settings fixed by BLACKBOARD_HOST_* variables; changing them in the dialog has no effect.
+            "env_overrides": env_overrides(os.environ),
         }
+
+
+def _docs_settings(settings: HostSettings) -> tuple:
+    """What the document service is started with; a change restarts it."""
+    return (
+        settings.doc_port,
+        settings.doc_api_port,
+        settings.node_path,
+        settings.allowed_origins,
+        settings.allow_any_origin,
+        settings.version_retention_days,
+    )

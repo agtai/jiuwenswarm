@@ -1,4 +1,6 @@
 // Settings from the environment the host's manager sets (host/docservice_manager.py).
+import { normalizeOrigin } from './origins.ts'
+
 export interface Config {
   port: number
   bind: string
@@ -14,6 +16,12 @@ export interface Config {
   idleMs: number
   // A Chrome, Edge or Chromium binary for PDF export, when not found in the usual places.
   chromium: string | null
+  // Web pages besides loopback ones that may open live documents (see origins.ts).
+  allowedOrigins: string[]
+  allowAnyOrigin: boolean
+  // Versions older than this many days are removed, except named ones and each document's
+  // latest; 0 keeps every version.
+  versionRetentionDays: number
 }
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -35,5 +43,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     hostUrl: env.BB_HOST_URL || null,
     idleMs: Number(env.BB_VERSION_IDLE_MS || 30000),
     chromium: env.BB_CHROMIUM_PATH || null,
+    allowedOrigins: (env.BB_ALLOWED_ORIGINS || '')
+      .split(',')
+      .map((o) => normalizeOrigin(o))
+      .filter(Boolean),
+    allowAnyOrigin: env.BB_ALLOW_ANY_ORIGIN === '1',
+    versionRetentionDays: Math.max(0, Number(env.BB_VERSION_RETENTION_DAYS || 0) || 0),
   }
 }

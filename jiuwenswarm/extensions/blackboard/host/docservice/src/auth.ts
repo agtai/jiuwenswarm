@@ -7,6 +7,8 @@ export const WRITE_ROLES = ['owner', 'editor']
 
 export interface DocClaims {
   uid: string
+  // The person's display name, stamped on their caret (hooks/awareness.ts).
+  name?: string
   ws: string
   doc: string
   role: string

@@ -75,6 +75,9 @@ BOT_REVOKE = "blackboard.bot.revoke"
 IDENTITY_LINK_CODE = "blackboard.identity.link_code"
 IDENTITY_LIST = "blackboard.identity.list"
 IDENTITY_UNLINK = "blackboard.identity.unlink"
+# Host methods (milestone 8): the operator's list of people on the host, and turning one off or on.
+USER_LIST = "blackboard.user.list"
+USER_SET_STATUS = "blackboard.user.set_status"
 
 HOST_METHODS: tuple[str, ...] = (
     ME,
@@ -135,7 +138,13 @@ HOST_METHODS: tuple[str, ...] = (
     IDENTITY_LINK_CODE,
     IDENTITY_LIST,
     IDENTITY_UNLINK,
+    USER_LIST,
+    USER_SET_STATUS,
 )
+
+# A new member token for the caller. Only the person's own jiuwenswarm calls it (through the local
+# method HOSTS_ROTATE_TOKEN), so the token never reaches a browser.
+ME_ROTATE_TOKEN = "blackboard.me.rotate_token"
 
 # Methods a member's agent and dispatcher call on the host with the member's token (the toolkit
 # in the AgentServer, the dispatcher in the Gateway); they are not proxied for browsers.
@@ -169,8 +178,10 @@ HOSTS_LIST = "blackboard.hosts.list"
 HOSTS_JOIN = "blackboard.hosts.join"
 HOSTS_REMOVE = "blackboard.hosts.remove"
 HOSTS_SET_DEFAULT = "blackboard.hosts.set_default"
+HOSTS_ROTATE_TOKEN = "blackboard.hosts.rotate_token"
 HOST_STATUS = "blackboard.host.status"
 HOST_SET_SETTINGS = "blackboard.host.set_settings"
+HOST_HEALTH = "blackboard.host.health"
 # The browser sends a file here; the client part posts it to the host as multipart.
 REFERENCE_UPLOAD = "blackboard.reference.upload"
 # Sessions attached to a workspace, where the agent gets Blackboard's tools.

@@ -140,7 +140,14 @@
       "plainHttp": "This address uses plain HTTP, so traffic between members and the host is not encrypted.",
       "boardName": "Blackboard name",
       "boardNameHint": "Members see this name in their list of Blackboards.",
-      "boardNamePlaceholder": "Leave empty to use your name"
+      "boardNamePlaceholder": "Leave empty to use your name",
+      "allowedOrigins": "Other web app addresses",
+      "allowedOriginsHint": "Members' web apps on their own machine always work. List other addresses a web app is opened at, such as https://jiuwen.example.com, separated by commas.",
+      "retention": "Keep versions for (days)",
+      "retentionHint": "0 keeps every version. Named versions and each document's latest are always kept.",
+      "envOverrides": "Set by environment variables, so changes here have no effect: {{names}}",
+      "health": "{{members}} members connected, {{documents}} documents open, {{waiting}} agent runs waiting.",
+      "noPdf": "PDF export is unavailable: no Chrome, Edge or Chromium was found on this machine."
     },
     "errors": {
       "unauthorized": "The host did not accept this member's token.",
@@ -149,6 +156,8 @@
       "not_found": "It no longer exists.",
       "expired": "This invite link can no longer be used.",
       "disabled": "Your account is disabled on this host.",
+      "rate_limited": "Too many requests in a minute; try again shortly.",
+      "not_linked": "This IM account is not connected to a Blackboard user.",
       "unavailable": "Cannot reach the host.",
       "internal": "The host could not complete the request.",
       "generic": "Something went wrong."
@@ -426,6 +435,21 @@
       "md": "Markdown (.md)",
       "decisions": "Add the answered decisions about this document",
       "confirm": "Export"
+    },
+    "access": {
+      "key": "Your access key",
+      "keyHint": "This jiuwenswarm keeps a key that lets it into {{host}} as you. If this computer's files were copied or you suspect the key leaked, replace it: the old key stops working at once.",
+      "replaceKey": "Replace key",
+      "keyReplaced": "Key replaced",
+      "plainHttp": "The connection to {{host}} uses plain HTTP, so what you read and write there is not encrypted. Ask its operator for an https:// address.",
+      "people": "People on this host",
+      "peopleHint": "Disabling someone ends their access to every workspace on this host at once, including their agents and a shared bot's reads for them. Enabling them again restores it.",
+      "operator": "Operator",
+      "disabled": "Disabled",
+      "workspaces_one": "{{count}} workspace",
+      "workspaces_other": "{{count}} workspaces",
+      "disable": "Disable",
+      "enable": "Enable"
     },
     "im": {
       "accounts": "Connected IM accounts",

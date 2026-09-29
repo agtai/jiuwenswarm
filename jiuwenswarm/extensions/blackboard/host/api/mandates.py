@@ -21,6 +21,7 @@ from jiuwenswarm.extensions.blackboard.host import validation as v
 from jiuwenswarm.extensions.blackboard.host.api.access import require_member
 from jiuwenswarm.extensions.blackboard.host.api.context import HostContext
 from jiuwenswarm.extensions.blackboard.host.api.methods import Call, method
+from jiuwenswarm.extensions.blackboard.host.api.ratelimit import EDITS_PER_MINUTE
 from jiuwenswarm.extensions.blackboard.host.store import docs, mandates, users
 from jiuwenswarm.extensions.blackboard.host.store.models import Doc, Mandate, Receipt
 
@@ -311,6 +312,7 @@ async def edit(call: Call) -> dict[str, Any]:
         return doc, mandate, older, created
 
     doc, mandate, older, created = await ctx.store.transact(begin)
+    ctx.limits.check(f"edit:{mandate.id}", EDITS_PER_MINUTE)
     for previous in older:
         await finish_mandate(ctx, previous.id, "done", "next_turn")
     if created:

@@ -169,6 +169,11 @@ This page collects common JiuwenSwarm usage instructions, feature documentation,
       <td width="50%">Supports multi-agent team collaboration, team-level skill orchestration and reuse, and multi-process distributed Team runtime mode.</td>
     </tr>
     <tr>
+      <td width="22%"><strong>Blackboard</strong></td>
+      <td width="28%"><a href="en/Blackboard.md">Blackboard</a></td>
+      <td width="50%">Shared workspaces where people and their agents write documents together: hosting, roles, agent tasks as suggestions, history and export, reading from Slack or Feishu.</td>
+    </tr>
+    <tr>
       <td width="22%"><strong>Memory</strong></td>
       <td width="28%"><a href="en/Memory.md">Memory</a> / <a href="en/AutoMemory.md">Auto Memory</a> / <a href="en/CodingMemory.md">Coding Memory</a> / <a href="en/TaskMemory.md">Task Memory</a></td>
       <td width="50%">Supports short-term and long-term memory management, automatic post-conversation memory extraction, code-specific memory accumulation, and task experience retrieval, reuse, and continuous accumulation.</td>

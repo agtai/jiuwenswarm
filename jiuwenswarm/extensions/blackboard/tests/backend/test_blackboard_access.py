@@ -73,6 +73,7 @@ def test_the_table_covers_every_workspace_method():
     no_workspace = {p.ME, p.ME_SET_NAME, p.WORKSPACE_LIST, p.WORKSPACE_CREATE}
     # Bots are the operator's; connected IM accounts are the person's own.
     no_workspace |= {p.BOT_CREATE, p.BOT_LIST, p.BOT_REVOKE, p.IDENTITY_LINK_CODE, p.IDENTITY_LIST, p.IDENTITY_UNLINK}
+    no_workspace |= {p.USER_LIST, p.USER_SET_STATUS}
     assert set(WORKSPACE_METHODS) | PERSONAL_METHODS | TESTED_ELSEWHERE == set(p.HOST_METHODS) - no_workspace
 
 

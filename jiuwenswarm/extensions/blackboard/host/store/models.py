@@ -30,6 +30,16 @@ class User:
             external_id=row["external_id"],
         )
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "display_name": self.display_name,
+            "is_operator": self.is_operator,
+            "disabled": self.status != "active",
+            "created_at": self.created_at,
+            "last_seen_at": self.last_seen_at,
+        }
+
 
 @dataclass(frozen=True)
 class Workspace:

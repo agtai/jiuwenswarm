@@ -562,6 +562,7 @@ export function BlackboardPage() {
       <SettingsDialog
         open={open === 'settings'}
         hostName={host?.name ?? null}
+        hostUrl={host?.url ?? null}
         displayName={state.me?.display_name ?? ''}
         hostStatus={state.hostStatus}
         isOperator={Boolean(state.me?.is_operator)}
@@ -576,6 +577,12 @@ export function BlackboardPage() {
           botLinks: () => controller.botLinks(),
           connectBot: (link) => controller.connectBot(link),
           removeBotLink: (id) => controller.removeBotLink(id),
+        }}
+        onHealth={() => controller.hostHealth()}
+        access={{
+          rotateToken: () => controller.rotateToken(),
+          users: () => controller.hostUsers(),
+          setUserStatus: (userId, status) => controller.setUserStatus(userId, status),
         }}
         onSaveName={(name) => controller.setDisplayName(name)}
         onApplyHosting={(settings) => controller.setHostSettings(settings)}

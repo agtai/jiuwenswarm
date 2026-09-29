@@ -154,6 +154,11 @@
       <td width="50%">在同一台机器上运行多个 JiuwenSwarm 实例的部署场景与配置。</td>
     </tr>
     <tr>
+      <td width="22%"><strong>Blackboard</strong></td>
+      <td width="28%"><a href="zh/Blackboard.md">Blackboard</a></td>
+      <td width="50%">成员与智能体共同编写文档的共享工作区：托管、角色、以建议形式执行的智能体任务、历史与导出、从 Slack 或飞书读取。</td>
+    </tr>
+    <tr>
       <td width="22%"><strong>A2UI</strong></td>
       <td width="28%"><a href="zh/A2UI.md">A2UI</a></td>
       <td width="50%">Agent to UI 生成式界面协议，支持动态界面生成与交互。</td>

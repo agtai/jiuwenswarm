@@ -6,8 +6,9 @@ import { FormDialog } from '../../../../channels/web/frontend/src/components/for
 import { Button, Input, Select, Switch } from '../../../../channels/web/frontend/src/components/ui';
 import { describeError } from '../errors';
 import { isValidWorkspaceName, parseInviteLink, suggestWorkspaceName } from '../inviteLink';
-import type { HostStatus, InviteRole, InviteView } from '../types';
+import type { HostHealth, HostStatus, InviteRole, InviteView } from '../types';
 import { Field } from './Field';
+import { AccessKey, HostPeople, type AccessActions } from './AccessSettings';
 import { BotMode, ConnectedAccounts, HostBots, type ImActions } from './ImSettings';
 
 // Runs `action`, keeps the dialog open with the error if it throws.
@@ -396,24 +397,31 @@ const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1']);
 export function SettingsDialog({
   open,
   hostName,
+  hostUrl,
   displayName,
   hostStatus,
   isOperator,
   profile,
   im,
+  access,
+  onHealth,
   onSaveName,
   onApplyHosting,
   onClose,
 }: {
   open: boolean;
   hostName: string | null;
+  // The current host's address, for the plain-HTTP warning.
+  hostUrl: string | null;
   displayName: string;
   hostStatus: HostStatus | null;
-  // The person runs the current host: they make its shared bots.
+  // The person runs the current host: they make its shared bots and manage its people.
   isOperator: boolean;
   // Changes when the profile reloads, so connected accounts load again.
   profile: unknown;
   im: ImActions;
+  access: AccessActions;
+  onHealth: () => Promise<HostHealth>;
   onSaveName: (name: string) => Promise<unknown>;
   onApplyHosting: (settings: Record<string, unknown>) => Promise<unknown>;
   onClose: () => void;
@@ -423,14 +431,19 @@ export function SettingsDialog({
   const boardNameId = useId();
   const portId = useId();
   const urlId = useId();
+  const originsId = useId();
+  const retentionId = useId();
   const [name, setName] = useState(displayName);
   const [boardName, setBoardName] = useState('');
   const [enabled, setEnabled] = useState(false);
   const [openToOthers, setOpenToOthers] = useState(false);
   const [port, setPort] = useState('19011');
   const [publicUrl, setPublicUrl] = useState('');
+  const [origins, setOrigins] = useState('');
+  const [retention, setRetention] = useState('0');
   const nameSubmit = useSubmit(() => undefined);
   const hostSubmit = useSubmit(() => undefined);
+  const [health, setHealth] = useState<HostHealth | null>(null);
 
   // The profile loads after hosting starts, so the name follows it while the dialog is open.
   useEffect(() => {
@@ -445,6 +458,8 @@ export function SettingsDialog({
     setOpenToOthers(settings ? !LOOPBACK.has(String(settings.bind)) : false);
     setPort(String(settings?.port ?? 19011));
     setPublicUrl(String(settings?.public_url ?? ''));
+    setOrigins(Array.isArray(settings?.allowed_origins) ? (settings.allowed_origins as string[]).join(', ') : '');
+    setRetention(String(settings?.version_retention_days ?? 0));
     nameSubmit.setError(null);
     hostSubmit.setError(null);
   }, [open]);
@@ -457,11 +472,21 @@ export function SettingsDialog({
         bind: openToOthers ? '0.0.0.0' : '127.0.0.1',
         port: Number(port),
         public_url: publicUrl.trim(),
+        allowed_origins: origins
+          .split(',')
+          .map((o) => o.trim())
+          .filter(Boolean),
+        version_retention_days: Number(retention) || 0,
       }),
     );
 
   const running = Boolean(hostStatus?.running);
   const address = hostStatus?.base_url ?? '';
+  useEffect(() => {
+    if (!open || !running) return setHealth(null);
+    onHealth().then(setHealth, () => setHealth(null));
+  }, [open, running]);
+  const docs = health?.docservice;
   return (
     <FormDialog
       open={open}
@@ -549,7 +574,26 @@ export function SettingsDialog({
                 />
               </Field>
             ) : null}
+            {openToOthers ? (
+              <Field label={t('blackboard.settings.allowedOrigins')} htmlFor={originsId} hint={t('blackboard.settings.allowedOriginsHint')}>
+                <Input
+                  id={originsId}
+                  value={origins}
+                  placeholder="https://jiuwen.example.com"
+                  data-testid="blackboard-settings-origins-input"
+                  onChange={setOrigins}
+                />
+              </Field>
+            ) : null}
+            <Field label={t('blackboard.settings.retention')} htmlFor={retentionId} hint={t('blackboard.settings.retentionHint')}>
+              <Input id={retentionId} value={retention} inputMode="numeric" data-testid="blackboard-settings-retention-input" onChange={setRetention} />
+            </Field>
           </>
+        ) : null}
+        {hostStatus?.env_overrides?.length ? (
+          <p className="bb-notice" data-testid="blackboard-settings-env-overrides">
+            {t('blackboard.settings.envOverrides', { names: hostStatus.env_overrides.join(', ') })}
+          </p>
         ) : null}
         <div className="bb-settings-row">
           <p className="bb-muted" data-testid="blackboard-settings-host-state" data-variant={running ? 'running' : 'stopped'}>
@@ -563,6 +607,16 @@ export function SettingsDialog({
             {t('blackboard.settings.apply')}
           </Button>
         </div>
+        {running && health?.ok ? (
+          <p className="bb-muted" data-testid="blackboard-settings-host-health">
+            {t('blackboard.settings.health', {
+              members: health.members_connected ?? 0,
+              documents: docs?.open_documents ?? 0,
+              waiting: health.queue_depth ?? 0,
+            })}
+            {docs?.pdf_export === false ? ` ${t('blackboard.settings.noPdf')}` : ''}
+          </p>
+        ) : null}
         {hostSubmit.error ? (
           <p className="bb-dialog-error" role="alert">
             {hostSubmit.error}
@@ -579,6 +633,8 @@ export function SettingsDialog({
           </p>
         ) : null}
       </section>
+      {open && hostName ? <AccessKey hostName={hostName} hostUrl={hostUrl} actions={access} /> : null}
+      {open && hostName && isOperator ? <HostPeople actions={access} /> : null}
       {open && hostName ? <ConnectedAccounts hostName={hostName} changed={profile} actions={im} /> : null}
       {open && hostName && isOperator ? <HostBots actions={im} /> : null}
       {open ? <BotMode actions={im} /> : null}

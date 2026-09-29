@@ -117,6 +117,13 @@ class EventHub:
             frame = await queue.get()
             await websocket.send_json(frame)
 
+    async def close_user(self, user_id: str, reason: str) -> None:
+        """Close a person's event connections: their token was replaced or they were disabled."""
+        closing = [(k, c) for k, c in list(self._connections.items()) if c.user_id == user_id]
+        for key, _ in closing:
+            self._connections.pop(key, None)
+        await asyncio.gather(*(_close(c.websocket, 4401, reason) for _, c in closing), return_exceptions=True)
+
     async def close_all(self) -> None:
         connections = list(self._connections.values())
         self._connections.clear()

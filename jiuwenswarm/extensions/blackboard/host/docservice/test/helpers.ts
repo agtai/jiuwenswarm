@@ -54,6 +54,9 @@ export async function startTestService(
     hostUrl: null,
     idleMs: 200,
     chromium: null,
+    allowedOrigins: [],
+    allowAnyOrigin: false,
+    versionRetentionDays: 0,
     ...overrides,
   }
   const service = await startService(config)
@@ -68,7 +71,8 @@ export async function startTestService(
   return { ...service, config, ws: `ws://127.0.0.1:${config.port}`, call }
 }
 
-export const token = (uid: string, role: string, doc: string, ttl = 3600) => mintDocToken({ uid, ws: 'ws_1', doc, role }, DOC_SECRET, ttl)
+export const token = (uid: string, role: string, doc: string, ttl = 3600, name?: string) =>
+  mintDocToken({ uid, ws: 'ws_1', doc, role, ...(name === undefined ? {} : { name }) }, DOC_SECRET, ttl)
 
 export interface Client {
   ydoc: Y.Doc

@@ -267,7 +267,9 @@ async def doc_token(call: Call) -> dict[str, Any]:
     call.ctx.doc_client()  # a token is no use while the service is down
     frozen = doc.archived_at is not None or workspace.archived_at is not None
     role = "viewer" if frozen else member.role
-    claims = {"uid": call.uid, "ws": doc.workspace_id, "doc": doc_id, "role": role}
+    # The name is stamped on the person's caret by the document service.
+    name = call.user.display_name if call.user is not None else ""
+    claims = {"uid": call.uid, "name": name, "ws": doc.workspace_id, "doc": doc_id, "role": role}
     return {
         "token": mint_doc_token(claims, call.ctx.secrets.doc_secret, ttl_seconds=DOC_TOKEN_TTL_S),
         "url": call.ctx.settings.doc_url(),

@@ -140,7 +140,14 @@
       "plainHttp": "此地址使用 HTTP，成员与主机之间的通信未加密。",
       "boardName": "Blackboard 名称",
       "boardNameHint": "成员会在自己的 Blackboard 列表中看到这个名称。",
-      "boardNamePlaceholder": "留空则使用你的名字"
+      "boardNamePlaceholder": "留空则使用你的名字",
+      "allowedOrigins": "其他网页应用地址",
+      "allowedOriginsHint": "成员在自己电脑上打开的网页应用始终可用。请列出网页应用的其他打开地址，例如 https://jiuwen.example.com，用逗号分隔。",
+      "retention": "版本保留天数",
+      "retentionHint": "0 表示保留所有版本。命名版本和每个文档的最新版本始终保留。",
+      "envOverrides": "以下设置由环境变量指定，在此修改无效：{{names}}",
+      "health": "{{members}} 位成员已连接，{{documents}} 个文档已打开，{{waiting}} 个智能体任务在等待。",
+      "noPdf": "无法导出 PDF：本机未找到 Chrome、Edge 或 Chromium。"
     },
     "errors": {
       "unauthorized": "主机不接受此成员的令牌。",
@@ -149,6 +156,8 @@
       "not_found": "它已不存在。",
       "expired": "此邀请链接已无法使用。",
       "disabled": "你在此主机上的账号已停用。",
+      "rate_limited": "一分钟内请求过多，请稍后再试。",
+      "not_linked": "此 IM 账号尚未连接到 Blackboard 用户。",
       "unavailable": "无法连接到主机。",
       "internal": "主机无法完成此请求。",
       "generic": "出了点问题。"
@@ -426,6 +435,21 @@
       "md": "Markdown (.md)",
       "decisions": "附上关于此文档的已回答决策",
       "confirm": "导出"
+    },
+    "access": {
+      "key": "你的访问密钥",
+      "keyHint": "此 jiuwenswarm 保存着一个以你的身份进入 {{host}} 的密钥。如果这台电脑的文件被复制，或你怀疑密钥泄露，请更换它：旧密钥会立即失效。",
+      "replaceKey": "更换密钥",
+      "keyReplaced": "密钥已更换",
+      "plainHttp": "与 {{host}} 的连接使用 HTTP，你在那里读写的内容未加密。请向主机管理员索取 https:// 地址。",
+      "people": "此主机上的成员",
+      "peopleHint": "停用某人会立即终止其对此主机上所有工作区的访问，包括其智能体以及共享机器人为其进行的读取。重新启用即可恢复。",
+      "operator": "管理员",
+      "disabled": "已停用",
+      "workspaces_one": "{{count}} 个工作区",
+      "workspaces_other": "{{count}} 个工作区",
+      "disable": "停用",
+      "enable": "启用"
     },
     "im": {
       "accounts": "已连接的 IM 账号",

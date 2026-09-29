@@ -32,6 +32,7 @@ from jiuwenswarm.extensions.blackboard.host.extract import extract_text
 from jiuwenswarm.extensions.blackboard.host.api.access import require_member
 from jiuwenswarm.extensions.blackboard.host.api.context import HostContext
 from jiuwenswarm.extensions.blackboard.host.api.methods import Call, method
+from jiuwenswarm.extensions.blackboard.host.api.ratelimit import UPLOADS_PER_MINUTE
 from jiuwenswarm.extensions.blackboard.host.api.rpc import bearer_token
 from jiuwenswarm.extensions.blackboard.host.store import references
 from jiuwenswarm.extensions.blackboard.host.store.models import Reference
@@ -142,6 +143,7 @@ async def upload(ctx: HostContext, workspace_id: str, request: Request) -> JSONR
         return _error(exc, 401 if exc.code == UNAUTHORIZED else 403)
     try:
         workspace, _ = await ctx.store.read(lambda c: require_member(c, user.id, workspace_id, "editor"))
+        ctx.limits.check(f"upload:{user.id}", UPLOADS_PER_MINUTE)
         if workspace.archived_at is not None:
             raise BlackboardError(CONFLICT, "the workspace is archived", {"workspace_id": workspace_id})
         limit = ctx.settings.max_upload_mb * 1024 * 1024

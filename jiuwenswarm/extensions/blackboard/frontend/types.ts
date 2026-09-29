@@ -74,6 +74,8 @@ export interface HostStatus {
   listening?: string | null;
   error: string | null;
   reachable_from_other_machines: boolean;
+  // Settings fixed by BLACKBOARD_HOST_* environment variables.
+  env_overrides?: string[];
 }
 
 export interface DocView {
@@ -307,6 +309,25 @@ export interface IdentityView {
   external_id: string;
   display_name: string | null;
   linked_at: string;
+}
+
+// What the host this jiuwenswarm runs reports about itself (/blackboard/health).
+export interface HostHealth {
+  ok: boolean;
+  docservice?: { status: string; open_documents?: number | null; connections?: number | null; pdf_export?: boolean | null };
+  members_connected?: number;
+  queue_depth?: number;
+}
+
+// A person on the host, as the operator sees them.
+export interface UserView {
+  id: string;
+  display_name: string;
+  is_operator: boolean;
+  disabled: boolean;
+  created_at: string;
+  last_seen_at: string | null;
+  workspaces: number;
 }
 
 // A shared bot made by the host's operator.

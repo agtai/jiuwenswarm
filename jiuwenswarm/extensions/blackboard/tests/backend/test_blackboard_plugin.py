@@ -34,6 +34,8 @@ LOCAL_METHODS = {
     p.BOTS_LIST,
     p.BOTS_CONNECT,
     p.BOTS_REMOVE,
+    p.HOSTS_ROTATE_TOKEN,
+    p.HOST_HEALTH,
 }
 
 
