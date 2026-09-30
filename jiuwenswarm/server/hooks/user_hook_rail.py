@@ -31,6 +31,9 @@ class UserHookRail(DeepAgentRail):
     Priority 60 runs after the security rails. ``JiuSwarmStreamEventRail``
     projects a tool call only after every rail that rewrites its result, so
     PostToolUse context added here is part of the streamed ``rendered_result``.
+
+    Multiple active UserHookRail instances are inherited independently;
+    overlapping hooks may execute more than once.
     """
 
     priority = 60
