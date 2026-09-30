@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 from contextvars import ContextVar
+from dataclasses import replace
 
 from openjiuwen.core.foundation.llm import ToolMessage
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
@@ -13,6 +14,7 @@ from openjiuwen.core.single_agent.ability_manager import resolve_tool_message
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, RunContext
 from openjiuwen.harness.goal.schema import GoalAssessment, GoalAssessmentStatus
 from openjiuwen.harness.rails.base import DeepAgentRail
+from openjiuwen.harness.schema.config import SubAgentConfig
 
 from jiuwenswarm.common.hooks_config import HooksConfig, HookEvent
 from jiuwenswarm.server.hooks.executor import HookExecutor
@@ -32,11 +34,55 @@ class UserHookRail(DeepAgentRail):
 
     priority = 60
 
-    def __init__(self, hooks_config: HooksConfig):
+    def __init__(self, hooks_config: HooksConfig, *, subagent_type: str = ""):
         super().__init__()
         self._config = hooks_config
         self._executor = HookExecutor()
         self._blocking_state: ContextVar[dict | None] = ContextVar("user_hook_blocking_state", default=None)
+        self._is_subagent = False
+        self._subagent_type = subagent_type
+
+    def fork_for_agent(self) -> UserHookRail:
+        """Keep executor, blocking state and agent identity private to each child."""
+        child = UserHookRail(self._config)
+        child._is_subagent = True
+        return child
+
+    def init(self, agent) -> None:
+        super().init(agent)
+        if self._is_subagent:
+            self._subagent_type = agent.card.name
+        self._propagate_hooks(agent)
+
+    def _propagate_hooks(self, agent) -> None:
+        """Propagate session hooks after all subagent providers are resolved.
+
+        Copy specs and rail lists so parents that reuse a spec stay isolated.
+        Each child repeats this step for its own descendants.
+        """
+        config = getattr(agent, "deep_config", None)
+        if config is None:
+            return
+        specs = []
+        for spec in config.subagents or []:
+            if isinstance(spec, SubAgentConfig):
+                # Refresh inherited policy too when the parent reloads hooks.
+                rails = [rail for rail in spec.rails or [] if not isinstance(rail, UserHookRail)]
+                rails.append(self.fork_for_agent())
+                specs.append(replace(spec, rails=rails))
+            else:
+                # The SDK also accepts preconstructed DeepAgent children.
+                if not any(isinstance(rail, UserHookRail) for rail in spec.configured_rails()):
+                    spec.add_rail(self.fork_for_agent())
+                specs.append(spec)
+        if config.subagents is not None:
+            config.subagents = specs
+
+    def _identity(self, ctx: AgentCallbackContext) -> dict[str, str]:
+        identity = {"session_id": self._session_id(ctx)}
+        if self._subagent_type:
+            identity["subagent_type"] = self._subagent_type
+        return identity
 
     @staticmethod
     def _session_id(ctx: AgentCallbackContext) -> str:
@@ -49,6 +95,7 @@ class UserHookRail(DeepAgentRail):
     # ---- PreToolUse: BEFORE_TOOL_CALL ----
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
+        self._propagate_hooks(getattr(ctx, "agent", None))
         # HITL resumes execute tools before any model call. ContextVar also
         # bridges DeepAgent's outer callbacks to its inner ReAct/tool tasks,
         # while keeping concurrent invocations isolated.
@@ -59,6 +106,9 @@ class UserHookRail(DeepAgentRail):
             ctx.extra[_PENDING_GOAL_KEY] = ctx.session.get_state(_PENDING_GOAL_KEY)
 
     async def before_task_iteration(self, ctx: AgentCallbackContext) -> None:
+        # Partial hot reload retains this rail but can replace the child specs;
+        # persistent interaction loops need not call init again before tools.
+        self._propagate_hooks(getattr(ctx, "agent", None))
         self._blocking_state.set({})
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
@@ -83,7 +133,7 @@ class UserHookRail(DeepAgentRail):
                 "event": "PreToolUse",
                 "tool_name": tool_name,
                 "tool_input": tool_args,
-                "session_id": self._session_id(ctx),
+                **self._identity(ctx),
             },
         )
 
@@ -151,7 +201,7 @@ class UserHookRail(DeepAgentRail):
                 "tool_name": tool_name,
                 "tool_input": ctx.inputs.tool_args,
                 "tool_result": ctx.inputs.tool_result,
-                "session_id": self._session_id(ctx),
+                **self._identity(ctx),
             },
         )
 
@@ -255,7 +305,7 @@ class UserHookRail(DeepAgentRail):
                 "tool_name": tool_name,
                 "tool_input": ctx.inputs.tool_args,
                 "error": str(getattr(ctx, "exception", "")),
-                "session_id": self._session_id(ctx),
+                **self._identity(ctx),
             },
         )
 
@@ -276,7 +326,7 @@ class UserHookRail(DeepAgentRail):
             hook_input={
                 "event": "Stop",
                 "final_response": getattr(ctx.inputs, "result", None),
-                "session_id": self._session_id(ctx),
+                **self._identity(ctx),
             },
         )
 
