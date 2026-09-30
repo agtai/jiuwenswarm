@@ -144,6 +144,21 @@ def test_forks_have_independent_blocking_state_and_executors():
     assert len({id(r._executor) for r in (parent, first, second)}) == 3
 
 
+def test_fork_exposes_read_only_parent_and_effective_policy():
+    config = HooksConfig()
+    parent = UserHookRail(config)
+    child = parent.fork_for_agent()
+    descendant = child.fork_for_agent()
+    assert parent.parent_hook is None
+    assert child.parent_hook is parent
+    assert descendant.parent_hook is child
+    assert descendant.hooks_config is config
+    with pytest.raises(AttributeError):
+        child.parent_hook = None
+    with pytest.raises(AttributeError):
+        child.hooks_config = HooksConfig()
+
+
 def test_hooks_propagate_to_descendants():
     rail = UserHookRail(HooksConfig()).fork_for_agent()
     descendant = SubAgentConfig(agent_card=AgentCard(name="code_agent"), system_prompt="")

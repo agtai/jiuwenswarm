@@ -35,31 +35,39 @@ class UserHookRail(DeepAgentRail):
 
     priority = 60
 
-    def __init__(self, hooks_config: HooksConfig, *, subagent_type: str = ""):
+    def __init__(
+        self, hooks_config: HooksConfig, *, subagent_type: str = "", parent_hook: UserHookRail | None = None,
+    ):
         super().__init__()
         self._hooks_config = hooks_config
-        self._parent_hook: UserHookRail | None = None
+        self._parent_hook = parent_hook
         self._executor = HookExecutor()
         self._blocking_state: ContextVar[dict | None] = ContextVar("user_hook_blocking_state", default=None)
-        self._is_subagent = False
         self._subagent_type = subagent_type
 
     @property
     def _config(self) -> HooksConfig:
         # Follow the originating policy, including replacement and in-place
         # updates, without sharing executors or per-invocation blocking state.
-        return self._parent_hook._config if self._parent_hook is not None else self._hooks_config
+        return self._parent_hook.hooks_config if self._parent_hook is not None else self._hooks_config
+
+    @property
+    def hooks_config(self) -> HooksConfig:
+        """Return the effective policy, following the originating parent rail."""
+        return self._config
+
+    @property
+    def parent_hook(self) -> UserHookRail | None:
+        """Identify inherited ownership without exposing a writable parent link."""
+        return self._parent_hook
 
     def fork_for_agent(self) -> UserHookRail:
         """Keep executor, blocking state and agent identity private to each child."""
-        child = UserHookRail(self._config)
-        child._parent_hook = self
-        child._is_subagent = True
-        return child
+        return UserHookRail(self._config, parent_hook=self)
 
     def init(self, agent) -> None:
         super().init(agent)
-        if self._is_subagent:
+        if self._parent_hook is not None:
             self._subagent_type = agent.card.name
         self._propagate_hooks(agent)
 
@@ -94,14 +102,14 @@ class UserHookRail(DeepAgentRail):
             config.subagents = specs
 
     def _owns(self, rail) -> bool:
-        return isinstance(rail, UserHookRail) and rail._parent_hook is self
+        return isinstance(rail, UserHookRail) and rail.parent_hook is self
 
     @staticmethod
     def _stale(rail, active) -> bool:
         # Keep custom rails and forks of other still-active parent hook rails.
         # Only retire inheritance from a parent rail that has been detached.
-        return (isinstance(rail, UserHookRail) and rail._parent_hook is not None
-                and all(rail._parent_hook is not parent for parent in active))
+        return (isinstance(rail, UserHookRail) and rail.parent_hook is not None
+                and all(rail.parent_hook is not parent for parent in active))
 
     async def _activate_child_hooks(self, agent) -> None:
         config = getattr(agent, "deep_config", None)
