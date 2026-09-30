@@ -54,6 +54,13 @@ def build_turn_prompt(material: dict[str, Any], nonce: str | None = None) -> str
             f'"{workspace.get("title", "")}". You work on their behalf; people see your changes as "{requester}\'s agent".'
         )
     parts.append(f"Scope: {_scope(material)}.")
+    place = material.get("place") or {}
+    if place:
+        parts.append(
+            f'{requester} gave the task from the document "{place.get("doc_title", "")}" (id {place.get("doc_id", "")}), '
+            "shown below where their cursor was. Words like \"here\" and \"this\" mean that place unless the request "
+            "says otherwise; the task is not limited to it."
+        )
     parts.append(
         "\n".join(
             [
@@ -85,6 +92,10 @@ def build_turn_prompt(material: dict[str, Any], nonce: str | None = None) -> str
     if thread:
         lines = [f"{c['author']}{' (agent)' if c.get('kind') == 'agent' else ''}: {c['body']}" for c in thread]
         parts.append("The comment thread so far:\n" + _fence("thread", nonce, "\n".join(lines)))
+    if material.get("place_passage"):
+        parts.append("Where their cursor was, as blackboard_read shows it:\n" + _fence("place", nonce, material["place_passage"]))
+    if place.get("quote"):
+        parts.append("The words they had selected:\n" + _fence("selection", nonce, place["quote"]))
     chat = material.get("chat") or []
     if chat:
         parts.append("Said in the workspace chat since your last turn there:\n" + _fence("chat", nonce, "\n".join(chat)))

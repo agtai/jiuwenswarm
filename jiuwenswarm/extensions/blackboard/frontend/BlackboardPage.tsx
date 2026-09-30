@@ -4,7 +4,7 @@ import { Bot, CircleHelp, History, Link2, MessageSquare, MessagesSquare, PanelLe
 
 import { Button, toast } from '../../../channels/web/frontend/src/components/ui';
 import { FormDialog } from '../../../channels/web/frontend/src/components/form';
-import { canEdit, currentDoc, currentHost, currentWorkspace, type RailTab } from './controller';
+import { canEdit, currentDoc, currentHost, currentWorkspace, workingPlaces, type RailTab } from './controller';
 import { describeError } from './errors';
 import type { AnchorDraft, DocView, InviteView, MandateView, MemberView, ReferenceView, Role, WorkspaceView } from './types';
 import { useController } from './useController';
@@ -108,6 +108,7 @@ export function BlackboardPage() {
   const editable = canEdit(state);
   const close = () => setOpen(null);
   const names = useMemo(() => new Map(state.members.map((m) => [m.user_id, m.display_name])), [state.members]);
+  const working = useMemo(() => workingPlaces(state), [state.mandates, state.docId]);
   const me = state.me ? { id: state.me.user_id, name: state.me.display_name } : null;
   const fetchToken = useCallback((docId: string) => controller.docToken(docId), [controller, state.hostId]);
   const instructions = useMemo(() => new Map(state.mandates.map((m) => [m.id, m.instruction])), [state.mandates]);
@@ -575,6 +576,8 @@ export function BlackboardPage() {
                 docActions={docActions}
                 suggestionActions={suggestionActions}
                 commentActions={commentActions}
+                onTask={editable ? (request, place) => controller.giveTask(request, place) : null}
+                working={working}
                 openVersion={openVersion}
                 versions={state.history}
                 versionActions={versionActions}

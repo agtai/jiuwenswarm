@@ -50,6 +50,8 @@ INSTRUCTIONS_CHARS = 12000
 QUOTE_IN_PROMPT = 2000
 MAX_REPLY = 8000
 NO_INSTRUCTION = "(no instruction given)"
+# The blocks at the cursor of a task given from a document, at most this long in the prompt.
+PLACE_CHARS = 6000
 
 
 def _ago(seconds: float) -> str:
@@ -335,12 +337,16 @@ def _material(conn: sqlite3.Connection, mandate: Mandate) -> dict[str, Any]:
             total += len(line)
         material["chat"] = list(reversed(lines))
         chat.mark_seen(conn, mandate.workspace_id)
+        place = mandate.origin_ref.get("place")
+        doc = docs.get(conn, place["doc_id"]) if isinstance(place, dict) and place.get("doc_id") else None
+        if doc is not None:
+            material["place"] = {**place, "doc_title": doc.title}
     return material
 
 
 async def _documents(ctx: HostContext, mandate: Mandate, material: dict[str, Any]) -> dict[str, Any]:
     """The instructions document and, for a passage, the passage itself, read from the document service."""
-    out: dict[str, Any] = {"instructions_doc": None, "passage": None}
+    out: dict[str, Any] = {"instructions_doc": None, "passage": None, "place_passage": None}
     if ctx.docs is None or not ctx.docs.running:
         return out
     client = ctx.doc_client()
@@ -359,6 +365,14 @@ async def _documents(ctx: HostContext, mandate: Mandate, material: dict[str, Any
             out["passage"] = result.get("markdown", "")
         except BlackboardError as exc:
             logger.warning("blackboard: reading the passage of %s failed: %s", mandate.id, exc.message)
+    place = material.get("place") or {}
+    if place.get("block_from"):
+        # The blocks may be gone by now; the task then goes without them.
+        try:
+            result = await client.markdown(place["doc_id"], range_=f"{place['block_from']}..{place.get('block_to') or place['block_from']}")
+            out["place_passage"] = result.get("markdown", "")[:PLACE_CHARS]
+        except BlackboardError as exc:
+            logger.info("blackboard: reading the place of %s failed: %s", mandate.id, exc.message)
     return out
 
 

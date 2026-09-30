@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { BlackboardController } from '../../../../channels/web/frontend/node_modules/.cache/blackboard/controller.js';
+import { BlackboardController, workingPlaces } from '../../../../channels/web/frontend/node_modules/.cache/blackboard/controller.js';
 import {
   toggleAttachment,
   workspaceChoices,
@@ -348,6 +348,19 @@ test('the chat loads with the workspace, and pushed messages join it once', asyn
     mentions: [{ kind: 'agent' }, { kind: 'user', id: 'u2' }],
     session_id: 'sess-9',
   });
+
+  // Ctrl+J in a document: a task to @jiuwen that carries where it was given.
+  await assert.rejects(c.giveTask('expand this', { block_from: 'b1' }), /No document/);
+  c.selectDoc('d1');
+  await c.giveTask('expand this', { block_from: 'b1', block_to: 'b2', quote: 'Friday' });
+  const task = f.calls.filter(([method]) => method === 'blackboard.chat.post').at(-1)[1];
+  assert.deepEqual(task, {
+    host: 'h1',
+    workspace_id: 'ws1',
+    body: '@jiuwen expand this',
+    mentions: [{ kind: 'agent' }],
+    place: { doc_id: 'd1', block_from: 'b1', block_to: 'b2', quote: 'Friday' },
+  });
 });
 
 test('comments follow the open document; a selection starts a comment in the margin', async () => {
@@ -563,4 +576,20 @@ test('renaming a session goes through the app and shows at once', async () => {
   assert.equal(c.getState().sessionTitles.s1, 'Launch review');
   await assert.rejects(c.renameSession('s1', '   '));
   assert.equal(renamed.length, 1);
+});
+
+test('jiuwen works where a task was given in the open document, while it is queued or running', () => {
+  const place = (doc_id, block_from, block_to) => ({ origin_ref: { message_id: 'cm1', place: { doc_id, block_from, block_to } } });
+  const mandates = [
+    { status: 'running', ...place('d1', 'b1', 'b2') },
+    { status: 'queued', ...place('d1', 'b5') },
+    { status: 'waiting_for_answer', ...place('d1', 'b7') },
+    { status: 'done', ...place('d1', 'b8') },
+    { status: 'running', ...place('d2', 'b9') },
+    { status: 'running', origin_ref: { message_id: 'cm2' } },
+  ];
+  assert.deepEqual(workingPlaces({ mandates, docId: 'd1' }), [
+    { from: 'b1', to: 'b2' },
+    { from: 'b5', to: 'b5' },
+  ]);
 });

@@ -93,6 +93,7 @@ Documents are edited live by everyone with the page open; each person's text is 
 | Ctrl+Alt+O | Go to a document by typing part of its name |
 | Ctrl+Alt+N | New document |
 | Ctrl+M | Comment on the selected text |
+| Ctrl+J | Give jiuwen a task from where you are in a document |
 | ? | List the shortcuts |
 
 ## Give the agent a task
@@ -113,6 +114,7 @@ sequenceDiagram
 
 - **From a comment.** Select text, choose **Comment** (or Ctrl+M), and write `@jiuwen` followed by the request, picking the agent from the list. The agent edits only the commented passage, unless you turn on the switch that lets it change the whole document, and replies in the thread.
 - **From the workspace chat.** Write `@jiuwen` and the request in the **Chat** tab. The agent may change the whole workspace and answers in the chat.
+- **From anywhere in a document.** Press Ctrl+J: a small box opens at your cursor. Type the request and press Enter. It is a workspace chat task that also knows where you were, so "this paragraph" means the one at your cursor, and the agent may still change anything in the workspace. Three moving dots at that place show that the agent is working; its reply comes in the chat.
 - **From the Agents panel.** **New agent session** opens a chat box over the document (see below); ask there.
 - **From your own chat.** In a chat, **+ > Blackboard workspace** turns a workspace on for that session; from the next message the agent can edit it.
 

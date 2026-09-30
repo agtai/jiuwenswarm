@@ -147,8 +147,9 @@ export interface MandateView {
   receipts: ReceiptView[];
   // Doc id -> this run's suggestions nobody has decided on yet.
   pending: Record<string, string[]>;
-  // Where the task was given: {thread_id, comment_id} or {message_id} or {session_id}.
-  origin_ref?: Record<string, string>;
+  // Where the task was given: {thread_id, comment_id} or {message_id} (with `place` for a task
+  // given from a document) or {session_id}.
+  origin_ref?: { place?: TaskPlace & { doc_id: string } } & Record<string, unknown>;
   scope?: { doc_id?: string; block_from?: string; block_to?: string };
   turn_count?: number;
   // A comment task waiting for its document: 1 is next.
@@ -196,6 +197,20 @@ export interface ChatMessageView {
 }
 
 export type AnchorStatus = 'ok' | 'drifted' | 'orphaned';
+
+// Where in the open document a task was given (Ctrl+J): the top-level blocks at the cursor and the
+// selected words. Context for the agent, not a scope.
+export interface TaskPlace {
+  block_from?: string;
+  block_to?: string;
+  quote?: string;
+}
+
+// The blocks of the open document where jiuwen works on a task given there.
+export interface WorkingPlace {
+  from: string;
+  to: string;
+}
 
 // A passage of a document: its first and last block, its ends as Yjs relative positions (base64),
 // and the text it quoted.

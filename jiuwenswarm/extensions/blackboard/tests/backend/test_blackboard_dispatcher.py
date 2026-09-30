@@ -50,6 +50,13 @@ def test_the_prompt_fences_workspace_material_and_names_the_reply_place():
         nonce="n2",
     )
     assert "Scope: the whole workspace." in answered
+    placed = build_turn_prompt(
+        {**material, "origin": "workspace_chat", "scope": {}, "place": {"doc_id": "d1", "doc_title": "Plan", "block_from": "b2", "quote": "Friday"}, "place_passage": "<!-- block:b2 -->\nShip on Friday."},
+        nonce="n3",
+    )
+    assert 'Alice gave the task from the document "Plan" (id d1)' in placed and "the task is not limited to it" in placed
+    assert "<place-n3>\n<!-- block:b2 -->\nShip on Friday.\n</place-n3>" in placed and "<selection-n3>\nFriday\n</selection-n3>" in placed
+    assert "Scope: the whole workspace." in placed
     assert "<chat-n2>\nBob: we lack a risks part\n</chat-n2>" in answered
     assert "Options: 1. A; 2. B" in answered and "The answer (Carol, accepted by Alice)" in answered
     assert answered.rstrip().endswith("Continue the task with this answer.")

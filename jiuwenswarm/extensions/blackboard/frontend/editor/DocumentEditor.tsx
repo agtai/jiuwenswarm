@@ -3,6 +3,8 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { EditorContent, useEditor, type Editor } from '@tiptap/react';
+import { Extension } from '@tiptap/core';
+import type { EditorState } from '@tiptap/pm/state';
 import Collaboration from '@tiptap/extension-collaboration';
 import CollaborationCaret from '@tiptap/extension-collaboration-caret';
 import { HocuspocusProvider } from '@hocuspocus/provider';
@@ -31,12 +33,14 @@ import {
 
 import { Button, Tag, type TagVariant } from '../../../../channels/web/frontend/src/components/ui';
 import { YJS_FIELD, authorColorIndex, blackboardExtensions } from '../../host/docservice/src/schema/extensions.ts';
-import type { AnchorDraft, DocToken } from '../types';
+import type { AnchorDraft, DocToken, TaskPlace, WorkingPlace } from '../types';
 import { authorsOf, type AuthorEntry } from './authors';
 import { AuthorStamp } from './authorStamp';
 import { CommentMargin } from './CommentMargin';
 import { CommentHighlights, anchorForSelection, selectionTooLong, showThreads, threadRange, type ThreadAnchor } from './comments';
 import { DocSession, type ProviderFactory, type SessionState, type SessionStatus } from './session';
+import { TaskBox } from './TaskBox';
+import { TaskMarkers, showTaskMarkers } from './taskMarkers';
 
 export interface DocumentEditorProps {
   docId: string;
@@ -50,6 +54,10 @@ export interface DocumentEditorProps {
   title: ReactNode;
   suggestions: SuggestionActions;
   comments: CommentActions;
+  // Ctrl+J: a task for the person's agent from where they are; null for people who cannot give one.
+  onTask: ((request: string, place: TaskPlace) => Promise<void>) | null;
+  // Where jiuwen is working on tasks given in this document.
+  working: WorkingPlace[];
 }
 
 export interface CommentActions {
@@ -126,7 +134,7 @@ function useSession(docId: string, fetchToken: DocumentEditorProps['fetchToken']
   return { live, state };
 }
 
-export default function DocumentEditor({ docId, fetchToken, me, names, header, title, suggestions, comments }: DocumentEditorProps) {
+export default function DocumentEditor({ docId, fetchToken, me, names, header, title, suggestions, comments, onTask, working }: DocumentEditorProps) {
   const { t } = useTranslation();
   const { live, state } = useSession(docId, fetchToken);
   const [showAuthors, setShowAuthors] = useState(false);
@@ -180,6 +188,8 @@ export default function DocumentEditor({ docId, fetchToken, me, names, header, t
           header={header}
           suggestions={suggestions}
           comments={comments}
+          onTask={state.readOnly ? null : onTask}
+          working={working}
         />
       ) : (
         <div className="bb-doc__loading" data-testid="blackboard-doc-loading" />
@@ -199,6 +209,8 @@ function LiveEditor({
   header,
   suggestions,
   comments,
+  onTask,
+  working,
 }: {
   ydoc: Y.Doc;
   provider: HocuspocusProvider;
@@ -210,6 +222,8 @@ function LiveEditor({
   header: ReactNode;
   suggestions: SuggestionActions;
   comments: CommentActions;
+  onTask: DocumentEditorProps['onTask'];
+  working: WorkingPlace[];
 }) {
   const { t } = useTranslation();
   const meRef = useRef(me);
@@ -218,6 +232,9 @@ function LiveEditor({
   commentsRef.current = comments;
   const frame = useRef<HTMLDivElement | null>(null);
   const [commentAt, setCommentAt] = useState<{ top: number; left: number; tooLong: boolean } | null>(null);
+  const [taskAt, setTaskAt] = useState<{ top: number; left: number; place: TaskPlace } | null>(null);
+  // Set below once the editor exists; the shortcut reads it when pressed.
+  const openTask = useRef<() => boolean>(() => false);
   const editor = useEditor(
     {
       editable: !readOnly,
@@ -248,6 +265,8 @@ function LiveEditor({
             }),
           }),
           AuthorStamp.configure({ getAuthor: () => ({ id: meRef.current.id, kind: 'person' }), document: ydoc }),
+          Extension.create({ name: 'bbTaskShortcut', addKeyboardShortcuts: () => ({ 'Mod-j': () => openTask.current() }) }),
+          TaskMarkers.configure({ label: () => t('blackboard.task.working') }),
           CommentHighlights.configure({
             onOpenThread: (id) => {
               if (id === DRAFT_ID || (id === null && !commentsRef.current.active)) return;
@@ -290,6 +309,10 @@ function LiveEditor({
   }, [editor, marginAnchors, focused]);
 
   useEffect(() => {
+    if (editor) showTaskMarkers(editor, working);
+  }, [editor, working]);
+
+  useEffect(() => {
     if (!editor || !comments.active) return;
     const anchor = comments.threads.find((a) => a.id === comments.active);
     const range = anchor ? threadRange(editor.state, anchor) : null;
@@ -326,6 +349,21 @@ function LiveEditor({
     setCommentAt(null);
   };
 
+  // The task box opens under the cursor, kept inside the editor's width.
+  openTask.current = () => {
+    const box = frame.current?.getBoundingClientRect();
+    if (!editor || !onTask || !box) return false;
+    const coords = editor.view.coordsAtPos(editor.state.selection.head);
+    const left = Math.max(0, Math.min(coords.left - box.left - 12, box.width - TASK_BOX_WIDTH));
+    setTaskAt({ top: coords.bottom - box.top + 6, left, place: placeOf(editor.state) });
+    setCommentAt(null);
+    return true;
+  };
+  const closeTask = () => {
+    setTaskAt(null);
+    editor?.commands.focus();
+  };
+
   return (
     <div
       ref={frame}
@@ -354,7 +392,10 @@ function LiveEditor({
           />
         ) : null}
       </div>
-      {commentAt && comments.onComment ? (
+      {taskAt && onTask ? (
+        <TaskBox top={taskAt.top} left={taskAt.left} onSend={(request) => onTask(request, taskAt.place)} onClose={closeTask} />
+      ) : null}
+      {commentAt && comments.onComment && !taskAt ? (
         <button
           type="button"
           className="bb-comment-button"
@@ -373,6 +414,24 @@ function LiveEditor({
       ) : null}
     </div>
   );
+}
+
+const TASK_BOX_WIDTH = 380;
+const MAX_TASK_QUOTE = 2000;
+
+// The top-level blocks at the selection and the selected words: where a Ctrl+J task was given.
+function placeOf(state: EditorState): TaskPlace {
+  const { from, to, empty, $from, $to } = state.selection;
+  const block = (depth: number, node: () => { attrs: Record<string, unknown> }) => {
+    const id = depth >= 1 ? node().attrs.id : null;
+    return typeof id === 'string' && id ? id : undefined;
+  };
+  const quote = empty ? '' : state.doc.textBetween(from, to, ' ').trim();
+  return {
+    block_from: block($from.depth, () => $from.node(1)),
+    block_to: block($to.depth, () => $to.node(1)),
+    ...(quote && quote.length <= MAX_TASK_QUOTE ? { quote } : {}),
+  };
 }
 
 // Lucide's "bot" glyph, for the label of an agent's caret (built by hand: carets are plain DOM).

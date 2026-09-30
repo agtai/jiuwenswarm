@@ -27,7 +27,7 @@ import {
   Tag,
   toast,
 } from '../../../../channels/web/frontend/src/components/ui';
-import type { CommentActions, SuggestionActions } from '../editor/DocumentEditor';
+import type { CommentActions, DocumentEditorProps, SuggestionActions } from '../editor/DocumentEditor';
 import type { VersionActions } from '../editor/VersionView';
 import type { DocServiceStatus, DocToken, DocView, VersionView as Version, WorkspaceView } from '../types';
 
@@ -57,6 +57,8 @@ export function WorkspacePane({
   docActions,
   suggestionActions,
   commentActions,
+  onTask,
+  working,
   openVersion,
   versions,
   versionActions,
@@ -77,6 +79,8 @@ export function WorkspacePane({
   docActions: DocActions;
   suggestionActions: SuggestionActions;
   commentActions: CommentActions;
+  onTask: DocumentEditorProps['onTask'];
+  working: DocumentEditorProps['working'];
   // A version shown in place of the editor, and the document's versions to compare it with.
   openVersion: Version | null;
   versions: Version[];
@@ -177,6 +181,8 @@ export function WorkspacePane({
             title={<DocTitle key={doc.id} doc={doc} canEdit={canEdit} onRename={docActions.rename} />}
             suggestions={suggestionActions}
             comments={commentActions}
+            onTask={onTask}
+            working={working}
           />
         </Suspense>
       ) : (

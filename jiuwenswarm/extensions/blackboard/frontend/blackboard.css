@@ -1493,6 +1493,67 @@ body.bb-resizing iframe { pointer-events: none; }
 
 .bb-comment-button:hover { border-color: var(--color-action-primary); }
 
+/* The Ctrl+J task box under the cursor. */
+.bb-task-box {
+  position: absolute;
+  z-index: 6;
+  width: 380px;
+  max-width: calc(100% - 8px);
+  padding: 8px 10px;
+  border: 1px solid var(--color-action-primary);
+  border-radius: 10px;
+  background: var(--color-surface-popover);
+  box-shadow: 0 6px 20px rgba(var(--color-text-primary-rgb), 0.16);
+}
+
+.bb-task-box__row { display: flex; gap: 6px; align-items: flex-start; }
+.bb-task-box__icon { flex: 0 0 auto; margin-top: 6px; color: var(--color-action-primary); }
+
+.bb-task-box textarea {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 4px 6px;
+  border: 0;
+  outline: none;
+  color: var(--color-text-primary);
+  background: transparent;
+  font: inherit;
+  font-size: 14px;
+  resize: none;
+  field-sizing: content;
+  max-height: 160px;
+}
+
+/* Three dots where jiuwen works on a task given there (Ctrl+J), until the run ends. */
+.bb-task-dots {
+  display: inline-flex;
+  gap: 3px;
+  align-items: center;
+  margin-left: 6px;
+  vertical-align: middle;
+  user-select: none;
+}
+
+.bb-task-dots i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--color-action-primary);
+  animation: bb-task-dot 1.2s ease-in-out infinite;
+}
+
+.bb-task-dots i:nth-child(2) { animation-delay: 0.15s; }
+.bb-task-dots i:nth-child(3) { animation-delay: 0.3s; }
+
+@keyframes bb-task-dot {
+  0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-3px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bb-task-dots i { animation: none; opacity: 0.6; }
+}
+
 /* ---- decisions ---- */
 
 .bb-decisions { gap: 10px; }

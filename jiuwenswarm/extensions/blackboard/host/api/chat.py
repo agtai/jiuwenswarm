@@ -1,7 +1,9 @@
 """The workspace chat (milestone 5).
 
 ``@jiuwen`` in a message by an editor or owner gives the agent a task on the whole workspace; the
-agent answers in the chat. Anyone from commenter up may post.
+agent answers in the chat. Anyone from commenter up may post. A task given from a document (Ctrl+J
+there) carries its place: the document, the blocks at the cursor and the selected words, which the
+agent gets as context, not as a scope.
 """
 
 from __future__ import annotations
@@ -11,7 +13,7 @@ from typing import Any
 
 from jiuwenswarm.extensions.blackboard.common import mentions as mention
 from jiuwenswarm.extensions.blackboard.common import protocol as p
-from jiuwenswarm.extensions.blackboard.common.errors import CONFLICT, BlackboardError
+from jiuwenswarm.extensions.blackboard.common.errors import CONFLICT, BlackboardError, invalid
 from jiuwenswarm.extensions.blackboard.common.roles import role_at_least
 from jiuwenswarm.extensions.blackboard.host import validation as v
 from jiuwenswarm.extensions.blackboard.host.api import dispatch
@@ -19,9 +21,35 @@ from jiuwenswarm.extensions.blackboard.host.api.access import require_member
 from jiuwenswarm.extensions.blackboard.host.api.comments import body_text
 from jiuwenswarm.extensions.blackboard.host.api.feed import coded, post_chat, publish_chat
 from jiuwenswarm.extensions.blackboard.host.api.methods import Call, method
-from jiuwenswarm.extensions.blackboard.host.store import chat, users
+from jiuwenswarm.extensions.blackboard.host.store import chat, docs, users
 
 PAGE = 50
+MAX_BLOCK_ID = 64
+# Longer selections are left out; the blocks around the cursor are in the prompt anyway.
+MAX_PLACE_QUOTE = 2000
+
+
+def _place(conn: sqlite3.Connection, workspace_id: str, value: Any) -> dict[str, str] | None:
+    """Where in a document the person gave the task: {doc_id, block_from, block_to, quote?}."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise invalid("place is {doc_id, block_from, block_to, quote}", field="place")
+    doc_id = value.get("doc_id")
+    doc = docs.get(conn, doc_id) if isinstance(doc_id, str) else None
+    if doc is None or doc.workspace_id != workspace_id:
+        raise invalid("place names no document of this workspace", field="place")
+    place = {"doc_id": doc.id}
+    for key in ("block_from", "block_to"):
+        block = value.get(key)
+        if block is not None and (not isinstance(block, str) or not 0 < len(block) <= MAX_BLOCK_ID):
+            raise invalid(f"place.{key} is a block id", field="place")
+        if block:
+            place[key] = block
+    quote = value.get("quote")
+    if isinstance(quote, str) and quote.strip() and len(quote) <= MAX_PLACE_QUOTE:
+        place["quote"] = quote.strip()
+    return place
 
 
 @method(p.CHAT_POST)
@@ -31,23 +59,24 @@ async def chat_post(call: Call) -> dict[str, Any]:
     mentions = mention.parse(call.params.get("mentions"))
     session_id = call.params.get("session_id") if isinstance(call.params.get("session_id"), str) else None
 
-    def work(conn: sqlite3.Connection) -> tuple[dict[str, Any], str]:
+    def work(conn: sqlite3.Connection) -> tuple[dict[str, Any], str, dict[str, str] | None]:
         workspace, member = require_member(conn, call.uid, workspace_id, "commenter")
         if workspace.archived_at is not None:
             raise BlackboardError(CONFLICT, "the workspace is archived", {"workspace_id": workspace_id})
+        place = _place(conn, workspace_id, call.params.get("place"))
         message = chat.add(
             conn, workspace_id=workspace_id, author_id=call.uid, author_kind="person", kind="message", body=body, mentions=mentions
         )
-        return message.to_dict(users.names(conn, [call.uid]).get(call.uid)), member.role
+        return message.to_dict(users.names(conn, [call.uid]).get(call.uid)), member.role, place
 
-    message, role = await call.ctx.store.transact(work)
+    message, role, place = await call.ctx.store.transact(work)
     mandate_id = None
     if mention.names_agent(body, mentions) and role_at_least(role, "editor"):
         mandate = await dispatch.begin(
             call.ctx,
             workspace_id=workspace_id,
             origin="workspace_chat",
-            origin_ref={"message_id": message["id"]},
+            origin_ref={"message_id": message["id"], **({"place": place} if place else {})},
             requester_id=call.uid,
             instruction=mention.without_agent(body),
             scope={},

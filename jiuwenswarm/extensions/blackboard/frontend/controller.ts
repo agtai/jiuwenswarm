@@ -29,10 +29,12 @@ import type {
   DiffView,
   IdentityView,
   ExportFormat,
+  TaskPlace,
   ThreadView,
+  WorkingPlace,
   VersionView,
 } from './types';
-import { mentionsIn, sortThreads } from './conversation';
+import { AGENT_HANDLE, mentionsIn, sortThreads } from './conversation';
 import { withVersion } from './history';
 
 export interface BlackboardState {
@@ -167,6 +169,19 @@ const NO_SESSIONS: SessionPort = {
 export const MAX_SESSION_TITLE = 100;
 
 // What the page was showing, kept so it opens on the same place next time.
+// Where jiuwen is working in the open document: tasks given there with Ctrl+J that are queued or
+// running (not waiting for an answer, nor ended).
+export function workingPlaces(state: Pick<BlackboardState, 'mandates' | 'docId'>): WorkingPlace[] {
+  const out: WorkingPlace[] = [];
+  for (const m of state.mandates) {
+    const place = m.origin_ref?.place;
+    if ((m.status === 'queued' || m.status === 'running') && place?.block_from && place.doc_id === state.docId) {
+      out.push({ from: place.block_from, to: place.block_to ?? place.block_from });
+    }
+  }
+  return out;
+}
+
 export type Selection = Pick<BlackboardState, 'hostId' | 'workspaceId' | 'docId' | 'rail' | 'panels'>;
 
 export interface SelectionMemory {
@@ -751,15 +766,24 @@ export class BlackboardController {
   }
 
   // `sessionId` picks the session a task for the agent runs in; none means the workspace's own.
-  async postChat(body: string, sessionId: string | null = null): Promise<ChatMessageView> {
+  async postChat(body: string, sessionId: string | null = null, place: (TaskPlace & { doc_id: string }) | null = null): Promise<ChatMessageView> {
     const result = await this.rpc<{ message: ChatMessageView }>('blackboard.chat.post', {
       ...this.requireWorkspace(),
       body,
       mentions: mentionsIn(body, this.state.members),
       ...(sessionId ? { session_id: sessionId } : {}),
+      ...(place ? { place } : {}),
     });
     this.addChat(result.message);
     return result.message;
+  }
+
+  // Ctrl+J in the open document: a task for the person's agent on the whole workspace, as a chat
+  // message to @jiuwen that carries where they were, so "this" and "here" mean that place.
+  async giveTask(request: string, place: TaskPlace): Promise<void> {
+    const { docId } = this.state;
+    if (!docId) throw new Error('No document is open');
+    await this.postChat(`@${AGENT_HANDLE} ${request}`, null, { doc_id: docId, ...place });
   }
 
   private addChat(message: ChatMessageView): void {

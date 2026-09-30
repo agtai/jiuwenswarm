@@ -5,6 +5,7 @@ import {
   EditorState,
   authorsOf,
   blackboardSchema,
+  dotPositions,
   insertedRanges,
   stampAuthor,
 } from '../../../../channels/web/frontend/node_modules/.cache/blackboard/editorKit.js';
@@ -95,4 +96,31 @@ test("a person and their agent are two authors with two colors", () => {
     ],
   );
   assert.notEqual(legend[0].color, legend[1].color);
+});
+
+test('the working dots sit at the end of the text where the task was given', () => {
+  const schema = blackboardSchema();
+  const doc = schema.nodeFromJSON({
+    type: 'doc',
+    content: [
+      { type: 'paragraph', attrs: { id: 'p1' }, content: [{ type: 'text', text: 'Ship on Friday.' }] },
+      {
+        type: 'bulletList',
+        attrs: { id: 'l1' },
+        content: [
+          { type: 'listItem', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'one' }] }] },
+          { type: 'listItem', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'two' }] }] },
+        ],
+      },
+    ],
+  });
+  const [atParagraph, atList, gone] = [
+    dotPositions(doc, [{ from: 'p1', to: 'p1' }]),
+    dotPositions(doc, [{ from: 'p1', to: 'l1' }]),
+    dotPositions(doc, [{ from: 'x', to: 'x' }]),
+  ];
+  assert.equal(doc.textBetween(0, atParagraph[0]), 'Ship on Friday.');
+  assert.ok(doc.textBetween(0, atList[0], ' ').endsWith('two'));
+  assert.equal(doc.resolve(atList[0]).parent.textContent, 'two');
+  assert.deepEqual(gone, []);
 });

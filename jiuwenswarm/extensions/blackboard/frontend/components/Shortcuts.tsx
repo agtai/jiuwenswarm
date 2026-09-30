@@ -29,6 +29,7 @@ export const SHORTCUTS: Array<[string, string]> = [
   ['Ctrl+Alt+O', 'blackboard.shortcuts.goToDoc'],
   ['Ctrl+Alt+N', 'blackboard.shortcuts.newDoc'],
   ['Ctrl+M', 'blackboard.shortcuts.comment'],
+  ['Ctrl+J', 'blackboard.shortcuts.task'],
   ['Ctrl+B, Ctrl+I, Ctrl+Z, Ctrl+Shift+Z', 'blackboard.shortcuts.editing'],
   ['Alt+Up, Alt+Down', 'blackboard.shortcuts.movePanel'],
   ['Enter, Shift+Enter', 'blackboard.shortcuts.chatSend'],

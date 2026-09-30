@@ -258,6 +258,22 @@ async def test_the_chat_context_is_what_people_said_since_the_agents_last_turn(w
     third = await _chat_task(world, bob, workspace_id, "@jiuwen last")
     assert (await world.call(bob, p.MANDATE_CLAIM, mandate_id=third, session_id="s"))["prompt"]["chat"] == []
 
+async def test_a_task_given_from_a_document_carries_its_place_as_context(world):
+    alice, bob, _, workspace_id, doc_id, _ = await _scene(world)
+    place = {"doc_id": doc_id, "block_from": "b1", "block_to": "b1", "quote": "Ship on Friday"}
+    message = (await world.call(bob, p.CHAT_POST, workspace_id=workspace_id, body="@jiuwen expand this", mentions=AGENT, place=place))["message"]
+    mandate = await _mandate(world, message["mandate_id"])
+    assert mandate.scope == {} and mandate.origin_ref["place"] == place
+    claimed = await world.call(bob, p.MANDATE_CLAIM, mandate_id=message["mandate_id"], session_id="sess-b")
+    prompt = claimed["prompt"]
+    assert prompt["place"] == {**place, "doc_title": "Plan"} and prompt["place_passage"] == "# Plan\n\nShip on Friday.\n"
+    assert ("markdown", doc_id, {"view": "accepted", "range": "b1..b1"}) in world.ctx.docs.calls
+    other = await world.call(alice, p.WORKSPACE_CREATE, name="elsewhere", title="Elsewhere")
+    foreign = await world.doc(alice, other["workspace"]["id"], title="Other", markdown="x\n")
+    refused = await world.fails(bob, p.CHAT_POST, workspace_id=workspace_id, body="@jiuwen go", mentions=AGENT, place={"doc_id": foreign})
+    assert refused.code == "invalid"
+
+
 async def test_a_long_selection_stays_out_of_the_prompt(world):
     _, bob, _, _, doc_id, _ = await _scene(world)
     long = "Ship on Friday. " * 200

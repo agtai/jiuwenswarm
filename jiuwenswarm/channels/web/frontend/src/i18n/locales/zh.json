@@ -488,7 +488,14 @@
       "minimize": "最小化",
       "noSession": "请先在智能体面板中开始一个智能体会话。"
     },
+    "task": {
+      "working": "jiuwen 正在处理",
+      "title": "给 jiuwen 的任务",
+      "placeholder": "让 jiuwen 做点什么",
+      "send": "发送"
+    },
     "shortcuts": {
+      "task": "在文档中的当前位置给 jiuwen 布置任务",
       "splitPanel": "将面板加入右侧分屏，或从中移除",
       "title": "键盘快捷键",
       "panel": "在右侧只显示一个面板（按图标顺序）",

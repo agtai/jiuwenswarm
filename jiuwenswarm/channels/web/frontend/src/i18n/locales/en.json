@@ -488,7 +488,14 @@
       "minimize": "Minimize",
       "noSession": "Start an agent session from the Agents panel first."
     },
+    "task": {
+      "working": "jiuwen is working",
+      "title": "Task for jiuwen",
+      "placeholder": "Ask jiuwen",
+      "send": "Send"
+    },
     "shortcuts": {
+      "task": "Give jiuwen a task from where you are in a document",
       "splitPanel": "Add a panel to the split on the right, or take it out",
       "title": "Keyboard shortcuts",
       "panel": "Show one panel on the right, by the order of its icon",
