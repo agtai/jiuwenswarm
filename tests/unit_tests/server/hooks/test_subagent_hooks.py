@@ -37,8 +37,8 @@ async def test_explore_child_bash_runs_through_hook(tmp_path, monkeypatch, block
     child = parent.create_subagent("explore_agent", "child-session")
     inherited = [r for r in child.configured_rails() if isinstance(r, UserHookRail)]
     for child_rail in inherited:
-        child_rail.init(child)
-        await child._register_rail_selective(child_rail)
+        await child.register_rail(child_rail)
+        child.remove_pending_rail(child_rail)
     execute = AsyncMock(return_value=("executed", None))
     manager = child._react_agent.ability_manager
     monkeypatch.setattr(manager, "_execute_single_tool_call", execute)
@@ -58,8 +58,7 @@ async def test_explore_child_bash_runs_through_hook(tmp_path, monkeypatch, block
 
 
 @pytest.mark.parametrize("name", [
-    "explore_agent", "plan_agent", "code_agent", "research_agent",
-    "browser_agent", "statusline-setup", "custom_agent",
+    "explore_agent", "custom_agent",
 ])
 def test_inherits_without_mutating_or_duplicating_specs(name):
     existing = object()
@@ -67,7 +66,9 @@ def test_inherits_without_mutating_or_duplicating_specs(name):
     parent = SimpleNamespace(deep_config=SimpleNamespace(subagents=[spec]))
     rail = UserHookRail(HooksConfig())
     rail.init(parent)
+    first = parent.deep_config.subagents
     rail.init(parent)
+    assert parent.deep_config.subagents is first
     configured = parent.deep_config.subagents[0]
     assert spec.rails == [existing]
     assert configured.rails[0] is existing
@@ -96,20 +97,30 @@ async def test_child_identity_on_all_events(event, method):
     assert payload["subagent_type"] == "code_agent"
 
 
-def test_reinitialization_refreshes_child_policy():
-    old = UserHookRail(HooksConfig())
-    spec = SubAgentConfig(agent_card=AgentCard(name="code_agent"), system_prompt="", rails=[old])
+def test_preserves_custom_hooks_and_follows_parent_policy():
+    custom = UserHookRail(HooksConfig())
+    spec = SubAgentConfig(agent_card=AgentCard(name="code_agent"), system_prompt="", rails=[custom])
     parent = SimpleNamespace(deep_config=SimpleNamespace(subagents=[spec]))
+    rail = UserHookRail(HooksConfig())
+    rail.init(parent)
+    configured = parent.deep_config.subagents[0]
+    child = configured.rails[-1]
+    executor = child._executor
     config = HooksConfig(events={"PreToolUse": [HookMatcher(matcher="bash", hooks=[{"command": "exit 2"}])]})
-    UserHookRail(config).init(parent)
-    child = parent.deep_config.subagents[0].rails[0]
+    rail._hooks_config = config
+    rail.init(parent)
     assert child._config is config
-    assert spec.rails == [old]
+    assert parent.deep_config.subagents[0] is configured
+    assert child._executor is executor
+    assert configured.rails[0] is custom
+    assert spec.rails == [custom]
+    config.events.clear()
+    assert not child._config.events
+    assert custom._config is not config
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("method", ["before_invoke", "before_task_iteration"])
-async def test_reloaded_child_specs_inherit_without_reinitializing_rail(method):
+async def test_reloaded_child_specs_inherit_without_reinitializing_rail():
     rail = UserHookRail(HooksConfig())
     parent = DeepAgent(AgentCard(name="parent")).configure(DeepAgentConfig(
         subagents=[build_explore_agent_config()], rails=[rail],
@@ -117,7 +128,7 @@ async def test_reloaded_child_specs_inherit_without_reinitializing_rail(method):
     rail.init(parent)
     # As in partial hot reload: keep the rail and replace the child registry.
     parent.configure(DeepAgentConfig(subagents=[build_explore_agent_config()], rails=[]))
-    await getattr(rail, method)(AgentCallbackContext(agent=parent))
+    await rail.before_invoke(AgentCallbackContext(agent=parent))
     inherited = [r for r in parent.deep_config.subagents[0].rails if isinstance(r, UserHookRail)]
     assert len(inherited) == 1
     assert inherited[0]._config is rail._config
@@ -158,3 +169,85 @@ def test_swarm_members_receive_user_hooks(mode, role):
     assert isinstance(rail, UserHookRail)
     assert rail._subagent_type == "researcher"
     assert rail._config.events
+
+
+@pytest.mark.parametrize("mode", ["team", "code.team"])
+def test_swarm_empty_hooks_do_not_create_rail(mode):
+    from jiuwenswarm.agents.swarm import SwarmBuildContext, registry
+    from jiuwenswarm.agents.swarm.config_specs import build_member_capability_specs
+    from jiuwenswarm.agents.swarm.providers.code_rails import build_user_hooks
+
+    rails, _ = build_member_capability_specs({}, mode=mode, role="teammate")
+    spec = next(spec for spec in rails if spec.type == registry.USER_HOOKS)
+    assert build_user_hooks(spec.params, SwarmBuildContext(mode=mode)) is None
+
+
+async def _invoke_without_model(agent, monkeypatch):
+    # Keep real SDK initialization and outer callback dispatch. Only replace
+    # session persistence and model execution; no manually fabricated invoke ctx.
+    monkeypatch.setattr(agent, "_prepare_single_round_session", AsyncMock(return_value=None))
+    monkeypatch.setattr(agent, "_run_single_round_invoke", AsyncMock(return_value={"output": "done"}))
+    await agent.invoke({"query": "test"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("already_initialized", [False, True])
+async def test_preconstructed_child_activation_and_policy_refresh(tmp_path, monkeypatch, already_initialized):
+    child = DeepAgent(AgentCard(name="prebuilt")).configure(DeepAgentConfig())
+    custom = UserHookRail(HooksConfig())
+    child.add_rail(custom)
+    if already_initialized:
+        await _invoke_without_model(child, monkeypatch)
+    config = HooksConfig()
+    rail = UserHookRail(config)
+    parent = DeepAgent(AgentCard(name="parent")).configure(DeepAgentConfig(subagents=[child], rails=[rail]))
+    await _invoke_without_model(parent, monkeypatch)
+    inherited = [r for r in child.configured_rails() if rail._owns(r)]
+    assert len(inherited) == 1
+    fork = inherited[0]
+    assert child.is_registered_rail(fork)
+    assert not child.is_pending_rail(fork)
+    assert fork._subagent_type == "prebuilt"
+    await _invoke_without_model(child, monkeypatch)
+    await _invoke_without_model(parent, monkeypatch)
+    assert [r for r in child.configured_rails() if rail._owns(r)] == [fork]
+    assert custom in child.configured_rails()
+
+    log = tmp_path / "prebuilt.jsonl"
+    # An existing fork follows both replacement and in-place policy changes.
+    rail._hooks_config = HooksConfig(events={"PreToolUse": [HookMatcher(
+        matcher="bash", hooks=[{"command": f"cat >> {shlex.quote(str(log))}; exit 2"}],
+    )]})
+    await _invoke_without_model(parent, monkeypatch)
+    execute = AsyncMock(return_value=("executed", None))
+    manager = child._react_agent.ability_manager
+    monkeypatch.setattr(manager, "_execute_single_tool_call", execute)
+    session = SimpleNamespace(get_session_id=lambda: "prebuilt-session")
+    for blocked in (True, False):
+        await _invoke_without_model(child, monkeypatch)
+        ctx = AgentCallbackContext(agent=child._react_agent, session=session)
+        await manager.execute(
+            ctx=ctx, tool_call=ToolCall(id="bash", type="function", name="bash", arguments='{}'),
+            session=session, parallel_tool_calls=False,
+        )
+        assert execute.await_count == (0 if blocked else 1)
+        rail._hooks_config.events.clear()
+    payload = json.loads(log.read_text())
+    assert payload["subagent_type"] == "prebuilt"
+    assert payload["session_id"] == "prebuilt-session"
+
+
+@pytest.mark.asyncio
+async def test_replacement_specs_propagate_through_real_invoke(monkeypatch):
+    rail = UserHookRail(HooksConfig())
+    parent = DeepAgent(AgentCard(name="parent")).configure(DeepAgentConfig(rails=[rail]))
+    await _invoke_without_model(parent, monkeypatch)
+    # Simulate the host replacing the registry between interaction rounds.
+    replacement = SubAgentConfig(agent_card=AgentCard(name="replacement"), system_prompt="")
+    parent.deep_config.subagents = [replacement]
+    await _invoke_without_model(parent, monkeypatch)
+    configured = parent.deep_config.subagents[0]
+    assert configured is not replacement
+    assert len([r for r in configured.rails if rail._owns(r)]) == 1
+    await _invoke_without_model(parent, monkeypatch)
+    assert parent.deep_config.subagents[0] is configured

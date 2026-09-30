@@ -797,6 +797,14 @@ If `config.yaml` has no hooks configured, displays `No hooks configured.` with a
 
 #### Hooks Concept Overview
 
+User-configured tool hooks also cover delegated sub-agent tool calls. Child hook
+input includes the child's `session_id` and `subagent_type`; unnamed swarm members
+use `"swarm_member"`. Child-specific hook rails are preserved alongside inherited
+hooks. Preconstructed children are activated before the parent's invocation,
+including children that were already initialized. Inherited rails follow their
+originating hook policy without sharing executor or blocking state. This does not
+add a configuration-file watcher or implement `SubagentStart`/`SubagentStop` dispatch.
+
 Hooks are extension logic that executes automatically when specific events fire. 17 events are supported:
 
 | Event | Execution Layer | Trigger |

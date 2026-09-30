@@ -36,15 +36,23 @@ class UserHookRail(DeepAgentRail):
 
     def __init__(self, hooks_config: HooksConfig, *, subagent_type: str = ""):
         super().__init__()
-        self._config = hooks_config
+        self._hooks_config = hooks_config
+        self._parent_hook: UserHookRail | None = None
         self._executor = HookExecutor()
         self._blocking_state: ContextVar[dict | None] = ContextVar("user_hook_blocking_state", default=None)
         self._is_subagent = False
         self._subagent_type = subagent_type
 
+    @property
+    def _config(self) -> HooksConfig:
+        # Follow the originating policy, including replacement and in-place
+        # updates, without sharing executors or per-invocation blocking state.
+        return self._parent_hook._config if self._parent_hook is not None else self._hooks_config
+
     def fork_for_agent(self) -> UserHookRail:
         """Keep executor, blocking state and agent identity private to each child."""
         child = UserHookRail(self._config)
+        child._parent_hook = self
         child._is_subagent = True
         return child
 
@@ -57,8 +65,9 @@ class UserHookRail(DeepAgentRail):
     def _propagate_hooks(self, agent) -> None:
         """Propagate session hooks after all subagent providers are resolved.
 
-        Copy specs and rail lists so parents that reuse a spec stay isolated.
-        Each child repeats this step for its own descendants.
+        Copy only changed specs. Parent ownership preserves custom child hooks
+        and keeps unchanged specs/executors stable. This is a host workaround
+        until the SDK provides an inherited-rail/child-creation extension point.
         """
         config = getattr(agent, "deep_config", None)
         if config is None:
@@ -66,17 +75,35 @@ class UserHookRail(DeepAgentRail):
         specs = []
         for spec in config.subagents or []:
             if isinstance(spec, SubAgentConfig):
-                # Refresh inherited policy too when the parent reloads hooks.
-                rails = [rail for rail in spec.rails or [] if not isinstance(rail, UserHookRail)]
-                rails.append(self.fork_for_agent())
-                specs.append(replace(spec, rails=rails))
+                rails = spec.rails or []
+                if any(self._owns(rail) for rail in rails):
+                    specs.append(spec)
+                else:
+                    specs.append(replace(spec, rails=[*rails, self.fork_for_agent()]))
             else:
                 # The SDK also accepts preconstructed DeepAgent children.
-                if not any(isinstance(rail, UserHookRail) for rail in spec.configured_rails()):
+                # Activate queued forks through the public async API before
+                # delegation, even if this child was already initialized.
+                if not any(self._owns(rail) for rail in spec.configured_rails()):
                     spec.add_rail(self.fork_for_agent())
                 specs.append(spec)
-        if config.subagents is not None:
+        if config.subagents is not None and any(a is not b for a, b in zip(config.subagents, specs)):
             config.subagents = specs
+
+    def _owns(self, rail) -> bool:
+        return isinstance(rail, UserHookRail) and rail._parent_hook is self
+
+    async def _activate_child_hooks(self, agent) -> None:
+        config = getattr(agent, "deep_config", None)
+        for child in getattr(config, "subagents", None) or []:
+            if isinstance(child, SubAgentConfig):
+                continue
+            for rail in child.configured_rails():
+                if self._owns(rail) and child.is_pending_rail(rail):
+                    # register_rail initializes once and routes tool callbacks
+                    # to the inner agent. Remove the queue entry only on success.
+                    await child.register_rail(rail)
+                    child.remove_pending_rail(rail)
 
     def _identity(self, ctx: AgentCallbackContext) -> dict[str, str]:
         identity = {"session_id": self._session_id(ctx)}
@@ -96,6 +123,7 @@ class UserHookRail(DeepAgentRail):
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
         self._propagate_hooks(getattr(ctx, "agent", None))
+        await self._activate_child_hooks(getattr(ctx, "agent", None))
         # HITL resumes execute tools before any model call. ContextVar also
         # bridges DeepAgent's outer callbacks to its inner ReAct/tool tasks,
         # while keeping concurrent invocations isolated.
@@ -106,9 +134,6 @@ class UserHookRail(DeepAgentRail):
             ctx.extra[_PENDING_GOAL_KEY] = ctx.session.get_state(_PENDING_GOAL_KEY)
 
     async def before_task_iteration(self, ctx: AgentCallbackContext) -> None:
-        # Partial hot reload retains this rail but can replace the child specs;
-        # persistent interaction loops need not call init again before tools.
-        self._propagate_hooks(getattr(ctx, "agent", None))
         self._blocking_state.set({})
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
