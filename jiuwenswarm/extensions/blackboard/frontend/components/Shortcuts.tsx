@@ -9,7 +9,8 @@ import { FormDialog } from '../../../../channels/web/frontend/src/components/for
 import type { DocView } from '../types';
 
 export interface ShortcutActions {
-  togglePanel: (index: number) => void;
+  // A panel by its icon's place: shown alone, or with `split` added to (or taken from) the split.
+  showPanel: (index: number, split: boolean) => void;
   toggleSidebar: () => void;
   toggleDock: () => void;
   toggleChat: () => void;
@@ -21,6 +22,7 @@ export interface ShortcutActions {
 // What the "?" list shows, in order: [keys, label key].
 export const SHORTCUTS: Array<[string, string]> = [
   ['Ctrl+Alt+1 ... 7', 'blackboard.shortcuts.panel'],
+  ['Ctrl+Alt+Shift+1 ... 7', 'blackboard.shortcuts.splitPanel'],
   ['Ctrl+Alt+S', 'blackboard.shortcuts.sidebar'],
   ['Ctrl+Alt+B', 'blackboard.shortcuts.dock'],
   ['Ctrl+Alt+J', 'blackboard.shortcuts.chat'],
@@ -46,11 +48,14 @@ export function useShortcuts(actions: ShortcutActions, enabled: boolean): void {
     const onKey = (event: KeyboardEvent) => {
       const a = latest.current;
       if (event.defaultPrevented || event.metaKey) return;
-      if (event.ctrlKey && event.altKey && !event.shiftKey && !event.getModifierState?.('AltGraph')) {
+      if (event.ctrlKey && event.altKey && !event.getModifierState?.('AltGraph')) {
         const digit = /^Digit([1-9])$/.exec(event.code);
+        const letters: Record<string, () => void> = { KeyS: a.toggleSidebar, KeyB: a.toggleDock, KeyJ: a.toggleChat, KeyN: a.newDoc, KeyO: a.goToDoc };
         const run: (() => void) | undefined = digit
-          ? () => a.togglePanel(Number(digit[1]) - 1)
-          : { KeyS: a.toggleSidebar, KeyB: a.toggleDock, KeyJ: a.toggleChat, KeyN: a.newDoc, KeyO: a.goToDoc }[event.code];
+          ? () => a.showPanel(Number(digit[1]) - 1, event.shiftKey)
+          : event.shiftKey
+            ? undefined
+            : letters[event.code];
         if (run) {
           event.preventDefault();
           run();

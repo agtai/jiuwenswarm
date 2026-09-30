@@ -18,6 +18,8 @@ import { classifyPrompt } from '../InteractionSlot/promptRouting';
 
 interface InlineQuestionCardProps {
   onSubmit: (requestId: string, answers: UserAnswer[], source?: string) => Promise<boolean>;
+  // The session whose question to show; the open one when left out.
+  sessionId?: string;
 }
 
 // 后端会给带选项的问题末尾追加一个「自定义输入」选项（interrupt_helpers._build_multi_questions）。
@@ -126,10 +128,11 @@ function PlanApprovalActions({
   );
 }
 
-export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
+export function InlineQuestionCard({ onSubmit, sessionId }: InlineQuestionCardProps) {
   const { t } = useTranslation();
   const activeSessionId = useChatStore((s) => s.activeSessionId);
-  const pendingQuestion = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.pendingQuestions[0] ?? null);
+  const sid = sessionId ?? activeSessionId;
+  const pendingQuestion = useChatStore((s) => s.runtimes[sid ?? '']?.pendingQuestions[0] ?? null);
   const [selections, setSelections] = useState<Map<number, string>>(new Map());
   const [customInputs, setCustomInputs] = useState<Map<number, string>>(new Map());
   const [submitted, setSubmitted] = useState(false);

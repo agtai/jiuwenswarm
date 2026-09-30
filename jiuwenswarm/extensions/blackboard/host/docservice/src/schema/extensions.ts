@@ -39,10 +39,11 @@ export function newBlockId(): string {
 
 // Authors are shown in one of this many colors (the browser's avatar palette).
 export const AUTHOR_COLORS = 6
-export function authorColorIndex(id: string): number {
+// An agent's text has its owner's id, so it takes another color than the owner's own text.
+export function authorColorIndex(id: string, kind?: string): number {
   let hash = 0
   for (let i = 0; i < id.length; i += 1) hash = (hash * 31 + id.charCodeAt(i)) >>> 0
-  return (hash % AUTHOR_COLORS) + 1
+  return ((hash + (kind === 'agent' ? AUTHOR_COLORS / 2 : 0)) % AUTHOR_COLORS) + 1
 }
 
 // Who wrote a range of text: one author per character (default `excludes`). With `excludes: ''`
@@ -52,7 +53,7 @@ export const AuthorMark = Mark.create({
   inclusive: false,
   addAttributes() {
     return {
-      id: { default: null, parseHTML: (el: HTMLElement) => el.getAttribute('data-author'), renderHTML: (a: any) => (a.id ? { 'data-author': a.id, 'data-author-color': authorColorIndex(a.id) } : {}) },
+      id: { default: null, parseHTML: (el: HTMLElement) => el.getAttribute('data-author'), renderHTML: (a: any) => (a.id ? { 'data-author': a.id, 'data-author-color': authorColorIndex(a.id, a.kind) } : {}) },
       kind: { default: 'person', parseHTML: (el: HTMLElement) => el.getAttribute('data-author-kind'), renderHTML: (a: any) => ({ 'data-author-kind': a.kind }) },
       mandate: { default: null, parseHTML: (el: HTMLElement) => el.getAttribute('data-mandate'), renderHTML: (a: any) => (a.mandate ? { 'data-mandate': a.mandate } : {}) },
     }

@@ -436,6 +436,7 @@ export function BlackboardPage() {
         onLoadAttachable={() => controller.attachableSessions().catch((error) => (report(error), []))}
         onAttach={(sessionId) => controller.attachSession(sessionId).catch(report)}
         onChat={openChat}
+        onRename={(sessionId, title) => controller.renameSession(sessionId, title).catch(rethrow)}
         onOpen={(sessionId) => controller.openSession(sessionId)}
         onDetach={(sessionId) => void controller.detachSession(sessionId).catch(report)}
         onCancel={askCancelMandate}
@@ -474,14 +475,18 @@ export function BlackboardPage() {
 
   useShortcuts(
     {
-      togglePanel: (index) => {
+      showPanel: (index, split) => {
         const tab = RAIL_ORDER[index];
         if (!tab) return;
         if (layout.dockHidden) {
           updateLayout({ dockHidden: false });
-          controller.selectRail(tab);
+          if (!state.panels.includes(tab)) controller.showPanel(tab);
+        } else if (!split) {
+          controller.showPanel(tab);
+        } else if (state.panels.includes(tab)) {
+          controller.closePanel(tab);
         } else {
-          controller.togglePanel(tab);
+          controller.movePanel(tab, state.panels.length);
         }
       },
       toggleSidebar: () => updateLayout({ sidebarHidden: !layout.sidebarHidden }),
@@ -591,13 +596,13 @@ export function BlackboardPage() {
                 panels={dockPanels}
                 open={state.panels}
                 active={state.rail}
-                onClose={(tab) => controller.togglePanel(tab)}
+                onClose={(tab) => controller.closePanel(tab)}
                 onMove={(tab, index) => controller.movePanel(tab, index)}
               />
               <ActivityBar
                 panels={dockPanels}
                 open={state.panels}
-                onToggle={(tab) => controller.togglePanel(tab)}
+                onShow={(tab) => controller.showPanel(tab)}
                 onHelp={() => setHelp(true)}
               />
             </>
@@ -607,8 +612,12 @@ export function BlackboardPage() {
 
       {workspace ? (
         <AgentChat
+          workspace={workspace}
+          doc={doc}
           titles={(id) => state.sessionTitles[id] ?? t('blackboard.agentChat.untitled')}
           onOpenFull={(id) => controller.openSession(id)}
+          onRename={(id, title) => controller.renameSession(id, title).catch(rethrow)}
+          onNew={editable ? () => controller.startAgentSession().then(openChat, report) : null}
         />
       ) : null}
       <DocSwitcher open={switcher} docs={state.docs} onPick={(id) => controller.selectDoc(id)} onClose={() => setSwitcher(false)} />

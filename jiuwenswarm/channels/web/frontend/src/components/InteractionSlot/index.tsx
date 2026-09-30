@@ -19,12 +19,15 @@ import './InteractionSlot.css';
 
 interface InteractionSlotProps {
   onSubmit: (requestId: string, answers: UserAnswer[], source?: string) => Promise<boolean>;
+  // The session whose question to show; the open one when left out.
+  sessionId?: string;
 }
 
-export function InteractionSlot({ onSubmit }: InteractionSlotProps) {
+export function InteractionSlot({ onSubmit, sessionId }: InteractionSlotProps) {
   const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const sid = sessionId ?? activeSessionId;
   const pending = useChatStore(
-    (s) => s.runtimes[activeSessionId ?? '']?.pendingQuestions[0] ?? null,
+    (s) => s.runtimes[sid ?? '']?.pendingQuestions[0] ?? null,
   );
 
   const kind = classifyPrompt(pending);
@@ -44,7 +47,7 @@ export function InteractionSlot({ onSubmit }: InteractionSlotProps) {
       {isAuth ? (
         <AuthorizationPrompt pending={pending} onSubmit={onSubmit} />
       ) : (
-        <InteractionPrompt pending={pending} onSubmit={onSubmit} />
+        <InteractionPrompt pending={pending} onSubmit={onSubmit} sessionId={sid ?? undefined} />
       )}
     </div>
   );

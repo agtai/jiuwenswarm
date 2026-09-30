@@ -166,6 +166,7 @@ import {
 } from './features/modelSetupGuide/ModelSetupGuide';
 import { isSetupGuideEnabled } from './features/modelSetupGuide/modelSetupGuideState';
 import { isTeamAgentMode } from './features/planMode/wireMode';
+import { registerSessionAnswerHandler } from './features/sessionAnswers';
 import {
   SingleAgentSurface,
   type ChatSurfaceView,
@@ -3148,6 +3149,8 @@ function AppContent({
     }
     return sendUserAnswer(currentSessionId, requestId, answers, source);
   }, [sendUserAnswer]);
+
+  useEffect(() => registerSessionAnswerHandler(sendUserAnswer), [sendUserAnswer]);
 
   const handleLoadMoreHistory = useCallback(async () => {
     const sid = sessionId;

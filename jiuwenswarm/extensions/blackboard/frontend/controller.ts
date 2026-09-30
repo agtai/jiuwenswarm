@@ -153,13 +153,18 @@ export interface SessionPort {
   create: (title: string) => Promise<string>;
   open: (sessionId: string) => void;
   recent: () => Promise<Array<{ session_id: string; title: string }>>;
+  // Renames the chat the way the app's sidebar does; resolves to the name it kept.
+  rename: (sessionId: string, title: string) => Promise<string>;
 }
 
 const NO_SESSIONS: SessionPort = {
   create: () => Promise.reject(new Error('sessions are not available here')),
   open: () => undefined,
   recent: () => Promise.resolve([]),
+  rename: () => Promise.reject(new Error('sessions are not available here')),
 };
+
+export const MAX_SESSION_TITLE = 100;
 
 // What the page was showing, kept so it opens on the same place next time.
 export type Selection = Pick<BlackboardState, 'hostId' | 'workspaceId' | 'docId' | 'rail' | 'panels'>;
@@ -176,9 +181,12 @@ function selectionOf(state: BlackboardState): Selection {
   return { hostId: state.hostId, workspaceId: state.workspaceId, docId: state.docId, rail: state.rail, panels: state.panels };
 }
 
-// A panel opened (at the bottom of the stack, if it was closed) and made the one asked for.
+// A panel the page asks for (a comment, a version, the agents) and made the current one. A closed
+// panel takes the place of the current one, so the person's split stays as they made it.
 function withPanel(state: BlackboardState, tab: RailTab): Pick<BlackboardState, 'rail' | 'panels'> {
-  return { rail: tab, panels: state.panels.includes(tab) ? state.panels : [...state.panels, tab] };
+  if (state.panels.includes(tab)) return { rail: tab, panels: state.panels };
+  const at = state.panels.indexOf(state.rail);
+  return { rail: tab, panels: at >= 0 ? state.panels.map((p, i) => (i === at ? tab : p)) : [tab] };
 }
 
 function restored(saved: Partial<Selection> | null): Partial<BlackboardState> {
@@ -394,6 +402,14 @@ export class BlackboardController {
     }
   }
 
+  // A new name for one of the person's chats; the app's own list follows.
+  async renameSession(sessionId: string, title: string): Promise<void> {
+    const wanted = title.replace(/\s+/g, ' ').trim().slice(0, MAX_SESSION_TITLE);
+    if (!wanted) throw new Error('A session needs a name');
+    const kept = await this.sessionPort.rename(sessionId, wanted);
+    this.set({ sessionTitles: { ...this.state.sessionTitles, [sessionId]: kept || wanted } });
+  }
+
   // The app names a chat after its first message; the Agents tab shows those names.
   async refreshSessionTitles(): Promise<void> {
     try {
@@ -467,19 +483,24 @@ export class BlackboardController {
     this.set(withPanel(this.state, rail));
   }
 
-  // The activity bar's icons: open a closed panel, close an open one.
-  togglePanel(tab: RailTab): void {
-    if (!this.state.panels.includes(tab)) return this.selectRail(tab);
+  // The activity bar's icons: show only this panel; when it is already the only one, close it.
+  showPanel(tab: RailTab): void {
+    if (this.state.panels.length === 1 && this.state.panels[0] === tab) return this.closePanel(tab);
+    this.set({ panels: [tab], rail: tab });
+  }
+
+  closePanel(tab: RailTab): void {
     const panels = this.state.panels.filter((p) => p !== tab);
     this.set({ panels, rail: this.state.rail === tab && panels.length ? panels[panels.length - 1] : this.state.rail });
   }
 
-  // Put an open panel at `index` in the stack (dragging its header, or Alt+Up and Alt+Down).
+  // Put a panel at `index` in the stack: an open one moves (dragging its header, Alt+Up and
+  // Alt+Down), a closed one joins the split (dragging its icon onto the panels).
   movePanel(tab: RailTab, index: number): void {
     const rest = this.state.panels.filter((p) => p !== tab);
-    if (rest.length === this.state.panels.length) return;
+    const adding = rest.length === this.state.panels.length;
     const at = Math.max(0, Math.min(rest.length, index));
-    this.set({ panels: [...rest.slice(0, at), tab, ...rest.slice(at)] });
+    this.set({ panels: [...rest.slice(0, at), tab, ...rest.slice(at)], ...(adding ? { rail: tab } : {}) });
   }
 
   // Show a workspace's agents, as when someone follows a chat's Blackboard tag. The page loads it

@@ -207,7 +207,6 @@
       "archived": "已归档",
       "authors": "作者",
       "noAuthors": "暂无文字。",
-      "agent": "（智能体）",
       "toolbar": "格式",
       "tools": {
         "undo": "撤销",
@@ -274,6 +273,8 @@
       "uploaded": "已上传 {{name}}。"
     },
     "agents": {
+      "rename": "重命名",
+      "renameLabel": "会话名称",
       "tab": "智能体",
       "intro": "让智能体处理这个工作区。它的修改以建议的形式出现，由编辑者接受或拒绝。",
       "start": "新建智能体会话",
@@ -455,6 +456,7 @@
       "enable": "启用"
     },
     "layout": {
+      "splitHint": "拖到面板上可同时显示两个面板",
       "panels": "面板",
       "hidePanels": "隐藏面板",
       "showPanels": "显示面板",
@@ -469,14 +471,15 @@
       "resizeSidebar": "调整侧边栏宽度"
     },
     "agentChat": {
+      "renameHint": "双击可重命名",
+      "newSession": "新建智能体会话",
+      "resize": "调整对话框大小",
       "title": "智能体对话",
       "untitled": "新对话",
       "loading": "正在加载对话...",
       "empty": "可以向{{title}}询问此工作区的任何问题。它的修改会以建议的形式出现。",
       "working": "处理中...",
       "usingTool": "处理中：{{tool}}",
-      "question": "智能体正在等待你的回答。",
-      "answer": "在对话页面中回答",
       "placeholder": "给智能体发消息",
       "send": "发送",
       "stop": "停止",
@@ -486,8 +489,9 @@
       "noSession": "请先在智能体面板中开始一个智能体会话。"
     },
     "shortcuts": {
+      "splitPanel": "将面板加入右侧分屏，或从中移除",
       "title": "键盘快捷键",
-      "panel": "按图标顺序打开或关闭右侧面板",
+      "panel": "在右侧只显示一个面板（按图标顺序）",
       "sidebar": "显示或隐藏侧边栏",
       "dock": "显示或隐藏右侧面板",
       "chat": "显示或隐藏智能体对话",

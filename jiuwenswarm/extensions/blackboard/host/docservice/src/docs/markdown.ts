@@ -70,7 +70,12 @@ export function viewJSON(json: Json, view: View): Json | null {
       copy.text = (copy.text || '').replace(ZWSP, '')
       return copy.text ? copy : null
     }
-    if (copy.content) copy.content = copy.content.map(walk).filter((n): n is Json => n !== null)
+    if (copy.content) {
+      copy.content = copy.content.map(walk).filter((n): n is Json => n !== null)
+      // A list item or quote whose every child is left out of this view is left out too.
+      const inline = (node.content || []).some((c) => c.type === 'text' || c.type === 'hardBreak')
+      if (!copy.content.length && node.content?.length && !inline) return null
+    }
     return copy
   }
   return walk(json)

@@ -130,12 +130,14 @@ function snapToWords(a: Fragment, b: Fragment, start: number, endA: number, endB
   return { start, endA, endB }
 }
 
-// The same content without author marks, for comparing text written by different people.
-function withoutAuthors(fragment: Fragment): Fragment {
+// The same content without author marks and block ids, for comparing text written by different
+// people (a parsed replacement has fresh ids at every depth).
+function plain(fragment: Fragment): Fragment {
   const nodes: PMNode[] = []
   fragment.forEach((node) => {
     const marks = node.marks.filter((m) => m.type.name !== 'author')
-    nodes.push(node.isText ? node.mark(marks) : node.type.create(node.attrs, withoutAuthors(node.content), marks))
+    const attrs = 'id' in node.attrs ? { ...node.attrs, id: null } : node.attrs
+    nodes.push(node.isText ? node.mark(marks) : node.type.create(attrs, plain(node.content), marks))
   })
   return Fragment.fromArray(nodes)
 }
@@ -144,9 +146,10 @@ function withoutAuthors(fragment: Fragment): Fragment {
 // suggestion shows what changed and the block keeps its id. The comparison ignores who wrote the
 // old text; the new words come in with the agent's author mark.
 function replaceInside(tr: Transaction, from: number, old: PMNode, replacement: PMNode): void {
+  if (!old.isTextblock) return replaceChildren(tr, from, old, replacement)
   const next = old.type.create(old.attrs, replacement.content, old.marks)
-  const a = withoutAuthors(old.content)
-  const b = withoutAuthors(next.content)
+  const a = plain(old.content)
+  const b = plain(next.content)
   const start = a.findDiffStart(b)
   if (start == null) return
   const end = a.findDiffEnd(b)!
@@ -157,8 +160,34 @@ function replaceInside(tr: Transaction, from: number, old: PMNode, replacement: 
     endA += overlap
     endB += overlap
   }
-  const snapped = old.isTextblock ? snapToWords(a, b, start, endA, endB) : { start, endA, endB }
+  const snapped = snapToWords(a, b, start, endA, endB)
   tr.replace(from + 1 + snapped.start, from + 1 + snapped.endA, next.slice(snapped.start, snapped.endB))
+}
+
+// A list, quote or table, child by child: the children equal on both sides keep their place and
+// ids, and the changed run between them is replaced whole; when that run is one child on each
+// side, of the same kind, it is compared inside, so a reworded list item suggests only its words.
+// A diff by position would cut across list items and leave items no view can show.
+function replaceChildren(tr: Transaction, from: number, old: PMNode, replacement: PMNode): void {
+  const a: PMNode[] = []
+  const b: PMNode[] = []
+  old.forEach((node) => a.push(node))
+  replacement.forEach((node) => b.push(node))
+  const same = (x: PMNode, y: PMNode) => plain(Fragment.from(x)).eq(plain(Fragment.from(y)))
+  let head = 0
+  while (head < a.length && head < b.length && same(a[head], b[head])) head++
+  let tail = 0
+  while (tail < a.length - head && tail < b.length - head && same(a[a.length - 1 - tail], b[b.length - 1 - tail])) tail++
+  const oldRun = a.slice(head, a.length - tail)
+  const newRun = b.slice(head, b.length - tail)
+  if (!oldRun.length && !newRun.length) return
+  const start = a.slice(0, head).reduce((pos, node) => pos + node.nodeSize, from + 1)
+  if (oldRun.length === 1 && newRun.length === 1 && sameMarkup(oldRun[0], newRun[0])) {
+    replaceInside(tr, start, oldRun[0], newRun[0])
+    return
+  }
+  const end = oldRun.reduce((pos, node) => pos + node.nodeSize, start)
+  tr.replaceWith(start, end, Fragment.fromArray(newRun))
 }
 
 // Check the batch against `doc` and build the new document. Throws EditError, writing nothing.
@@ -260,9 +289,18 @@ export function planEdit(doc: PMNode, req: EditRequest): { doc: PMNode; result: 
 
   const wanted = new Set([...touchedIds, ...inserted])
   const after: BlockText[] = []
-  next.forEach((node) => {
-    if (node.attrs.id && wanted.has(node.attrs.id)) after.push(text(blockInfo(node)))
-  })
+  try {
+    next.forEach((node) => {
+      if (node.attrs.id && wanted.has(node.attrs.id)) after.push(text(blockInfo(node)))
+    })
+  } catch (error) {
+    // Nothing is written: a suggestion the views cannot show is refused, not stored.
+    throw new EditError(
+      'unsupported_edit',
+      'this change cannot be shown as a suggestion; replace the block with insert_after and delete instead',
+      { detail: error instanceof Error ? error.message : String(error) },
+    )
+  }
   return { doc: next, result: { changed: true, suggestionIds, before: beforeList, after } }
 }
 

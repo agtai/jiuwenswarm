@@ -351,6 +351,8 @@ class SessionTools:
         else:
             params.update(session_id=self.session_id, turn_id=self.turn_id)
         result = await self._call(ws, p.EDIT, params, timeout=EDIT_TIMEOUT_S)
+        if result.get("changed") is False:
+            return {**result, "message": "Nothing changed: the Markdown you sent equals the current text of these blocks."}
         return {
             **result,
             "message": "Your changes are suggestions now; the people in the workspace accept or reject them. When you are done, sum up what you suggested in one or two short sentences.",
@@ -424,8 +426,15 @@ class SessionTools:
         if self.workspaces and self.access.kind == "member":
             titles = ", ".join(f'"{w.title}" ({w.workspace_id})' if w.title else w.workspace_id for w in self.workspaces)
             scope = f"This session works on {titles}, and can edit only those; other workspaces it can only read. "
+            # Without this the model looks for "the section on X" in local files.
+            where = (
+                f"This session works on {titles}. When the person mentions a document, section, heading or passage "
+                "without saying where it is, it is in there: find it with this tool and blackboard_read before "
+                "anything else. These are Blackboard documents, not files on this computer. "
+            )
         else:
             scope = "Reading only: changing a workspace needs a web chat session attached to it. "
+            where = ""
         workspace = self._workspace_param()
         return [
             ToolSpec(
@@ -436,8 +445,8 @@ class SessionTools:
             ),
             ToolSpec(
                 "blackboard_list_docs",
-                "List a workspace's documents. Each workspace's instructions document says what it is for and how to "
-                f"write there; read it before you edit anything in that workspace. {NAMING}",
+                f"{where}List a workspace's documents. Each workspace's instructions document says what it is for and "
+                f"how to write there; read it before you edit anything in that workspace. {NAMING}",
                 {"type": "object", "properties": {"workspace": workspace}},
                 self._safe(self.list_docs, ("workspace",)),
             ),
@@ -511,7 +520,9 @@ class SessionTools:
             "someone else's pending suggestions cannot be replaced or deleted until they are accepted or rejected "
             "(pending_suggestions: tell the person, do not retry); your own pending suggestions in a block are "
             "replaced by your new text. If the document is busy, or someone stopped this run (no_mandate), say so "
-            "and stop. Edits become suggestions that people accept or reject.",
+            "and stop. Edits become suggestions that people accept or reject. Limits on what you may edit come back "
+            "only as read_only, out_of_scope or no_mandate; internal is a fault on the host (try once more at most, "
+            "then tell the person), and unsupported_edit means to use insert_after and delete instead of replace.",
             {
                 "type": "object",
                 "properties": {

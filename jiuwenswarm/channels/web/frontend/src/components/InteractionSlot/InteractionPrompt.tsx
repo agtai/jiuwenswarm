@@ -37,6 +37,8 @@ const CANCELLED_ANSWER_TEXT = '用户已取消本次问答，未作答。';
 interface InteractionPromptProps {
   pending: AskUserQuestionPayload;
   onSubmit: (requestId: string, answers: UserAnswer[], source?: string) => Promise<boolean>;
+  // The session the answers echo into; the open one when left out.
+  sessionId?: string;
 }
 
 interface PageState {
@@ -56,7 +58,7 @@ function emptyPage(): PageState {
   return { selected: [], custom: '', customActive: false };
 }
 
-export function InteractionPrompt({ pending, onSubmit }: InteractionPromptProps) {
+export function InteractionPrompt({ pending, onSubmit, sessionId }: InteractionPromptProps) {
   const { t } = useTranslation();
   const addMessage = useChatStore((s) => s.addMessage);
   const isSwarmflowHuman = pending.source === 'swarmflow_human';
@@ -195,7 +197,7 @@ export function InteractionPrompt({ pending, onSubmit }: InteractionPromptProps)
       if (submitting) return;
       setSubmitting(true);
       if (withEcho) {
-        const sid = useChatStore.getState().activeSessionId;
+        const sid = sessionId ?? useChatStore.getState().activeSessionId;
         if (sid) {
           const message: Message = {
             id: `qa-summary-${pending.request_id || Date.now()}`,
@@ -212,7 +214,7 @@ export function InteractionPrompt({ pending, onSubmit }: InteractionPromptProps)
         pending.source,
       ).finally(() => setSubmitting(false));
     },
-    [submitting, pending, buildSummary, buildAnswers, addMessage, onSubmit],
+    [submitting, pending, buildSummary, buildAnswers, addMessage, onSubmit, sessionId],
   );
 
   const goPrev = useCallback(() => setPage((p) => Math.max(0, p - 1)), []);

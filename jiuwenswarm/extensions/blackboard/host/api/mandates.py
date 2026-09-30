@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from jiuwenswarm.extensions.blackboard.common import protocol as p
-from jiuwenswarm.extensions.blackboard.common.errors import BUSY, CONFLICT, FORBIDDEN, BlackboardError, invalid, not_found
+from jiuwenswarm.extensions.blackboard.common.errors import BUSY, CONFLICT, FORBIDDEN, INTERNAL, BlackboardError, invalid, not_found
 from jiuwenswarm.extensions.blackboard.common.roles import role_at_least
 from jiuwenswarm.extensions.blackboard.host import validation as v
 from jiuwenswarm.extensions.blackboard.host.api.access import require_member
@@ -353,7 +353,14 @@ async def edit(call: Call) -> dict[str, Any]:
                 mandates.touch(c, mandate.id),
             )
         )
-        raise BlackboardError(exc.code, exc.message, {**exc.details, "mandate_id": mandate.id, "receipt_id": receipt.id}) from exc
+        message = exc.message
+        if exc.code == INTERNAL:
+            # Said plainly, so an agent neither retries forever nor invents a scope problem.
+            message = (
+                "Blackboard failed on this edit: a fault on the host, not a permission or scope problem. "
+                "Try once more at most; if it fails again, tell the person the edit could not be applied."
+            )
+        raise BlackboardError(exc.code, message, {**exc.details, "mandate_id": mandate.id, "receipt_id": receipt.id}) from exc
 
     def applied(conn: sqlite3.Connection):
         mandates.touch(conn, mandate.id)

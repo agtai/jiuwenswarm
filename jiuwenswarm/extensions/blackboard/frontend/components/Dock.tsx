@@ -1,6 +1,7 @@
 // The right side of the page, as in an IDE: a bar of icons on the edge, and the panels they open
-// stacked beside it. Several panels can be open at once; each can be folded to its header, closed,
-// dragged to another place in the stack, and given more or less of the height.
+// beside it. An icon shows its panel alone; dragging an icon onto a panel splits the side, so
+// several panels stack. Each can be folded to its header, closed, dragged to another place in the
+// stack, and given more or less of the height.
 import { useEffect, useRef, useState, type DragEvent, type KeyboardEvent, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChevronDown, ChevronRight, GripVertical, Keyboard, PanelRightClose, PanelRightOpen, X, type LucideIcon } from 'lucide-react';
@@ -27,12 +28,12 @@ const DRAG_TYPE = 'application/x-blackboard-panel';
 export function ActivityBar({
   panels,
   open,
-  onToggle,
+  onShow,
   onHelp,
 }: {
   panels: DockPanel[];
   open: RailTab[];
-  onToggle: (id: RailTab) => void;
+  onShow: (id: RailTab) => void;
   onHelp: () => void;
 }) {
   const { t } = useTranslation();
@@ -43,7 +44,7 @@ export function ActivityBar({
       {panels.map((panel) => {
         const Icon = panel.icon;
         const isOpen = shown && open.includes(panel.id);
-        const tip = panel.shortcut ? `${panel.label} (${panel.shortcut})` : panel.label;
+        const tip = `${panel.shortcut ? `${panel.label} (${panel.shortcut})` : panel.label}\n${t('blackboard.layout.splitHint')}`;
         return (
           <button
             key={panel.id}
@@ -53,14 +54,19 @@ export function ActivityBar({
             aria-label={panel.label}
             title={tip}
             data-testid={`blackboard-rail-tab-${panel.id}`}
+            draggable={shown}
+            onDragStart={(event) => {
+              event.dataTransfer.setData(DRAG_TYPE, panel.id);
+              event.dataTransfer.effectAllowed = 'move';
+            }}
             onClick={() => {
-              // With the panels hidden, an icon shows them again with its panel open.
+              // With the panels hidden, an icon shows them again, with its panel.
               if (!shown) {
                 updateLayout({ dockHidden: false });
-                if (!open.includes(panel.id)) onToggle(panel.id);
+                if (!open.includes(panel.id)) onShow(panel.id);
                 return;
               }
-              onToggle(panel.id);
+              onShow(panel.id);
             }}
           >
             <Icon size={18} aria-hidden />
@@ -109,6 +115,7 @@ export function Dock({
   // The panel last asked for: it comes into view, unfolded.
   active: RailTab;
   onClose: (id: RailTab) => void;
+  // Moves an open panel, or adds a closed one (its icon dropped here) to the split.
   onMove: (id: RailTab, index: number) => void;
 }) {
   const { t } = useTranslation();
@@ -189,19 +196,29 @@ export function Dock({
           const folded = collapsed(panel.id);
           const lower = nextOpen(index);
           return (
+            // A panel or an icon dropped on the upper half of a panel goes above it, on the lower half below.
             <section
               key={panel.id}
               ref={(el) => {
                 if (el) sections.current.set(panel.id, el);
                 else sections.current.delete(panel.id);
               }}
-              className={`bb-dock__panel is-${panel.id}${folded ? ' is-folded' : ''}${active === panel.id ? ' is-current' : ''}`}
+              className={`bb-dock__panel is-${panel.id}${folded ? ' is-folded' : ''}${active === panel.id ? ' is-current' : ''}${dropAt === index ? ' is-drop-before' : ''}${dropAt === index + 1 ? ' is-drop-after' : ''}`}
               style={{ flex: folded ? '0 0 auto' : `${weight(panel.id)} 1 0` }}
               data-testid="blackboard-dock-panel"
               data-variant={panel.id}
+              onDragOver={(event) => {
+                if (!event.dataTransfer.types.includes(DRAG_TYPE)) return;
+                event.preventDefault();
+                setDropAt(dropIndex(event, index));
+              }}
+              onDragLeave={(event) => {
+                if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropAt(null);
+              }}
+              onDrop={(event) => drop(event, index)}
             >
               <header
-                className={`bb-dock__head${dropAt === index ? ' is-drop-before' : ''}${dropAt === index + 1 ? ' is-drop-after' : ''}`}
+                className="bb-dock__head"
                 draggable
                 tabIndex={0}
                 title={t('blackboard.layout.moveHint')}
@@ -209,13 +226,6 @@ export function Dock({
                   event.dataTransfer.setData(DRAG_TYPE, panel.id);
                   event.dataTransfer.effectAllowed = 'move';
                 }}
-                onDragOver={(event) => {
-                  if (!event.dataTransfer.types.includes(DRAG_TYPE)) return;
-                  event.preventDefault();
-                  setDropAt(dropIndex(event, index));
-                }}
-                onDragLeave={() => setDropAt(null)}
-                onDrop={(event) => drop(event, index)}
                 onDragEnd={() => setDropAt(null)}
                 onKeyDown={(event) => headerKeys(event, panel.id, index)}
                 onDoubleClick={() => setCollapsed(panel.id, !folded)}

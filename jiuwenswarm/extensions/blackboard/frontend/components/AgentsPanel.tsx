@@ -1,9 +1,11 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Ban, Bot, Check, CircleCheck, CircleX, ExternalLink, Link2, MessageSquare, Unlink, X } from 'lucide-react';
+import { Ban, Bot, Check, CircleCheck, CircleX, ExternalLink, Link2, MessageSquare, Pencil, Unlink, X } from 'lucide-react';
 
 import { Button, Select, Tag } from '../../../../channels/web/frontend/src/components/ui';
 import type { DocView, MandateView, SessionAttachmentView } from '../types';
+import { MAX_SESSION_TITLE } from '../controller';
+import { InlineRename } from './InlineRename';
 import { ACTIVE, TaskTag } from './tasks';
 
 export function AgentsPanel({
@@ -17,6 +19,7 @@ export function AgentsPanel({
   onLoadAttachable,
   onAttach,
   onChat,
+  onRename,
   onOpen,
   onDetach,
   onCancel,
@@ -35,6 +38,8 @@ export function AgentsPanel({
   onAttach: (sessionId: string) => Promise<void>;
   // Talk to the session in the chat box over the page; onOpen goes to the app's chat instead.
   onChat: (sessionId: string) => void;
+  // Rejects (after reporting) when the name was not kept, so the field stays open.
+  onRename: (sessionId: string, title: string) => Promise<void>;
   onOpen: (sessionId: string) => void;
   onDetach: (sessionId: string) => void;
   onCancel: (mandate: MandateView) => void;
@@ -44,6 +49,9 @@ export function AgentsPanel({
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
   const [attachable, setAttachable] = useState<Array<{ session_id: string; title: string }> | null>(null);
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const nameOf = (s: SessionAttachmentView) =>
+    sessionTitles[s.session_id] ?? t('blackboard.agents.sessionSince', { time: new Date(s.attached_at).toLocaleString() });
   const titles = new Map(docs.map((d) => [d.id, d.title]));
 
   const run = async (action: () => Promise<unknown>) => {
@@ -103,21 +111,41 @@ export function AgentsPanel({
           <ul className="bb-session-list">
             {sessions.map((s) => (
               <li key={s.session_id} className="bb-session" data-testid="blackboard-agents-session" data-variant={s.session_id}>
-                <button
-                  type="button"
-                  className="bb-session__name"
-                  title={t('blackboard.agents.chatHint')}
-                  data-testid="blackboard-agents-session-chat-btn"
-                  onClick={() => onChat(s.session_id)}
-                >
-                  <MessageSquare size={13} aria-hidden="true" />
-                  <span>{sessionTitles[s.session_id] ?? t('blackboard.agents.sessionSince', { time: new Date(s.attached_at).toLocaleString() })}</span>
-                  {s.is_default ? (
-                    <Tag variant="neutral" title={t('blackboard.agents.tasksSessionHint')} data-testid="blackboard-agents-session-tasks-tag">
-                      {t('blackboard.agents.tasksSession')}
-                    </Tag>
-                  ) : null}
-                </button>
+                {renaming === s.session_id ? (
+                  <InlineRename
+                    value={sessionTitles[s.session_id] ?? ''}
+                    label={t('blackboard.agents.renameLabel')}
+                    maxLength={MAX_SESSION_TITLE}
+                    testId="blackboard-agents-session-rename-input"
+                    onSave={(name) => onRename(s.session_id, name)}
+                    onDone={() => setRenaming(null)}
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    className="bb-session__name"
+                    title={t('blackboard.agents.chatHint')}
+                    data-testid="blackboard-agents-session-chat-btn"
+                    onClick={() => onChat(s.session_id)}
+                  >
+                    <MessageSquare size={13} aria-hidden="true" />
+                    <span>{nameOf(s)}</span>
+                    {s.is_default ? (
+                      <Tag variant="neutral" title={t('blackboard.agents.tasksSessionHint')} data-testid="blackboard-agents-session-tasks-tag">
+                        {t('blackboard.agents.tasksSession')}
+                      </Tag>
+                    ) : null}
+                  </button>
+                )}
+                <Button
+                  size="sm"
+                  variant="quiet"
+                  icon={<Pencil size={13} />}
+                  aria-label={t('blackboard.agents.rename')}
+                  title={t('blackboard.agents.rename')}
+                  data-testid="blackboard-agents-session-rename-btn"
+                  onClick={() => setRenaming(s.session_id)}
+                />
                 <Button
                   size="sm"
                   variant="quiet"

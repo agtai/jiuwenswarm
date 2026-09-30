@@ -1,6 +1,7 @@
 import { useEffect, useSyncExternalStore } from 'react';
 
 import { createConversationSession } from '../../../channels/web/frontend/src/multi-session/state/createConversationSession';
+import { useWorkspaceStore } from '../../../channels/web/frontend/src/stores/workspaceStore';
 import { webClient, webRequest } from '../../../channels/web/frontend/src/services/webClient';
 import { generateUuidV4 } from '../../../channels/web/frontend/src/utils/uuid';
 import { BlackboardController, type BlackboardState, type SelectionMemory, type SessionPort } from './controller';
@@ -33,6 +34,10 @@ const sessionPort: SessionPort = {
   recent: async () => {
     const result = await webRequest<{ sessions?: Array<{ session_id: string; title?: string }> }>('session.list', { limit: 200 });
     return (result.sessions ?? []).map((s) => ({ session_id: s.session_id, title: s.title || s.session_id }));
+  },
+  rename: async (sessionId, title) => {
+    await useWorkspaceStore.getState().renameSession(sessionId, title);
+    return title;
   },
 };
 

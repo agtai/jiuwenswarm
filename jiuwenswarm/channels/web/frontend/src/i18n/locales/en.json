@@ -207,7 +207,6 @@
       "archived": "Archived",
       "authors": "Authors",
       "noAuthors": "No text yet.",
-      "agent": "(agent)",
       "toolbar": "Formatting",
       "tools": {
         "undo": "Undo",
@@ -274,6 +273,8 @@
       "uploaded": "Uploaded {{name}}."
     },
     "agents": {
+      "rename": "Rename",
+      "renameLabel": "Session name",
       "tab": "Agents",
       "intro": "Ask an agent to work on this workspace. Its changes arrive as suggestions that editors accept or reject.",
       "start": "New agent session",
@@ -455,6 +456,7 @@
       "enable": "Enable"
     },
     "layout": {
+      "splitHint": "Drag onto a panel to show both",
       "panels": "Panels",
       "hidePanels": "Hide the panels",
       "showPanels": "Show the panels",
@@ -469,14 +471,15 @@
       "resizeSidebar": "Resize the sidebar"
     },
     "agentChat": {
+      "renameHint": "double-click to rename",
+      "newSession": "New agent session",
+      "resize": "Resize the chat box",
       "title": "Agent chat",
       "untitled": "New chat",
       "loading": "Loading the conversation...",
       "empty": "Ask {{title}} anything about this workspace. Its edits arrive as suggestions.",
       "working": "Working...",
       "usingTool": "Working: {{tool}}",
-      "question": "The agent is waiting for your answer.",
-      "answer": "Answer in the chat page",
       "placeholder": "Message the agent",
       "send": "Send",
       "stop": "Stop",
@@ -486,8 +489,9 @@
       "noSession": "Start an agent session from the Agents panel first."
     },
     "shortcuts": {
+      "splitPanel": "Add a panel to the split on the right, or take it out",
       "title": "Keyboard shortcuts",
-      "panel": "Open or close a panel on the right, in the order of its icons",
+      "panel": "Show one panel on the right, by the order of its icon",
       "sidebar": "Show or hide the sidebar",
       "dock": "Show or hide the panels on the right",
       "chat": "Show or hide the agent chat",

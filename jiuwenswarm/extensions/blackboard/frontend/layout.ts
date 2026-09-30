@@ -16,9 +16,11 @@ export interface Layout {
   chats: string[];
   chat: string | null;
   chatMinimized: boolean;
+  chatWidth: number;
+  chatHeight: number;
 }
 
-export const LIMITS = { sidebar: [180, 480], dock: [260, 760] } as const;
+export const LIMITS = { sidebar: [180, 480], dock: [260, 760], chatWidth: [300, 960], chatHeight: [240, 1400] } as const;
 const DEFAULT_LAYOUT: Layout = {
   sidebarWidth: 260,
   sidebarHidden: false,
@@ -29,6 +31,8 @@ const DEFAULT_LAYOUT: Layout = {
   chats: [],
   chat: null,
   chatMinimized: false,
+  chatWidth: 380,
+  chatHeight: 520,
 };
 const KEY = 'blackboard.layout';
 
@@ -48,6 +52,8 @@ function load(): Layout {
       chats: Array.isArray(saved.chats) ? saved.chats.filter((id: unknown) => typeof id === 'string') : [],
       chat: typeof saved.chat === 'string' ? saved.chat : null,
       chatMinimized: Boolean(saved.chatMinimized),
+      chatWidth: clamp(Number(saved.chatWidth) || DEFAULT_LAYOUT.chatWidth, LIMITS.chatWidth),
+      chatHeight: clamp(Number(saved.chatHeight) || DEFAULT_LAYOUT.chatHeight, LIMITS.chatHeight),
     };
   } catch {
     return DEFAULT_LAYOUT;

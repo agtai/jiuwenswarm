@@ -72,3 +72,27 @@ test('the legend lists authors by how much they wrote, with member names', () =>
   );
   assert.ok(legend.every((a) => a.color >= 1 && a.color <= 6));
 });
+
+test("a person and their agent are two authors with two colors", () => {
+  const doc = {
+    type: 'doc',
+    content: [
+      {
+        type: 'paragraph',
+        content: [
+          { type: 'text', text: 'mine', marks: [{ type: 'author', attrs: { id: 'u1', kind: 'agent' } }] },
+          { type: 'text', text: 'me', marks: [{ type: 'author', attrs: { id: 'u1', kind: 'person' } }] },
+        ],
+      },
+    ],
+  };
+  const legend = authorsOf(doc, new Map([['u1', 'Ann']]));
+  assert.deepEqual(
+    legend.map((a) => [a.key, a.name, a.kind, a.chars]),
+    [
+      ['agent:u1', 'Ann', 'agent', 4],
+      ['u1', 'Ann', 'person', 2],
+    ],
+  );
+  assert.notEqual(legend[0].color, legend[1].color);
+});

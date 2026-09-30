@@ -478,10 +478,9 @@ function AuthorsLegend({ editor, names }: { editor: Editor; names: ReadonlyMap<s
     <div className="bb-authors" data-testid="blackboard-doc-authors">
       {authors.length === 0 ? <span className="bb-muted">{t('blackboard.editor.noAuthors')}</span> : null}
       {authors.map((author) => (
-        <span key={author.id} className="bb-authors__item" data-testid="blackboard-doc-author" data-variant={author.id}>
-          <span className="bb-authors__swatch" data-author-color={author.color} aria-hidden="true" />
-          {author.name}
-          {author.kind === 'agent' ? <span className="bb-muted">{t('blackboard.editor.agent')}</span> : null}
+        <span key={author.key} className="bb-authors__item" data-testid="blackboard-doc-author" data-variant={author.key}>
+          <span className="bb-authors__swatch" data-author-color={author.color} data-author-kind={author.kind} aria-hidden="true" />
+          {author.kind === 'agent' ? t('blackboard.editor.agentOf', { name: author.name }) : author.name}
         </span>
       ))}
     </div>

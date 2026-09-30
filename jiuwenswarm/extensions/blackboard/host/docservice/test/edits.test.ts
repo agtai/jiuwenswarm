@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict'
 import { after, before, test } from 'node:test'
 import { EditError, planEdit, type EditOp, type EditRequest } from '../src/docs/edits.ts'
-import { blocksOf, importDoc } from '../src/docs/markdown.ts'
+import { agentView, blocksOf, importDoc } from '../src/docs/markdown.ts'
 import { suggestionsIn } from '../src/docs/suggestions.ts'
 import { addParagraph, client, startTestService, token, waitFor, type TestService } from './helpers.ts'
 
@@ -60,6 +60,30 @@ test('a same-type replace suggests only the changed words and keeps the block id
   assert.equal(marked, 'one day after')
   assert.equal(result.before[0].markdown, 'We ship once the tests pass.')
   assert.equal(result.after[0].id, p1.id)
+})
+
+test('a list replaced as a suggestion changes only its changed items, and both views read right', () => {
+  // Each of these crashed the views before (an item cut in half by a diff across items).
+  const cases = [
+    ['- a one\n- b two', '- a one\n- b two\n- c three'],
+    ['- a one\n- b two', '- a one\n- b two changed'],
+    ['- a one\n- b two', '- a one more\n- b two more'],
+    ['- a one\n- b two\n- c three', '- a one\n- c three'],
+    ['1. a one\n2. b two', '1. a one\n2. b two\n3. c three'],
+    ['> a one\n>\n> b two', '> a one\n>\n> b two\n>\n> c three'],
+  ]
+  for (const [old, wanted] of cases) {
+    const doc = importDoc(`## H\n\n${old}\n`)
+    const list = blocksOf(doc)[1]
+    const { doc: next, result } = planEdit(doc, request([{ op: 'replace', blockId: list.id!, digest: list.digest, markdown: wanted }]))
+    assert.equal(result.changed, true, wanted)
+    const [, after] = blocksOf(next)
+    assert.equal(after.id, list.id, wanted)
+    assert.equal(after.markdown, list.markdown, `accepted view of ${wanted}`)
+    assert.ok(agentView(next, { view: 'proposed' }).markdown.includes(blocksOf(importDoc(wanted))[0].markdown), `proposed view of ${wanted}`)
+    // The first item did not change: it keeps its id and has no suggestion.
+    assert.equal(next.child(1).child(0).attrs.id, doc.child(1).child(0).attrs.id, wanted)
+  }
 })
 
 test('inserts keep the order of the ops and get fresh ids; delete marks the block', () => {

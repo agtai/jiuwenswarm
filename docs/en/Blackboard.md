@@ -74,18 +74,19 @@ A role change reaches the person's open pages at once.
 
 ## Documents
 
-Documents are edited live by everyone with the page open; each person's text is credited to them (**Authors** shows who wrote what). A workspace has a pinned **Instructions** document that agents read first. **Import Markdown** and **View as Markdown** are in the document menu, and the **References** tab holds files the team uploads for the agent to read.
+Documents are edited live by everyone with the page open; each person's text is credited to them (**Authors** shows who wrote what, with a person and their agent in different colors). A workspace has a pinned **Instructions** document that agents read first. **Import Markdown** and **View as Markdown** are in the document menu, and the **References** tab holds files the team uploads for the agent to read.
 
 ## Arrange the page
 
-- **Panels on the right.** The icons on the right edge open and close the panels: chat, comments, decisions, history, agents, references and members. Open as many as you like; they stack. Fold one to its header with its arrow (or a double-click), drag its header to move it, and drag the line between two panels to share the height.
+- **Panels on the right.** An icon on the right edge shows its panel: chat, comments, decisions, history, agents, references or members. To see several at once, drag another icon onto the upper or lower half of an open panel; they stack. Fold one to its header with its arrow (or a double-click), drag its header to move it, close it with its cross, and drag the line between two panels to share the height.
 - **Sizes.** Drag the inner edge of the sidebar or of the panels to resize them. The sidebar's hide button (and Ctrl+Alt+S) folds it to a thin strip; the last icon on the right (and Ctrl+Alt+B) hides the panels. The page remembers all of this in this browser.
-- **Agent chat box.** In the **Agents** panel, **New agent session**, or a click on one of your sessions, opens a chat box over the document. Talk to the agent there while you watch its suggestions arrive; each session is a tab, the box folds to a small button, and **Open in the chat page** takes the conversation to the full chat. If the agent needs an answer (for example to allow a tool), the box offers to open it in the chat page.
+- **Agent chat box.** In the **Agents** panel, **New agent session**, or a click on one of your sessions, opens a chat box over the document. Talk to the agent there while you watch its suggestions arrive; each session is a tab, **+** starts another session, a double-click on a tab (or the pencil in the Agents panel) renames it, the box folds to a small button, and **Open in the chat page** takes the conversation to the full chat. If the agent asks something (for example to allow a tool), answer it in the box. Drag the box's left or top edge, or its top left corner, to resize it. The agent knows which workspace and document you have open, so "the known limitations section" is found there.
 - **Unread chat.** New messages in the workspace chat show as a number on the chat icon while the chat panel is closed.
 
 | Shortcut | What it does |
 |---|---|
-| Ctrl+Alt+1 to 7 | Open or close a panel, in the order of the icons |
+| Ctrl+Alt+1 to 7 | Show one panel, in the order of the icons |
+| Ctrl+Alt+Shift+1 to 7 | Add a panel to the split, or take it out |
 | Ctrl+Alt+S | Show or hide the sidebar |
 | Ctrl+Alt+B | Show or hide the panels on the right |
 | Ctrl+Alt+J | Show or hide the agent chat box |

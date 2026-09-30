@@ -341,8 +341,25 @@
 
 .bb-dock__head:focus-visible { outline: 2px solid var(--color-border-strong, currentColor); outline-offset: -2px; }
 .bb-dock__panel.is-current .bb-dock__head { color: var(--color-text-primary); }
-.bb-dock__head.is-drop-before { box-shadow: inset 0 2px 0 var(--color-text-strong); }
-.bb-dock__head.is-drop-after { box-shadow: inset 0 -2px 0 var(--color-text-strong); }
+/* Where a dragged panel or icon lands: the half of the panel it would take. */
+.bb-dock__panel { position: relative; }
+.bb-dock__panel.is-drop-before::before,
+.bb-dock__panel.is-drop-after::after {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 5;
+  height: 50%;
+  min-height: 24px;
+  content: '';
+  pointer-events: none;
+  border: 2px solid var(--color-action-primary);
+  border-radius: 6px;
+  background: var(--color-action-primary);
+  opacity: 0.18;
+}
+.bb-dock__panel.is-drop-before::before { top: 0; }
+.bb-dock__panel.is-drop-after::after { bottom: 0; }
 .bb-dock__grip { flex: 0 0 auto; opacity: 0.5; }
 
 .bb-dock__title {
@@ -918,6 +935,9 @@ body.bb-resizing iframe { pointer-events: none; }
 .bb-authors__swatch[data-author-color="4"] { background: var(--color-agent-group-avatar-variant-4-border); }
 .bb-authors__swatch[data-author-color="5"] { background: var(--color-agent-group-avatar-variant-5-border); }
 .bb-authors__swatch[data-author-color="6"] { background: var(--color-agent-group-avatar-variant-6-border); }
+/* Agents' text is also underlined dotted, since six colors repeat in a big team. */
+.bb-authors__swatch[data-author-kind="agent"] { border-radius: 50%; }
+.bb-editor.show-authors [data-author-kind="agent"][data-author-color] { text-decoration: underline dotted; text-underline-offset: 4px; }
 
 /* Other people's carets and selections. */
 .collaboration-carets__caret {
@@ -1725,14 +1745,28 @@ body.bb-resizing iframe { pointer-events: none; }
   z-index: 20;
   display: flex;
   flex-direction: column;
-  width: 380px;
   max-width: calc(100% - 32px);
-  height: min(520px, calc(100% - 48px));
+  max-height: calc(100% - 32px);
   overflow: hidden;
   border: 1px solid var(--color-border-default);
   border-radius: 12px;
   background: var(--color-surface-panel);
   box-shadow: 0 12px 32px rgb(0 0 0 / 18%);
+}
+
+/* The box grows from its left and top edges and its top left corner. */
+.bb-agent-chat > .bb-resizer { position: absolute; z-index: 2; }
+.bb-agent-chat > .bb-resizer--vertical { top: 0; bottom: 0; left: 0; }
+.bb-agent-chat > .bb-resizer--horizontal { top: 0; left: 0; right: 0; margin-top: 0; }
+.bb-agent-chat__corner {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 3;
+  width: 14px;
+  height: 14px;
+  cursor: nwse-resize;
+  touch-action: none;
 }
 
 .bb-agent-chat__head {
@@ -1788,6 +1822,21 @@ body.bb-resizing iframe { pointer-events: none; }
   white-space: nowrap;
 }
 
+.bb-agent-chat__new { flex: 0 0 auto; align-self: center; }
+
+.bb-inline-rename {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 3px 6px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 6px;
+  outline: none;
+  color: var(--color-text-primary);
+  background: var(--color-surface-page);
+  font: inherit;
+  font-size: 13px;
+}
+
 .bb-agent-chat__list {
   display: flex;
   flex: 1 1 auto;
@@ -1823,6 +1872,18 @@ body.bb-resizing iframe { pointer-events: none; }
 .bb-agent-chat__msg .chat-markdown > :last-child { margin-bottom: 0; }
 .bb-agent-chat__working { font-style: italic; }
 .bb-agent-chat__error { margin: 0 12px; }
+
+.bb-agent-chat__question {
+  flex: 0 1 auto;
+  max-height: 65%;
+  padding: 8px 12px 0;
+  overflow-y: auto;
+  border-top: 1px solid var(--color-border-default);
+}
+
+.bb-agent-chat__question .interaction-slot--attached { width: 100%; margin: 0 0 8px; }
+.bb-agent-chat__question .interaction-slot--attached .auth-prompt { border-radius: 12px; }
+.bb-agent-chat__qa > * { margin-bottom: 0; }
 
 .bb-agent-chat__composer {
   display: flex;

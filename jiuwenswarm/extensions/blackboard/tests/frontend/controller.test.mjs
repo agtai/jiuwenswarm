@@ -268,8 +268,8 @@ test('the page opens where it was left, and coming back reloads it', async () =>
 
   c.selectDoc('d1');
   c.selectRail('references');
-  // A remembered single tab becomes the one open panel; asking for another opens it below.
-  assert.deepEqual(memory.saved, { hostId: 'h1', workspaceId: 'ws2', docId: 'd1', rail: 'references', panels: ['agents', 'references'] });
+  // A remembered single tab becomes the one open panel; asking for another shows it in its place.
+  assert.deepEqual(memory.saved, { hostId: 'h1', workspaceId: 'ws2', docId: 'd1', rail: 'references', panels: ['references'] });
 
   // Leaving and coming back keeps the place and asks the host again.
   c.stop();
@@ -484,21 +484,31 @@ test('replacing the key and managing people go to the selected host', async () =
   assert.deepEqual(sent['blackboard.user.set_status'], { host: 'h1', user_id: 'u_bob', status: 'disabled' });
 });
 
-test('panels open, close and move in the stack on the right, and are remembered', () => {
+test('an icon shows one panel, dragging splits, and the stack is remembered', () => {
   const f = fakeWorld();
   const memory = memoryOf({ rail: 'chat', panels: ['chat', 'bogus', 'members', 'chat'] });
   const c = new BlackboardController(f.rpc, f.subscribe, undefined, memory);
   assert.deepEqual(c.getState().panels, ['chat', 'members']);
-  c.togglePanel('history');
-  assert.deepEqual([c.getState().panels, c.getState().rail], [['chat', 'members', 'history'], 'history']);
-  c.movePanel('history', 0);
-  assert.deepEqual(c.getState().panels, ['history', 'chat', 'members']);
-  c.togglePanel('history');
-  assert.deepEqual([c.getState().panels, c.getState().rail], [['chat', 'members'], 'members']);
-  // Asking for an open panel keeps the stack as it is.
+  // An icon shows only its panel; again, when it is the only one, it closes it.
+  c.showPanel('history');
+  assert.deepEqual([c.getState().panels, c.getState().rail], [['history'], 'history']);
+  // Dragging an icon onto the panels splits them; dragging a header moves one.
+  c.movePanel('chat', 0);
+  c.movePanel('members', 2);
+  assert.deepEqual([c.getState().panels, c.getState().rail], [['chat', 'history', 'members'], 'members']);
+  c.movePanel('members', 0);
+  assert.deepEqual([c.getState().panels, c.getState().rail], [['members', 'chat', 'history'], 'members']);
+  c.closePanel('members');
+  assert.deepEqual([c.getState().panels, c.getState().rail], [['chat', 'history'], 'history']);
+  // The page asking for an open panel keeps the split; a closed one takes the current one's place.
   c.selectRail('chat');
-  assert.deepEqual([c.getState().panels, c.getState().rail], [['chat', 'members'], 'chat']);
-  assert.deepEqual(memory.saved.panels, ['chat', 'members']);
+  assert.deepEqual([c.getState().panels, c.getState().rail], [['chat', 'history'], 'chat']);
+  c.selectRail('comments');
+  assert.deepEqual([c.getState().panels, c.getState().rail], [['comments', 'history'], 'comments']);
+  assert.deepEqual(memory.saved.panels, ['comments', 'history']);
+  c.showPanel('history');
+  c.showPanel('history');
+  assert.deepEqual(c.getState().panels, []);
 });
 
 test("others' chat messages count as unread while the chat panel is out of view", async () => {
@@ -536,4 +546,21 @@ test('new agent sessions are numbered after the first, and sessions show their c
   await flush();
   // A session the app has not named yet keeps no title here, and the panel falls back to its date.
   assert.deepEqual(c.getState().sessionTitles, { s1: 'Rewrite the plan' });
+});
+
+test('renaming a session goes through the app and shows at once', async () => {
+  const f = fakeWorld();
+  const renamed = [];
+  const port = {
+    create: async () => 's1',
+    open: () => undefined,
+    recent: async () => [],
+    rename: async (id, title) => (renamed.push([id, title]), title),
+  };
+  const c = new BlackboardController(f.rpc, f.subscribe, port);
+  await c.renameSession('s1', '  Launch   review ');
+  assert.deepEqual(renamed, [['s1', 'Launch review']]);
+  assert.equal(c.getState().sessionTitles.s1, 'Launch review');
+  await assert.rejects(c.renameSession('s1', '   '));
+  assert.equal(renamed.length, 1);
 });
