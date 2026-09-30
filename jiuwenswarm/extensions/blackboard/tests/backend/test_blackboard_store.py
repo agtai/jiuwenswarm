@@ -195,3 +195,42 @@ async def test_a_store_from_any_earlier_milestone_upgrades_with_its_data(tmp_pat
             assert await store.read(lambda c: c.execute("SELECT title FROM docs WHERE id = 'd_1'").fetchone()["title"]) == "Plan"
     finally:
         await store.close()
+
+
+async def test_an_early_host_with_required_invite_limits_gets_unlimited_invites(tmp_path):
+    """Hosts from milestone 2's development made expires_at and max_uses NOT NULL; migration 7 lifts it."""
+    from jiuwenswarm.extensions.blackboard.host.store.migrations import MIGRATIONS
+
+    path = tmp_path / "blackboard.db"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE schema_version (version INTEGER NOT NULL)")
+    for number, statements in MIGRATIONS:
+        if number > 6:
+            continue
+        for statement in statements:
+            if statement.startswith("CREATE TABLE invites"):
+                statement = statement.replace("expires_at TEXT,", "expires_at TEXT NOT NULL,").replace(
+                    "max_uses INTEGER,", "max_uses INTEGER NOT NULL DEFAULT 1,"
+                )
+            conn.execute(statement)
+        conn.execute("INSERT INTO schema_version (version) VALUES (?)", (number,))
+    now = "2026-09-01T00:00:00.000+00:00"
+    conn.execute("INSERT INTO users (id, display_name, token_hash, created_at) VALUES ('u_a', 'Alice', 'h', ?)", (now,))
+    conn.execute("INSERT INTO workspaces (id, name, title, created_by, created_at) VALUES ('w_1', 'test', 'Test', 'u_a', ?)", (now,))
+    conn.execute(
+        "INSERT INTO invites (code, workspace_id, role, created_by, created_at, expires_at, max_uses) VALUES ('old', 'w_1', 'editor', 'u_a', ?, ?, 3)",
+        (now, now),
+    )
+    conn.commit()
+    conn.close()
+
+    store = Store(path)
+    await store.open()
+    try:
+        made = await store.transact(
+            lambda c: invites.create(c, workspace_id="w_1", role="viewer", created_by="u_a", expires_at=None, max_uses=None)
+        )
+        assert (made.expires_at, made.max_uses) == (None, None)
+        assert (await store.read(lambda c: invites.get(c, "old"))).max_uses == 3
+    finally:
+        await store.close()

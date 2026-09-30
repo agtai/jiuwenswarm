@@ -258,6 +258,31 @@ MIGRATIONS: list[tuple[int, tuple[str, ...]]] = [
             )""",
         ),
     ),
+    (
+        7,
+        (
+            # Hosts created during milestone 2's development have invites with expires_at and
+            # max_uses NOT NULL, from before invites could last forever or have no limit; migration 1
+            # was changed without a migration of its own. SQLite cannot drop a NOT NULL, so the table
+            # is rebuilt with its rows (a no-op in effect where it was already right).
+            """CREATE TABLE invites_rebuilt (
+                code TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                role TEXT NOT NULL CHECK (role IN ('editor', 'commenter', 'viewer')),
+                created_by TEXT NOT NULL REFERENCES users(id),
+                created_at TEXT NOT NULL,
+                expires_at TEXT,             -- NULL: never expires
+                max_uses INTEGER,            -- NULL: no limit
+                uses INTEGER NOT NULL DEFAULT 0,
+                revoked_at TEXT
+            )""",
+            """INSERT INTO invites_rebuilt (code, workspace_id, role, created_by, created_at, expires_at, max_uses, uses, revoked_at)
+               SELECT code, workspace_id, role, created_by, created_at, expires_at, max_uses, uses, revoked_at FROM invites""",
+            "DROP TABLE invites",
+            "ALTER TABLE invites_rebuilt RENAME TO invites",
+            "CREATE INDEX invites_workspace ON invites(workspace_id)",
+        ),
+    ),
 ]
 
 LATEST_VERSION = MIGRATIONS[-1][0]

@@ -76,6 +76,24 @@ A role change reaches the person's open pages at once.
 
 Documents are edited live by everyone with the page open; each person's text is credited to them (**Authors** shows who wrote what). A workspace has a pinned **Instructions** document that agents read first. **Import Markdown** and **View as Markdown** are in the document menu, and the **References** tab holds files the team uploads for the agent to read.
 
+## Arrange the page
+
+- **Panels on the right.** The icons on the right edge open and close the panels: chat, comments, decisions, history, agents, references and members. Open as many as you like; they stack. Fold one to its header with its arrow (or a double-click), drag its header to move it, and drag the line between two panels to share the height.
+- **Sizes.** Drag the inner edge of the sidebar or of the panels to resize them. The sidebar's hide button (and Ctrl+Alt+S) folds it to a thin strip; the last icon on the right (and Ctrl+Alt+B) hides the panels. The page remembers all of this in this browser.
+- **Agent chat box.** In the **Agents** panel, **New agent session**, or a click on one of your sessions, opens a chat box over the document. Talk to the agent there while you watch its suggestions arrive; each session is a tab, the box folds to a small button, and **Open in the chat page** takes the conversation to the full chat. If the agent needs an answer (for example to allow a tool), the box offers to open it in the chat page.
+- **Unread chat.** New messages in the workspace chat show as a number on the chat icon while the chat panel is closed.
+
+| Shortcut | What it does |
+|---|---|
+| Ctrl+Alt+1 to 7 | Open or close a panel, in the order of the icons |
+| Ctrl+Alt+S | Show or hide the sidebar |
+| Ctrl+Alt+B | Show or hide the panels on the right |
+| Ctrl+Alt+J | Show or hide the agent chat box |
+| Ctrl+Alt+O | Go to a document by typing part of its name |
+| Ctrl+Alt+N | New document |
+| Ctrl+M | Comment on the selected text |
+| ? | List the shortcuts |
+
 ## Give the agent a task
 
 There are three ways, and in all of them the agent's edits arrive as **suggestions** credited to "<your name>'s agent". Editors accept or reject them one by one in the document, or all of a run's at once from the **Agents** tab.
@@ -94,6 +112,7 @@ sequenceDiagram
 
 - **From a comment.** Select text, choose **Comment** (or Ctrl+M), and write `@jiuwen` followed by the request, picking the agent from the list. The agent edits only the commented passage, unless you turn on the switch that lets it change the whole document, and replies in the thread.
 - **From the workspace chat.** Write `@jiuwen` and the request in the **Chat** tab. The agent may change the whole workspace and answers in the chat.
+- **From the Agents panel.** **New agent session** opens a chat box over the document (see below); ask there.
 - **From your own chat.** In a chat, **+ > Blackboard workspace** turns a workspace on for that session; from the next message the agent can edit it.
 
 When the agent needs a decision, it asks in the chat with a few options. Any editor may answer; the person who gave the task confirms, and the agent carries on. The **Decisions** tab keeps every question and who answered it.

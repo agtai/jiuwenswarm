@@ -164,6 +164,8 @@ export interface SessionAttachmentView {
   // The workspace's title when it was attached.
   title: string;
   host_name?: string;
+  // The workspace's session for tasks from comments and the chat.
+  is_default?: boolean;
 }
 
 export interface SuggestionView {

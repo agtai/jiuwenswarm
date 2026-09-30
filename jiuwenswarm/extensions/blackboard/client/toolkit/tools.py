@@ -353,7 +353,7 @@ class SessionTools:
         result = await self._call(ws, p.EDIT, params, timeout=EDIT_TIMEOUT_S)
         return {
             **result,
-            "message": "Your changes are suggestions now; the people in the workspace accept or reject them.",
+            "message": "Your changes are suggestions now; the people in the workspace accept or reject them. When you are done, sum up what you suggested in one or two short sentences.",
         }
 
     async def ask(

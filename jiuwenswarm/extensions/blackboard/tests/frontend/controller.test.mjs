@@ -224,7 +224,8 @@ test('an agent session is created, attached to the workspace and opened', async 
   assert.equal(await c.startAgentSession(), 'sess-for-WS1');
   const attach = f.calls.find(([method]) => method === 'blackboard.session.attach')[1];
   assert.deepEqual(attach, { host: 'h1', workspace_id: 'ws1', session_id: 'sess-for-WS1' });
-  assert.deepEqual(opened, ['sess-for-WS1']);
+  // The page shows the new session in its chat box; the app's chat stays where it was.
+  assert.deepEqual(opened, []);
 
   f.world.attached = [{ session_id: 'a' }];
   assert.deepEqual((await c.attachableSessions()).map((s) => s.session_id), ['b']);
@@ -267,7 +268,8 @@ test('the page opens where it was left, and coming back reloads it', async () =>
 
   c.selectDoc('d1');
   c.selectRail('references');
-  assert.deepEqual(memory.saved, { hostId: 'h1', workspaceId: 'ws2', docId: 'd1', rail: 'references' });
+  // A remembered single tab becomes the one open panel; asking for another opens it below.
+  assert.deepEqual(memory.saved, { hostId: 'h1', workspaceId: 'ws2', docId: 'd1', rail: 'references', panels: ['agents', 'references'] });
 
   // Leaving and coming back keeps the place and asks the host again.
   c.stop();
@@ -480,4 +482,58 @@ test('replacing the key and managing people go to the selected host', async () =
   const sent = Object.fromEntries(f.calls.filter(([m]) => m.startsWith('blackboard.user.') || m === 'blackboard.hosts.rotate_token'));
   assert.deepEqual(sent['blackboard.hosts.rotate_token'], { host: 'h1' });
   assert.deepEqual(sent['blackboard.user.set_status'], { host: 'h1', user_id: 'u_bob', status: 'disabled' });
+});
+
+test('panels open, close and move in the stack on the right, and are remembered', () => {
+  const f = fakeWorld();
+  const memory = memoryOf({ rail: 'chat', panels: ['chat', 'bogus', 'members', 'chat'] });
+  const c = new BlackboardController(f.rpc, f.subscribe, undefined, memory);
+  assert.deepEqual(c.getState().panels, ['chat', 'members']);
+  c.togglePanel('history');
+  assert.deepEqual([c.getState().panels, c.getState().rail], [['chat', 'members', 'history'], 'history']);
+  c.movePanel('history', 0);
+  assert.deepEqual(c.getState().panels, ['history', 'chat', 'members']);
+  c.togglePanel('history');
+  assert.deepEqual([c.getState().panels, c.getState().rail], [['chat', 'members'], 'members']);
+  // Asking for an open panel keeps the stack as it is.
+  c.selectRail('chat');
+  assert.deepEqual([c.getState().panels, c.getState().rail], [['chat', 'members'], 'chat']);
+  assert.deepEqual(memory.saved.panels, ['chat', 'members']);
+});
+
+test("others' chat messages count as unread while the chat panel is out of view", async () => {
+  const f = fakeWorld();
+  const c = new BlackboardController(f.rpc, f.subscribe);
+  await c.start();
+  await c.selectWorkspace('ws1');
+  const message = (id, author) => ({ id, workspace_id: 'ws1', author_id: author, author_kind: 'person', kind: 'message', body: 'hi', mentions: [] });
+  f.emit('blackboard.chat.message', { host: 'h1', workspace_id: 'ws1', message: message('m1', 'u_bob') });
+  f.emit('blackboard.chat.message', { host: 'h1', workspace_id: 'ws1', message: message('m2', c.getState().me.user_id) });
+  await flush();
+  assert.equal(c.getState().chatUnread, 1);
+  c.setChatInView(true);
+  f.emit('blackboard.chat.message', { host: 'h1', workspace_id: 'ws1', message: message('m3', 'u_bob') });
+  await flush();
+  assert.equal(c.getState().chatUnread, 0);
+});
+
+test('new agent sessions are numbered after the first, and sessions show their chat names', async () => {
+  const f = fakeWorld();
+  const created = [];
+  const port = {
+    create: async (title) => (created.push(title), `s${created.length}`),
+    open: () => undefined,
+    recent: async () => [{ session_id: 's1', title: 'Rewrite the plan' }, { session_id: 's9', title: 's9' }],
+  };
+  const c = new BlackboardController(f.rpc, f.subscribe, port);
+  await c.start();
+  await c.selectWorkspace('ws1');
+  await c.startAgentSession();
+  f.world.attached = [{ session_id: 's1', host: 'h1', workspace_id: 'ws1', attached_at: 't', title: 'WS1' }];
+  await c.refreshSessions();
+  await c.startAgentSession();
+  assert.deepEqual(created, ['WS1', 'WS1 (2)']);
+  await flush();
+  // A session the app has not named yet keeps no title here, and the panel falls back to its date.
+  assert.deepEqual(c.getState().sessionTitles, { s1: 'Rewrite the plan' });
 });

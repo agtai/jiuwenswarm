@@ -1,17 +1,19 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Bot, CircleHelp, History, Link2, MessageSquare, MessagesSquare, Paperclip, Server, Users } from 'lucide-react';
+import { Bot, CircleHelp, History, Link2, MessageSquare, MessagesSquare, PanelLeftOpen, Paperclip, Server, Users } from 'lucide-react';
 
-import { Button, Tabs, toast } from '../../../channels/web/frontend/src/components/ui';
+import { Button, toast } from '../../../channels/web/frontend/src/components/ui';
 import { FormDialog } from '../../../channels/web/frontend/src/components/form';
 import { canEdit, currentDoc, currentHost, currentWorkspace, type RailTab } from './controller';
 import { describeError } from './errors';
-import type { AnchorDraft, DocView, InviteView, MandateView, MemberView, ReferenceView, Role } from './types';
+import type { AnchorDraft, DocView, InviteView, MandateView, MemberView, ReferenceView, Role, WorkspaceView } from './types';
 import { useController } from './useController';
 import { AgentsPanel } from './components/AgentsPanel';
 import { ChatPanel } from './components/ChatPanel';
 import { CommentDraft, CommentsPanel, ThreadCard, type CommentsActions, type ThreadProps } from './components/CommentsPanel';
 import { DecisionsPanel, type DecisionActions } from './components/Decisions';
+import { ActivityBar, Dock, type DockPanel } from './components/Dock';
+import { Resizer } from './components/Resizer';
 import { HistoryPanel } from './components/HistoryPanel';
 import { MembersPanel } from './components/MembersPanel';
 import { ReferencePreview, ReferencesPanel } from './components/ReferencesPanel';
@@ -27,6 +29,9 @@ import {
 } from './components/dialogs';
 import { ExportDialog, ImportMarkdownDialog, MarkdownDialog, NewDocumentDialog } from './components/docDialogs';
 import type { VersionActions } from './editor/VersionView';
+import { LIMITS, clamp, openChat, updateLayout, useLayout } from './layout';
+import { AgentChat } from './components/AgentChat';
+import { DocSwitcher, ShortcutsDialog, useShortcuts } from './components/Shortcuts';
 import './blackboard.css';
 
 // The file as base64, for the upload RPC.
@@ -92,7 +97,10 @@ export function BlackboardPage() {
   const [open, setOpen] = useState<Open>(null);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [docDialog, setDocDialog] = useState<DocDialog>(null);
-  const railTab = state.rail;
+  const layout = useLayout();
+  const sidebarWidthAtStart = useRef(layout.sidebarWidth);
+  const [switcher, setSwitcher] = useState(false);
+  const [help, setHelp] = useState(false);
   const [preview, setPreview] = useState<{ reference: ReferenceView; url: string } | null>(null);
   const host = currentHost(state);
   const workspace = currentWorkspace(state);
@@ -349,6 +357,147 @@ export function BlackboardPage() {
     controller.openThread(threadId);
   };
 
+  // The panels on the right; any number of them are open at once, stacked.
+  const renderPanel = (tab: RailTab, ws: WorkspaceView): ReactNode =>
+    tab === 'chat' ? (
+      <ChatPanel
+        messages={state.chat}
+        hasMore={state.chatHasMore}
+        members={state.members}
+        meId={state.me?.user_id ?? null}
+        canPost={talk}
+        canTask={editable}
+        sessions={state.sessions}
+        mandates={mandatesById}
+        decisions={decisionsById}
+        docTitles={docTitles}
+        decisionActions={decisionActions}
+        onLoadOlder={() => controller.loadOlderChat().catch(report)}
+        onPost={({ body, sessionId }) => controller.postChat(body, sessionId).then(() => undefined, rethrow)}
+        onOpenThread={openThreadFromChat}
+      />
+    ) : tab === 'comments' ? (
+      <CommentsPanel
+        doc={doc}
+        threads={state.threads}
+        activeThread={state.activeThread}
+        showResolved={state.showResolved}
+        members={state.members}
+        meId={state.me?.user_id ?? null}
+        canComment={commentable}
+        canTask={editable}
+        sessions={state.sessions}
+        mandates={mandatesById}
+        decisions={decisionsById}
+        docTitles={docTitles}
+        decisionActions={decisionActions}
+        actions={threadActions}
+      />
+    ) : tab === 'decisions' ? (
+      <DecisionsPanel
+        decisions={state.decisions}
+        meId={state.me?.user_id ?? null}
+        docTitles={docTitles}
+        actions={decisionActions}
+      />
+    ) : tab === 'history' ? (
+      <HistoryPanel
+        doc={doc}
+        versions={state.history}
+        hasMore={state.historyHasMore}
+        openVersion={state.openVersion}
+        canSave={editable && Boolean(doc && !doc.archived)}
+        onOpen={(id) => controller.openVersion(id)}
+        onSave={(label) => controller.saveVersion(label).then(() => undefined, rethrow)}
+        onMore={() => void controller.loadOlderHistory().catch(report)}
+      />
+    ) : tab === 'members' ? (
+      <MembersPanel
+        workspace={ws}
+        members={state.members}
+        invites={state.invites}
+        meId={state.me?.user_id ?? null}
+        onSetRole={(member, role) => void controller.setRole(member.user_id, role).catch(report)}
+        onRemove={askRemove}
+        onLeave={askLeave}
+        onInvite={() => setOpen('invite')}
+        onCopy={(invite) => void copy(invite)}
+        onRevoke={askRevoke}
+      />
+    ) : tab === 'agents' ? (
+      <AgentsPanel
+        mandates={state.mandates}
+        sessions={state.sessions}
+        docs={state.docs}
+        meId={state.me?.user_id ?? null}
+        canEdit={editable}
+        sessionTitles={state.sessionTitles}
+        onStart={() => controller.startAgentSession().then(openChat, report)}
+        onLoadAttachable={() => controller.attachableSessions().catch((error) => (report(error), []))}
+        onAttach={(sessionId) => controller.attachSession(sessionId).catch(report)}
+        onChat={openChat}
+        onOpen={(sessionId) => controller.openSession(sessionId)}
+        onDetach={(sessionId) => void controller.detachSession(sessionId).catch(report)}
+        onCancel={askCancelMandate}
+        onDecide={decideRun}
+        onResolveUnknown={(mandate, status) => void controller.resolveUnknown(mandate.id, status).catch(report)}
+      />
+    ) : (
+      <ReferencesPanel
+        references={state.references}
+        canEdit={editable}
+        maxUploadMb={state.maxUploadMb}
+        onUpload={uploadFiles}
+        onOpen={(reference) => void openReference(reference)}
+        onRemove={askRemoveReference}
+        onSetNote={(reference, note) =>
+          controller.setReferenceNote(reference.id, note).catch((error) => {
+            report(error);
+          })
+        }
+      />
+    );
+
+  const openDecisions = state.decisions.filter((d) => d.status === 'open' || d.status === 'proposed').length;
+  const dockPanels: DockPanel[] = RAIL_ORDER.map((tab, index) => ({
+    id: tab,
+    label: t(RAIL_LABELS[tab]),
+    icon: RAIL_ICONS[tab],
+    badge: tab === 'decisions' ? openDecisions : tab === 'chat' ? state.chatUnread : 0,
+    shortcut: `Ctrl+Alt+${index + 1}`,
+    fill: tab === 'chat',
+    render: () => (workspace ? renderPanel(tab, workspace) : null),
+  }));
+
+  const chatInView = Boolean(workspace) && !layout.dockHidden && state.panels.includes('chat') && !layout.collapsed.includes('chat');
+  useEffect(() => controller.setChatInView(chatInView), [controller, chatInView]);
+
+  useShortcuts(
+    {
+      togglePanel: (index) => {
+        const tab = RAIL_ORDER[index];
+        if (!tab) return;
+        if (layout.dockHidden) {
+          updateLayout({ dockHidden: false });
+          controller.selectRail(tab);
+        } else {
+          controller.togglePanel(tab);
+        }
+      },
+      toggleSidebar: () => updateLayout({ sidebarHidden: !layout.sidebarHidden }),
+      toggleDock: () => updateLayout({ dockHidden: !layout.dockHidden }),
+      toggleChat: () => {
+        if (layout.chats.length) updateLayout({ chatMinimized: !layout.chatMinimized });
+        else if (state.sessions.length) openChat(state.sessions[0].session_id);
+        else toast.open({ content: t('blackboard.agentChat.noSession') });
+      },
+      newDoc: () => editable && setOpen('newDoc'),
+      goToDoc: () => setSwitcher(true),
+      help: () => setHelp(true),
+    },
+    Boolean(workspace),
+  );
+
   return (
     <div className="bb-page" data-testid="blackboard-page">
       {state.loaded && state.hosts.length === 0 ? (
@@ -367,7 +516,23 @@ export function BlackboardPage() {
         </div>
       ) : (
         <>
+          {layout.sidebarHidden ? (
+            <div className="bb-sidebar-strip">
+              <Button
+                size="sm"
+                variant="quiet"
+                icon={<PanelLeftOpen size={16} />}
+                aria-label={t('blackboard.layout.showSidebar')}
+                title={`${t('blackboard.layout.showSidebar')} (Ctrl+Alt+S)`}
+                data-testid="blackboard-sidebar-show-btn"
+                onClick={() => updateLayout({ sidebarHidden: false })}
+              />
+            </div>
+          ) : (
+            <>
           <Sidebar
+            width={layout.sidebarWidth}
+            onHide={() => updateLayout({ sidebarHidden: true })}
             state={state}
             onSelectHost={(id) => void controller.selectHost(id)}
             onSelectWorkspace={(id) => void controller.selectWorkspace(id)}
@@ -377,6 +542,15 @@ export function BlackboardPage() {
             onNewWorkspace={() => setOpen('new')}
             onSettings={() => setOpen('settings')}
           />
+              <Resizer
+                orientation="vertical"
+                label={t('blackboard.layout.resizeSidebar')}
+                testId="blackboard-sidebar-resizer"
+                onStart={() => (sidebarWidthAtStart.current = layout.sidebarWidth)}
+                onResize={(delta) => updateLayout({ sidebarWidth: clamp(sidebarWidthAtStart.current + delta, LIMITS.sidebar) })}
+              />
+            </>
+          )}
           <main className="bb-main">
             {state.loadError ? (
               <p className="bb-notice bb-notice--error" role="alert" data-testid="blackboard-load-error">
@@ -412,137 +586,33 @@ export function BlackboardPage() {
             )}
           </main>
           {workspace ? (
-            <aside className={`bb-rail is-${railTab}`} data-testid="blackboard-rail">
-              <Tabs<RailTab>
-                className="bb-rail__tabs"
-                items={RAIL_ORDER.map((tab) => {
-                  const Icon = RAIL_ICONS[tab];
-                  const count =
-                    tab === 'decisions' ? state.decisions.filter((d) => d.status === 'open' || d.status === 'proposed').length : 0;
-                  return {
-                    value: tab,
-                    label: (
-                      <span className="bb-rail__tab" title={t(RAIL_LABELS[tab])} aria-label={t(RAIL_LABELS[tab])}>
-                        <Icon size={16} aria-hidden="true" />
-                        {count > 0 ? (
-                          <span className="bb-rail__badge" data-testid="blackboard-rail-badge">
-                            {count}
-                          </span>
-                        ) : null}
-                      </span>
-                    ),
-                    testId: `blackboard-rail-tab-${tab}`,
-                  };
-                })}
-                value={railTab}
-                onChange={(tab) => controller.selectRail(tab)}
-                bordered
-                wrapperTestId="blackboard-rail-tabs"
+            <>
+              <Dock
+                panels={dockPanels}
+                open={state.panels}
+                active={state.rail}
+                onClose={(tab) => controller.togglePanel(tab)}
+                onMove={(tab, index) => controller.movePanel(tab, index)}
               />
-              <h3 className="bb-rail__title" data-testid="blackboard-rail-title">
-                {t(RAIL_LABELS[railTab])}
-              </h3>
-              {railTab === 'chat' ? (
-                <ChatPanel
-                  messages={state.chat}
-                  hasMore={state.chatHasMore}
-                  members={state.members}
-                  meId={state.me?.user_id ?? null}
-                  canPost={talk}
-                  canTask={editable}
-                  sessions={state.sessions}
-                  mandates={mandatesById}
-                  decisions={decisionsById}
-                  docTitles={docTitles}
-                  decisionActions={decisionActions}
-                  onLoadOlder={() => controller.loadOlderChat().catch(report)}
-                  onPost={({ body, sessionId }) => controller.postChat(body, sessionId).then(() => undefined, rethrow)}
-                  onOpenThread={openThreadFromChat}
-                />
-              ) : railTab === 'comments' ? (
-                <CommentsPanel
-                  doc={doc}
-                  threads={state.threads}
-                  activeThread={state.activeThread}
-                  showResolved={state.showResolved}
-                  members={state.members}
-                  meId={state.me?.user_id ?? null}
-                  canComment={commentable}
-                  canTask={editable}
-                  sessions={state.sessions}
-                  mandates={mandatesById}
-                  decisions={decisionsById}
-                  docTitles={docTitles}
-                  decisionActions={decisionActions}
-                  actions={threadActions}
-                />
-              ) : railTab === 'decisions' ? (
-                <DecisionsPanel
-                  decisions={state.decisions}
-                  meId={state.me?.user_id ?? null}
-                  docTitles={docTitles}
-                  actions={decisionActions}
-                />
-              ) : railTab === 'history' ? (
-                <HistoryPanel
-                  doc={doc}
-                  versions={state.history}
-                  hasMore={state.historyHasMore}
-                  openVersion={state.openVersion}
-                  canSave={editable && Boolean(doc && !doc.archived)}
-                  onOpen={(id) => controller.openVersion(id)}
-                  onSave={(label) => controller.saveVersion(label).then(() => undefined, rethrow)}
-                  onMore={() => void controller.loadOlderHistory().catch(report)}
-                />
-              ) : railTab === 'members' ? (
-                <MembersPanel
-                  workspace={workspace}
-                  members={state.members}
-                  invites={state.invites}
-                  meId={state.me?.user_id ?? null}
-                  onSetRole={(member, role) => void controller.setRole(member.user_id, role).catch(report)}
-                  onRemove={askRemove}
-                  onLeave={askLeave}
-                  onInvite={() => setOpen('invite')}
-                  onCopy={(invite) => void copy(invite)}
-                  onRevoke={askRevoke}
-                />
-              ) : railTab === 'agents' ? (
-                <AgentsPanel
-                  mandates={state.mandates}
-                  sessions={state.sessions}
-                  docs={state.docs}
-                  meId={state.me?.user_id ?? null}
-                  canEdit={editable}
-                  onStart={() => controller.startAgentSession().then(() => undefined, report)}
-                  onLoadAttachable={() => controller.attachableSessions().catch((error) => (report(error), []))}
-                  onAttach={(sessionId) => controller.attachSession(sessionId).catch(report)}
-                  onOpen={(sessionId) => controller.openSession(sessionId)}
-                  onDetach={(sessionId) => void controller.detachSession(sessionId).catch(report)}
-                  onCancel={askCancelMandate}
-                  onDecide={decideRun}
-                  onResolveUnknown={(mandate, status) => void controller.resolveUnknown(mandate.id, status).catch(report)}
-                />
-              ) : (
-                <ReferencesPanel
-                  references={state.references}
-                  canEdit={editable}
-                  maxUploadMb={state.maxUploadMb}
-                  onUpload={uploadFiles}
-                  onOpen={(reference) => void openReference(reference)}
-                  onRemove={askRemoveReference}
-                  onSetNote={(reference, note) =>
-                    controller.setReferenceNote(reference.id, note).catch((error) => {
-                      report(error);
-                    })
-                  }
-                />
-              )}
-            </aside>
+              <ActivityBar
+                panels={dockPanels}
+                open={state.panels}
+                onToggle={(tab) => controller.togglePanel(tab)}
+                onHelp={() => setHelp(true)}
+              />
+            </>
           ) : null}
         </>
       )}
 
+      {workspace ? (
+        <AgentChat
+          titles={(id) => state.sessionTitles[id] ?? t('blackboard.agentChat.untitled')}
+          onOpenFull={(id) => controller.openSession(id)}
+        />
+      ) : null}
+      <DocSwitcher open={switcher} docs={state.docs} onPick={(id) => controller.selectDoc(id)} onClose={() => setSwitcher(false)} />
+      <ShortcutsDialog open={help} onClose={() => setHelp(false)} />
       <JoinDialog open={open === 'join'} onJoin={(url, name) => controller.join(url, name)} onClose={close} />
       <NewWorkspaceDialog open={open === 'new'} onCreate={(name, title) => controller.createWorkspace(name, title)} onClose={close} />
       <RenameDialog

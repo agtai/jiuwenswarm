@@ -1,5 +1,6 @@
 /* Blackboard page. Colors come only from the app's theme tokens. */
 .bb-page {
+  position: relative;
   display: flex;
   flex: 1 1 0%;
   min-width: 0;
@@ -35,7 +36,7 @@
 
 .bb-sidebar {
   display: flex;
-  flex: 0 0 260px;
+  flex: 0 0 auto;
   flex-direction: column;
   gap: 16px;
   min-height: 0;
@@ -175,6 +176,10 @@
   flex: 1 1 auto;
   flex-direction: column;
   gap: 16px;
+  /* Lines stay readable when the side areas are hidden on a wide screen. */
+  width: 100%;
+  max-width: 1180px;
+  margin: 0 auto;
 }
 
 .bb-workspace__head {
@@ -241,19 +246,161 @@
   margin-top: 8px;
 }
 
-/* ---- right rail ---- */
+/* ---- the right side: activity bar and stacked panels ---- */
 
-.bb-rail {
+.bb-activity {
   display: flex;
-  flex: 0 0 320px;
+  flex: 0 0 44px;
   flex-direction: column;
-  gap: 12px;
-  min-height: 0;
-  padding: 16px;
-  overflow-y: auto;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 0;
   border-left: 1px solid var(--color-border-default);
   background: var(--color-surface-panel);
 }
+
+.bb-activity__btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 8px;
+  color: var(--color-text-secondary);
+  background: transparent;
+  cursor: pointer;
+}
+
+.bb-activity__btn:hover { color: var(--color-text-primary); background: var(--color-surface-muted); }
+.bb-activity__btn.is-active { color: var(--color-text-strong); background: var(--color-surface-muted); }
+.bb-activity__btn.is-active::before {
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  left: -6px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--color-text-strong);
+  content: '';
+}
+
+.bb-activity__spacer { flex: 1 1 auto; }
+
+.bb-dock {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+  min-width: 0;
+  min-height: 0;
+  max-width: 50vw;
+  border-left: 1px solid var(--color-border-default);
+  background: var(--color-surface-panel);
+}
+
+.bb-dock > .bb-resizer--vertical {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  z-index: 2;
+}
+
+.bb-dock__stack {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.bb-dock__panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-bottom: 1px solid var(--color-border-default);
+}
+
+.bb-dock__panel:not(.is-folded) { min-height: 96px; }
+.bb-dock__panel:last-child { border-bottom: 0; }
+
+.bb-dock__head {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 8px 0 4px;
+  color: var(--color-text-secondary);
+  background: var(--color-surface-muted);
+  cursor: grab;
+  user-select: none;
+}
+
+.bb-dock__head:focus-visible { outline: 2px solid var(--color-border-strong, currentColor); outline-offset: -2px; }
+.bb-dock__panel.is-current .bb-dock__head { color: var(--color-text-primary); }
+.bb-dock__head.is-drop-before { box-shadow: inset 0 2px 0 var(--color-text-strong); }
+.bb-dock__head.is-drop-after { box-shadow: inset 0 -2px 0 var(--color-text-strong); }
+.bb-dock__grip { flex: 0 0 auto; opacity: 0.5; }
+
+.bb-dock__title {
+  flex: 1 1 auto;
+  margin: 0;
+  overflow: hidden;
+  color: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.bb-dock__close { opacity: 0.7; }
+.bb-dock__close:hover { opacity: 1; }
+
+.bb-dock__body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  padding: 12px 14px;
+  overflow-y: auto;
+}
+
+/* The chat scrolls its own list and keeps its composer at the bottom. */
+.bb-dock__body.is-fill { overflow: hidden; }
+
+/* ---- resize handles ---- */
+
+.bb-resizer {
+  flex: 0 0 auto;
+  background: transparent;
+  touch-action: none;
+}
+
+.bb-resizer--vertical { width: 6px; cursor: col-resize; }
+.bb-resizer--horizontal { height: 5px; margin-top: -3px; cursor: row-resize; }
+.bb-resizer:hover,
+.bb-resizer:focus-visible { outline: none; background: var(--color-border-default); }
+
+/* While dragging a handle the page neither selects text nor changes the cursor. */
+body.bb-resizing { cursor: col-resize; user-select: none; }
+body.bb-resizing iframe { pointer-events: none; }
+
+.bb-sidebar-strip {
+  display: flex;
+  flex: 0 0 40px;
+  flex-direction: column;
+  align-items: center;
+  padding: 12px 0;
+  border-right: 1px solid var(--color-border-default);
+  background: var(--color-surface-panel);
+}
+
 
 .bb-rail__head {
   display: flex;
@@ -462,8 +609,8 @@
 }
 
 @media (max-width: 960px) {
-  .bb-rail { flex-basis: 260px; }
-  .bb-sidebar { flex-basis: 220px; }
+  .bb-dock { max-width: 40vw; }
+  .bb-sidebar { max-width: 30vw; }
 }
 
 /* ---- documents in the sidebar ---- */
@@ -539,7 +686,7 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 8px;
   padding-top: 12px;
   border-top: 1px solid var(--color-border-default);
@@ -634,7 +781,23 @@
   font-size: 13px;
 }
 
-/* The document's name, edited in place above the content. */
+/* The document's name, edited in place above the content, with its menu beside it. */
+.bb-doc-titlebar {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.bb-doc-titlebar .bb-doc-title {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.bb-doc-titlebar .bb-doc__title {
+  flex: 0 0 auto;
+  margin-top: 18px;
+}
+
 .bb-doc-title {
   display: block;
   width: 100%;
@@ -967,11 +1130,26 @@
 }
 
 .bb-session__name {
+  display: inline-flex;
   flex: 1 1 auto;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--color-text-primary);
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.bb-session__name:hover { background: var(--color-surface-muted); }
+
+.bb-session__name span {
   overflow: hidden;
-  color: var(--color-text-secondary);
-  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1048,16 +1226,6 @@
 
 /* ---- right rail: tabs as icons, the panel's title ---- */
 
-/* Seven icons fit the rail only with a small gap; space-between spreads them out. */
-.bb-rail__tabs.tabs { justify-content: space-between; gap: 4px; }
-
-.bb-rail__tab {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 28px;
-}
 
 .bb-rail__badge {
   position: absolute;
@@ -1075,14 +1243,14 @@
   text-align: center;
 }
 
-.bb-rail__title {
-  margin: 0;
-  font-size: 14px;
-  font-weight: 600;
+.bb-activity__btn .bb-rail__badge {
+  top: 0;
+  right: -2px;
 }
 
-/* The chat fills the rail: its list scrolls, the composer stays at the bottom. */
-.bb-rail.is-chat { overflow: hidden; }
+.bb-rail__badge--inline {
+  position: static;
+}
 
 .bb-icon-button {
   display: inline-flex;
@@ -1548,3 +1716,242 @@
 .bb-im-code p { margin: 0; }
 .bb-im-code__line { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
 .bb-im-code code { overflow-wrap: anywhere; font-size: 14px; font-weight: 600; }
+
+/* ---- the chat box over the page ---- */
+
+.bb-agent-chat {
+  position: absolute;
+  bottom: 16px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  width: 380px;
+  max-width: calc(100% - 32px);
+  height: min(520px, calc(100% - 48px));
+  overflow: hidden;
+  border: 1px solid var(--color-border-default);
+  border-radius: 12px;
+  background: var(--color-surface-panel);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 18%);
+}
+
+.bb-agent-chat__head {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--color-border-default);
+  background: var(--color-surface-muted);
+}
+
+.bb-agent-chat__tabs {
+  display: flex;
+  flex: 1 1 auto;
+  gap: 2px;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.bb-agent-chat__tab {
+  display: inline-flex;
+  flex: 0 1 auto;
+  align-items: center;
+  min-width: 0;
+  max-width: 180px;
+  border-radius: 6px;
+  color: var(--color-text-secondary);
+}
+
+.bb-agent-chat__tab.is-active {
+  color: var(--color-text-primary);
+  background: var(--color-surface-panel);
+}
+
+.bb-agent-chat__tab > button[role='tab'] {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 4px 6px;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.bb-agent-chat__tab > button[role='tab'] span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bb-agent-chat__list {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  padding: 12px;
+  overflow-y: auto;
+}
+
+.bb-agent-chat__msg {
+  max-width: 88%;
+  padding: 8px 10px;
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.bb-agent-chat__msg.is-user {
+  align-self: flex-end;
+  color: var(--color-action-primary-text);
+  background: var(--color-action-primary);
+  white-space: pre-wrap;
+}
+
+.bb-agent-chat__msg.is-assistant {
+  align-self: flex-start;
+  background: var(--color-surface-muted);
+}
+
+.bb-agent-chat__msg .chat-markdown > :first-child { margin-top: 0; }
+.bb-agent-chat__msg .chat-markdown > :last-child { margin-bottom: 0; }
+.bb-agent-chat__working { font-style: italic; }
+.bb-agent-chat__error { margin: 0 12px; }
+
+.bb-agent-chat__composer {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-end;
+  gap: 6px;
+  padding: 8px;
+  border-top: 1px solid var(--color-border-default);
+}
+
+.bb-agent-chat__composer > :not(textarea) { flex: 0 0 auto; }
+
+.bb-agent-chat__composer textarea {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 36px;
+  max-height: 120px;
+  padding: 6px 8px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 8px;
+  outline: none;
+  resize: vertical;
+  color: var(--color-text-primary);
+  background: var(--color-surface-page);
+  font: inherit;
+  font-size: 13px;
+}
+
+.bb-agent-chat-pill {
+  position: absolute;
+  bottom: 16px;
+  z-index: 20;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 999px;
+  color: var(--color-text-primary);
+  background: var(--color-surface-panel);
+  box-shadow: 0 6px 18px rgb(0 0 0 / 14%);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.bb-agent-chat-pill__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-feedback-warning);
+}
+
+/* ---- keyboard shortcuts and the document switcher ---- */
+
+.bb-shortcuts {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.bb-shortcuts td {
+  padding: 6px 4px;
+  border-bottom: 1px solid var(--color-border-default);
+  vertical-align: top;
+}
+
+.bb-shortcuts td:first-child { width: 45%; }
+
+.bb-shortcuts kbd {
+  display: inline-block;
+  margin: 0 4px 4px 0;
+  padding: 1px 6px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 4px;
+  background: var(--color-surface-muted);
+  font: inherit;
+  font-size: 12px;
+}
+
+.bb-switcher__backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  justify-content: center;
+  padding-top: 12vh;
+  background: rgb(0 0 0 / 12%);
+}
+
+.bb-switcher {
+  display: flex;
+  flex-direction: column;
+  width: min(520px, calc(100% - 32px));
+  max-height: 60vh;
+  overflow: hidden;
+  border: 1px solid var(--color-border-default);
+  border-radius: 12px;
+  background: var(--color-surface-panel);
+  box-shadow: 0 16px 40px rgb(0 0 0 / 20%);
+  align-self: flex-start;
+}
+
+.bb-switcher input {
+  padding: 12px 14px;
+  border: 0;
+  border-bottom: 1px solid var(--color-border-default);
+  outline: none;
+  color: var(--color-text-primary);
+  background: transparent;
+  font: inherit;
+  font-size: 15px;
+}
+
+.bb-switcher ul {
+  margin: 0;
+  padding: 6px;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.bb-switcher li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.bb-switcher li.is-active { background: var(--color-surface-muted); }

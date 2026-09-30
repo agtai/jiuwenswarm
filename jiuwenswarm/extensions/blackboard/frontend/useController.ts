@@ -31,7 +31,7 @@ const sessionPort: SessionPort = {
     window.dispatchEvent(new CustomEvent('jiuwen:open-session', { detail: { sessionId, mode: 'agent' } }));
   },
   recent: async () => {
-    const result = await webRequest<{ sessions?: Array<{ session_id: string; title?: string }> }>('session.list', { limit: 50 });
+    const result = await webRequest<{ sessions?: Array<{ session_id: string; title?: string }> }>('session.list', { limit: 200 });
     return (result.sessions ?? []).map((s) => ({ session_id: s.session_id, title: s.title || s.session_id }));
   },
 };

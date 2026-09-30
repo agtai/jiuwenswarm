@@ -163,7 +163,9 @@ def register_rpcs(channel: Any, client: "ClientRuntime", host: "HostController")
             if session_id is not None and a.session_id != session_id:
                 continue
             entry = client.registry.get(a.host)
-            out.append({**a.to_dict(), "host_name": entry.name if entry else ""})
+            # The workspace's session for tasks from comments and the chat.
+            is_default = client.sessions.default_for(a.host, a.workspace_id) == a.session_id
+            out.append({**a.to_dict(), "host_name": entry.name if entry else "", "is_default": is_default})
         return {"sessions": out}
 
     async def bots_list(params: dict[str, Any]) -> dict[str, Any]:

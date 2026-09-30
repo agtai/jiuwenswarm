@@ -116,8 +116,12 @@ async def test_attaching_needs_an_editor_and_one_workspace_per_session(tmp_path)
         again = await instance.channel.ok(p.SESSION_ATTACH, {"session_id": "s1", "workspace_id": first})
         assert again["session"]["attached_at"] == attached["session"]["attached_at"]
         listed = await instance.channel.ok(p.SESSION_LIST, {"workspace_id": first})
-        assert [s["session_id"] for s in listed["sessions"]] == ["s1"]
+        assert [(s["session_id"], s["is_default"]) for s in listed["sessions"]] == [("s1", False)]
         assert instance.channel.named(p.EV_SESSIONS_UPDATED)
+        # The session tasks from comments and the chat run in is marked.
+        host_id = listed["sessions"][0]["host"]
+        await instance.client.sessions.set_default(host_id, first, "s1")
+        assert (await instance.channel.ok(p.SESSION_LIST, {"workspace_id": first}))["sessions"][0]["is_default"] is True
 
         # A session works on several workspaces; detaching names one of them.
         added = await instance.channel.ok(p.SESSION_ATTACH, {"session_id": "s1", "workspace_id": second})

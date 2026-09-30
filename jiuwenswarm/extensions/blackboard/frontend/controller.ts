@@ -67,7 +67,12 @@ export interface BlackboardState {
   historyHasMore: boolean;
   openVersion: string | null;
   hostStatus: HostStatus | null;
-  // The right rail's tab.
+  // Workspace chat messages from others that arrived while the chat panel was not in view.
+  chatUnread: number;
+  // Chat titles of the person's sessions, as the app's session list names them.
+  sessionTitles: Record<string, string>;
+  // The panels open on the right, top to bottom, and the one last opened or asked for.
+  panels: RailTab[];
   rail: RailTab;
   loaded: boolean;
   loadError: string | null;
@@ -110,6 +115,9 @@ export const INITIAL_STATE: BlackboardState = {
   historyHasMore: false,
   openVersion: null,
   hostStatus: null,
+  chatUnread: 0,
+  sessionTitles: {},
+  panels: ['members'],
   rail: 'members',
   loaded: false,
   loadError: null,
@@ -117,6 +125,7 @@ export const INITIAL_STATE: BlackboardState = {
 
 // What belongs to the selected workspace; cleared whenever the selection changes.
 const WORKSPACE_CONTENT = {
+  chatUnread: 0,
   members: [],
   invites: [],
   docs: [],
@@ -153,7 +162,7 @@ const NO_SESSIONS: SessionPort = {
 };
 
 // What the page was showing, kept so it opens on the same place next time.
-export type Selection = Pick<BlackboardState, 'hostId' | 'workspaceId' | 'docId' | 'rail'>;
+export type Selection = Pick<BlackboardState, 'hostId' | 'workspaceId' | 'docId' | 'rail' | 'panels'>;
 
 export interface SelectionMemory {
   load: () => Partial<Selection> | null;
@@ -164,18 +173,23 @@ const NO_MEMORY: SelectionMemory = { load: () => null, save: () => undefined };
 const RAIL_TABS: readonly RailTab[] = ['chat', 'comments', 'decisions', 'history', 'agents', 'references', 'members'];
 
 function selectionOf(state: BlackboardState): Selection {
-  return { hostId: state.hostId, workspaceId: state.workspaceId, docId: state.docId, rail: state.rail };
+  return { hostId: state.hostId, workspaceId: state.workspaceId, docId: state.docId, rail: state.rail, panels: state.panels };
+}
+
+// A panel opened (at the bottom of the stack, if it was closed) and made the one asked for.
+function withPanel(state: BlackboardState, tab: RailTab): Pick<BlackboardState, 'rail' | 'panels'> {
+  return { rail: tab, panels: state.panels.includes(tab) ? state.panels : [...state.panels, tab] };
 }
 
 function restored(saved: Partial<Selection> | null): Partial<BlackboardState> {
   if (!saved) return {};
   const id = (value: unknown) => (typeof value === 'string' && value ? value : null);
-  return {
-    hostId: id(saved.hostId),
-    workspaceId: id(saved.workspaceId),
-    docId: id(saved.docId),
-    rail: RAIL_TABS.includes(saved.rail as RailTab) ? (saved.rail as RailTab) : 'members',
-  };
+  const rail = RAIL_TABS.includes(saved.rail as RailTab) ? (saved.rail as RailTab) : 'members';
+  // Before the stacked panels there was one tab; it becomes the one open panel.
+  const panels = Array.isArray(saved.panels)
+    ? [...new Set(saved.panels.filter((tab): tab is RailTab => RAIL_TABS.includes(tab as RailTab)))]
+    : [rail];
+  return { hostId: id(saved.hostId), workspaceId: id(saved.workspaceId), docId: id(saved.docId), rail, panels };
 }
 
 const HOST_EVENTS = [
@@ -227,6 +241,7 @@ export class BlackboardController {
   private state: BlackboardState;
   private readonly listeners = new Set<() => void>();
   private unsubscribes: Array<() => void> = [];
+  private chatInView = false;
 
   constructor(
     private readonly rpc: Rpc,
@@ -373,8 +388,21 @@ export class BlackboardController {
       const result = await this.rpc<{ sessions: SessionAttachmentView[] }>('blackboard.session.list', { host: hostId, workspace_id: workspaceId });
       if (hostId !== this.state.hostId || workspaceId !== this.state.workspaceId) return;
       this.set({ sessions: result.sessions ?? [] });
+      void this.refreshSessionTitles();
     } catch (error) {
       this.set({ loadError: errorText(error) });
+    }
+  }
+
+  // The app names a chat after its first message; the Agents tab shows those names.
+  async refreshSessionTitles(): Promise<void> {
+    try {
+      const recent = await this.sessionPort.recent();
+      const titles = { ...this.state.sessionTitles };
+      for (const s of recent) if (s.title && s.title !== s.session_id) titles[s.session_id] = s.title;
+      this.set({ sessionTitles: titles });
+    } catch {
+      // The sessions keep their fallback names.
     }
   }
 
@@ -434,8 +462,24 @@ export class BlackboardController {
     void Promise.all([this.refreshThreads(), this.refreshHistory()]);
   }
 
+  // Open a panel (if it was closed) and make it the one asked for.
   selectRail(rail: RailTab): void {
-    this.set({ rail });
+    this.set(withPanel(this.state, rail));
+  }
+
+  // The activity bar's icons: open a closed panel, close an open one.
+  togglePanel(tab: RailTab): void {
+    if (!this.state.panels.includes(tab)) return this.selectRail(tab);
+    const panels = this.state.panels.filter((p) => p !== tab);
+    this.set({ panels, rail: this.state.rail === tab && panels.length ? panels[panels.length - 1] : this.state.rail });
+  }
+
+  // Put an open panel at `index` in the stack (dragging its header, or Alt+Up and Alt+Down).
+  movePanel(tab: RailTab, index: number): void {
+    const rest = this.state.panels.filter((p) => p !== tab);
+    if (rest.length === this.state.panels.length) return;
+    const at = Math.max(0, Math.min(rest.length, index));
+    this.set({ panels: [...rest.slice(0, at), tab, ...rest.slice(at)] });
   }
 
   // Show a workspace's agents, as when someone follows a chat's Blackboard tag. The page loads it
@@ -443,7 +487,7 @@ export class BlackboardController {
   openWorkspace(hostId: string, workspaceId: string): void {
     if (hostId !== this.state.hostId) this.set({ hostId, me: null, workspaces: [], workspaceId: null, ...WORKSPACE_CONTENT });
     if (workspaceId !== this.state.workspaceId) this.set({ workspaceId, ...WORKSPACE_CONTENT });
-    this.set({ rail: 'agents' });
+    this.set(withPanel(this.state, 'agents'));
     if (this.unsubscribes.length) void this.refreshWorkspaces();
   }
 
@@ -701,7 +745,14 @@ export class BlackboardController {
     if (message.workspace_id !== this.state.workspaceId) return;
     const at = this.state.chat.findIndex((m) => m.id === message.id);
     const chat = at >= 0 ? this.state.chat.map((m, i) => (i === at ? message : m)) : [...this.state.chat, message];
-    this.set({ chat });
+    const unseen = at < 0 && !this.chatInView && message.author_id !== this.state.me?.user_id;
+    this.set({ chat, ...(unseen ? { chatUnread: this.state.chatUnread + 1 } : {}) });
+  }
+
+  // The page says whether the chat panel is in view; while it is, nothing counts as unread.
+  setChatInView(inView: boolean): void {
+    this.chatInView = inView;
+    if (inView && this.state.chatUnread) this.set({ chatUnread: 0 });
   }
 
   // ---- history and export of the open document ----
@@ -734,7 +785,7 @@ export class BlackboardController {
 
   // Show a version instead of the editor, or null to go back to the document.
   openVersion(versionId: string | null): void {
-    this.set({ openVersion: versionId, ...(versionId ? { rail: 'history' as RailTab } : {}) });
+    this.set({ openVersion: versionId, ...(versionId ? withPanel(this.state, 'history') : {}) });
   }
 
   private requireDoc(): { host: string; doc_id: string } {
@@ -817,7 +868,7 @@ export class BlackboardController {
   openThread(threadId: string | null): void {
     const thread = threadId ? this.state.threads.find((th) => th.id === threadId) : undefined;
     const listed = Boolean(thread && (thread.resolved_at || thread.anchor.status === 'orphaned'));
-    this.set({ activeThread: threadId, ...(listed ? { rail: 'comments' as RailTab } : {}) });
+    this.set({ activeThread: threadId, ...(listed ? withPanel(this.state, 'comments') : {}) });
   }
 
   async createComment(body: string, options: CommentOptions = {}): Promise<ThreadView> {
@@ -903,12 +954,15 @@ export class BlackboardController {
   }
 
   // A new chat session whose agent works on the selected workspace, opened in the chat view.
+  // A new chat session working on this workspace; the page opens it in its chat box.
   async startAgentSession(): Promise<string> {
     this.requireWorkspace();
     const workspace = currentWorkspace(this.state);
-    const sessionId = await this.sessionPort.create(workspace ? workspace.title : 'Blackboard');
+    // Named after the workspace, and numbered after the first, so their tabs can be told apart.
+    const base = workspace ? workspace.title : 'Blackboard';
+    const count = this.state.sessions.length;
+    const sessionId = await this.sessionPort.create(count ? `${base} (${count + 1})` : base);
     await this.attachSession(sessionId);
-    this.sessionPort.open(sessionId);
     return sessionId;
   }
 

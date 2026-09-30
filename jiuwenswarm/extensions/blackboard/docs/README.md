@@ -37,10 +37,26 @@ Blackboard is always on: it ships in the package's `extensions` folder, which ev
 | `host/docservice/` | The document service (TypeScript, run by Node 22.5+): Hocuspocus with SQLite, document tokens, the author guard, the shared Tiptap schema, Markdown in and out, the agent view. No npm project of its own: its packages are in the web app's `package.json` |
 | `client/` | Known hosts (`hosts.json`), host links, joining with a link, local RPC proxies, reference uploads, bot links when this jiuwenswarm is a team's shared bot (`bots.py`), sessions attached to workspaces (`sessions.py`), the dispatcher that runs comment and chat tasks (`dispatcher.py`) and their prompt (`prompt.py`) |
 | `client/toolkit/` | The agent's Blackboard tools and their bridge to openjiuwen, handed to the AgentServer through the `agent_tools` hook |
-| `frontend/` | The page (bundled into the web app), its controller, dialogs, panels and rail icon. One controller lives for the app's lifetime and remembers the host, workspace, document and rail tab in `localStorage` (`blackboard.selection`), so the page opens where it was left |
+| `frontend/` | The page (bundled into the web app), its controller, dialogs, panels and rail icon. One controller lives for the app's lifetime and remembers the host, workspace, document and open panels in `localStorage` (`blackboard.selection`), so the page opens where it was left; `layout.ts` keeps the sizes |
+| `frontend/components/Dock.tsx`, `Resizer.tsx`, `AgentChat.tsx`, `Shortcuts.tsx` | The icon bar and stacked panels, the resize handles, the agent chat box, and the keyboard shortcuts with their list and the document switcher |
 | `frontend/chat/` | The + menu item and the input tag in the chat |
 | `frontend/editor/` | The document editor, loaded lazily: the provider session, the author stamp, the authors legend, comment highlights and anchors (`comments.ts`) |
 | `tests/backend/`, `tests/frontend/` | pytest and node:test suites |
+
+## The page
+
+```mermaid
+flowchart LR
+    S[Sidebar<br/>hosts, workspaces, documents] --- M[Document<br/>editor, versions]
+    M --- D[Panels on the right<br/>stacked]
+    D --- A[Icon bar]
+    C[Agent chat box<br/>over the document] -.- M
+```
+
+- **Icon bar and panels.** The icons on the right edge open and close the panels (chat, comments, decisions, history, agents, references, members). Any number are open at once, stacked; each folds to its header (its chevron, or a double-click), closes, moves by dragging its header (or Alt+Up and Alt+Down), and shares the height with the next one through the handle between them. `controller.panels` holds the open panels in order and `rail` the one last asked for; code that asks for a panel (`selectRail`, following a chat's tag, opening a version or a detached thread) opens it at the bottom of the stack and unfolds it.
+- **Sizes.** The sidebar and the panels resize by dragging their inner edge (or focusing it and using the arrow keys), and each hides: the sidebar to a thin strip, the panels behind the last icon. `frontend/layout.ts` keeps the sizes, the folded panels and the chat box in `localStorage` (`blackboard.layout`); the open panels are part of `blackboard.selection`. The document column stops at 1,180 px so lines stay readable on a wide screen.
+- **Agent chat box.** Choosing a session in the Agents panel (or **New agent session**) opens it in a chat box over the document, with a tab per session, instead of leaving for the chat page; **Open in the chat page** still goes there. The box reads the app's own chat store (`useChatStore.runtimes[session]`), which receives every session's events, and loads a session's history with the app's `beginHistoryRestore` only when the store and the main chat do not have it already. It sends with `chat.send` (adding the person's message to the store first, as the main chat does) and stops with `chat.interrupt`. A question from the agent (a permission prompt, say) is answered in the chat page; the box says so with a button. Messages from others in the workspace chat count on the chat icon while the chat panel is out of view.
+- **Shortcuts.** Ctrl+Alt with a digit toggles the panels in icon order; Ctrl+Alt+S the sidebar, Ctrl+Alt+B the panels, Ctrl+Alt+J the chat box, Ctrl+Alt+O a document switcher, Ctrl+Alt+N a new document; `?` lists them all. They are matched by physical key and never fire with AltGr, so typing in any keyboard layout is unaffected (`frontend/components/Shortcuts.tsx`).
 
 ## Run a host
 
@@ -93,7 +109,7 @@ Rules worth knowing:
 
 ## Agents
 
-A person with the editor role or above can let an agent work on a workspace. On the page's **Agents** tab, **New agent session** creates a chat session, attaches it to the workspace and opens it in the chat; **Use an existing session** attaches one of the person's other sessions. From the chat itself, **+ > Blackboard workspace** lists the workspaces the person can edit on every joined host, with a switch each: turning one on adds the workspace to the session (creating the session first for a new task), turning it off takes it away. A session can work on several workspaces, on one or more hosts; the attachments are recorded in `client/sessions.json`, so they survive restarts. An attached session shows a Blackboard icon in the chat input; hovering lists the workspaces, and a click opens the first on the Agents tab.
+A person with the editor role or above can let an agent work on a workspace. On the page's **Agents** panel, **New agent session** creates a chat session (named after the workspace, numbered after the first), attaches it to the workspace and opens it in the chat box; **Use an existing session** attaches one of the person's other sessions. The panel lists the attached sessions by their chat names; the one tasks from comments and the chat run in is tagged **Tasks**. From the chat itself, **+ > Blackboard workspace** lists the workspaces the person can edit on every joined host, with a switch each: turning one on adds the workspace to the session (creating the session first for a new task), turning it off takes it away. A session can work on several workspaces, on one or more hosts; the attachments are recorded in `client/sessions.json`, so they survive restarts. An attached session shows a Blackboard icon in the chat input; hovering lists the workspaces, and a click opens the first on the Agents tab.
 
 The chat parts use two general plugin exports from `frontend/index.tsx`: `applicationPluginTaskMenuItem` (an item in the chat's + menu, with its own panel) and `applicationPluginTaskInputTag` (a tag in the input toolbar). Both get `sessionId`, which is null until a new conversation has a session.
 
@@ -297,7 +313,7 @@ The browser calls these on its own web channel; all are local-only.
 | `blackboard.doc.list/create/rename/archive/pin/set_instructions/import_markdown/token/read`, `blackboard.reference.list/url/read/remove/set_note` | the host, through the client part |
 | `blackboard.identity.link_code`, `.identity.list`, `.identity.unlink {platform, external_id}`, and for the host's operator `blackboard.bot.create {name}`, `.bot.list`, `.bot.revoke {bot_id}` | the host, through the client part |
 | `blackboard.reference.upload {workspace_id, name, mime, data, note?}` (the file as base64) | the client part, which posts it to the host as multipart |
-| `blackboard.session.attach {host, workspace_id, session_id}`, `.session.detach {session_id, host?, workspace_id?}`, `.session.list {host?, workspace_id?, session_id?}` | client part; attaching adds a workspace to the session after asking the host for the person's role, and takes the workspace title from it; detaching without a workspace takes all of them; the list gives one row per session and workspace, with the host name |
+| `blackboard.session.attach {host, workspace_id, session_id}`, `.session.detach {session_id, host?, workspace_id?}`, `.session.list {host?, workspace_id?, session_id?}` | client part; attaching adds a workspace to the session after asking the host for the person's role, and takes the workspace title from it; detaching without a workspace takes all of them; the list gives one row per session and workspace, with the host name and `is_default` for the workspace's task session |
 | `blackboard.mandate.list {workspace_id}` (with receipts and the suggestions still pending), `.mandate.cancel {mandate_id}`, `.mandate.resolve_unknown {mandate_id, status}`, `blackboard.suggestion.list {doc_id}`, `.suggestion.decide {doc_id, suggestion_ids, action}` | the host, through the client part |
 | `blackboard.comment.create {doc_id, anchor, body, mentions, scope_switch?, session_id?}`, `.comment.reply {thread_id, body, mentions, scope_switch?, session_id?}`, `.comment.edit {comment_id, body}`, `.comment.resolve/reopen {thread_id}`, `.comment.list {doc_id, include_resolved?}` | the host, through the client part |
 | `blackboard.chat.post {workspace_id, body, mentions, session_id?}`, `.chat.list {workspace_id, before?, limit?}` (50 per page by default) | the host, through the client part |
@@ -332,6 +348,7 @@ npm run test:blackboard-docservice
 | Host status "The host did not accept this member" | The member was removed from the host or the token was replaced; join again with a new link |
 | Host status "Offline, retrying" | The host is not running or its address changed; the link retries every few seconds, up to 30 s apart |
 | An invite link works only on the host's machine | `bind` is `127.0.0.1` or `public_url` is empty |
+| Creating an invite says "The host could not complete the request" | A host created early in milestone 2 had invites that needed an expiry and a use limit; migration 7 fixes the table when the host starts with this version |
 | "Documents are unavailable: the document service is not built" | A source checkout whose web app was never built: run `npm install` and `npm run build` (or `npm run dev`) in `jiuwenswarm/channels/web/frontend` |
 | "The document service did not start" | See `host/docservice.log`; often `doc_port` or `doc_api_port` is taken |
 | A member's document stays at "Connecting" | Their browser cannot reach `doc_port` (firewall or proxy); set `doc_public_url`. If `host/docservice.log` says "refused a connection from origin", the web app is opened at an address the host does not allow: add it to `allowed_origins` |

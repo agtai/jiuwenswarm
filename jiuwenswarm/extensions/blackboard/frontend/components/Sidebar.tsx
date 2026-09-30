@@ -1,11 +1,13 @@
 import { useTranslation } from 'react-i18next';
-import { BookMarked, FileText, Link2, Pin, Plus, Settings2 } from 'lucide-react';
+import { BookMarked, FileText, Link2, PanelLeftClose, Pin, Plus, Settings2 } from 'lucide-react';
 
 import { Button, Select } from '../../../../channels/web/frontend/src/components/ui';
 import { canEdit, type BlackboardState } from '../controller';
 import type { DocView, WorkspaceView } from '../types';
 
 export function Sidebar({
+  width,
+  onHide,
   state,
   onSelectHost,
   onSelectWorkspace,
@@ -15,6 +17,8 @@ export function Sidebar({
   onNewWorkspace,
   onSettings,
 }: {
+  width: number;
+  onHide: () => void;
   state: BlackboardState;
   onSelectHost: (hostId: string) => void;
   onSelectWorkspace: (workspaceId: string) => void;
@@ -30,7 +34,7 @@ export function Sidebar({
   const archived = state.workspaces.filter((w) => w.archived);
 
   return (
-    <aside className="bb-sidebar" data-testid="blackboard-sidebar">
+    <aside className="bb-sidebar" style={{ width }} data-testid="blackboard-sidebar">
       <div className="bb-sidebar__host">
         <div className="bb-sidebar__host-row">
           <Select
@@ -53,6 +57,15 @@ export function Sidebar({
             title={t('blackboard.host.settings')}
             data-testid="blackboard-settings-btn"
             onClick={onSettings}
+          />
+          <Button
+            variant="quiet"
+            size="sm"
+            icon={<PanelLeftClose size={16} />}
+            aria-label={t('blackboard.layout.hideSidebar')}
+            title={`${t('blackboard.layout.hideSidebar')} (Ctrl+Alt+S)`}
+            data-testid="blackboard-sidebar-hide-btn"
+            onClick={onHide}
           />
         </div>
         {host ? (

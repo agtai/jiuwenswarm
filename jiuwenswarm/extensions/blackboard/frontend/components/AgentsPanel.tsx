@@ -1,20 +1,22 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Ban, Bot, Check, CircleCheck, CircleX, ExternalLink, Link2, Unlink, X } from 'lucide-react';
+import { Ban, Bot, Check, CircleCheck, CircleX, ExternalLink, Link2, MessageSquare, Unlink, X } from 'lucide-react';
 
-import { Button, Select } from '../../../../channels/web/frontend/src/components/ui';
+import { Button, Select, Tag } from '../../../../channels/web/frontend/src/components/ui';
 import type { DocView, MandateView, SessionAttachmentView } from '../types';
 import { ACTIVE, TaskTag } from './tasks';
 
 export function AgentsPanel({
   mandates,
   sessions,
+  sessionTitles,
   docs,
   meId,
   canEdit,
   onStart,
   onLoadAttachable,
   onAttach,
+  onChat,
   onOpen,
   onDetach,
   onCancel,
@@ -23,12 +25,16 @@ export function AgentsPanel({
 }: {
   mandates: MandateView[];
   sessions: SessionAttachmentView[];
+  // The app's names for the person's chats.
+  sessionTitles: Record<string, string>;
   docs: DocView[];
   meId: string | null;
   canEdit: boolean;
   onStart: () => Promise<void>;
   onLoadAttachable: () => Promise<Array<{ session_id: string; title: string }>>;
   onAttach: (sessionId: string) => Promise<void>;
+  // Talk to the session in the chat box over the page; onOpen goes to the app's chat instead.
+  onChat: (sessionId: string) => void;
   onOpen: (sessionId: string) => void;
   onDetach: (sessionId: string) => void;
   onCancel: (mandate: MandateView) => void;
@@ -97,10 +103,30 @@ export function AgentsPanel({
           <ul className="bb-session-list">
             {sessions.map((s) => (
               <li key={s.session_id} className="bb-session" data-testid="blackboard-agents-session" data-variant={s.session_id}>
-                <span className="bb-session__name">{t('blackboard.agents.sessionSince', { time: new Date(s.attached_at).toLocaleString() })}</span>
-                <Button size="sm" variant="quiet" icon={<ExternalLink size={13} />} data-testid="blackboard-agents-session-open-btn" onClick={() => onOpen(s.session_id)}>
-                  {t('blackboard.agents.open')}
-                </Button>
+                <button
+                  type="button"
+                  className="bb-session__name"
+                  title={t('blackboard.agents.chatHint')}
+                  data-testid="blackboard-agents-session-chat-btn"
+                  onClick={() => onChat(s.session_id)}
+                >
+                  <MessageSquare size={13} aria-hidden="true" />
+                  <span>{sessionTitles[s.session_id] ?? t('blackboard.agents.sessionSince', { time: new Date(s.attached_at).toLocaleString() })}</span>
+                  {s.is_default ? (
+                    <Tag variant="neutral" title={t('blackboard.agents.tasksSessionHint')} data-testid="blackboard-agents-session-tasks-tag">
+                      {t('blackboard.agents.tasksSession')}
+                    </Tag>
+                  ) : null}
+                </button>
+                <Button
+                  size="sm"
+                  variant="quiet"
+                  icon={<ExternalLink size={13} />}
+                  aria-label={t('blackboard.agents.open')}
+                  title={t('blackboard.agents.open')}
+                  data-testid="blackboard-agents-session-open-btn"
+                  onClick={() => onOpen(s.session_id)}
+                />
                 <Button
                   size="sm"
                   variant="quiet"

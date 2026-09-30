@@ -135,7 +135,6 @@ export default function DocumentEditor({ docId, fetchToken, me, names, header, t
   return (
     <section className="bb-doc" data-testid="blackboard-doc">
       <header className="bb-doc__head">
-        {header}
         <div className="bb-doc__meta">
           {state.frozen ? (
             <Tag variant="neutral" data-testid="blackboard-doc-frozen">
@@ -178,6 +177,7 @@ export default function DocumentEditor({ docId, fetchToken, me, names, header, t
           names={names}
           showAuthors={showAuthors}
           title={title}
+          header={header}
           suggestions={suggestions}
           comments={comments}
         />
@@ -196,6 +196,7 @@ function LiveEditor({
   names,
   showAuthors,
   title,
+  header,
   suggestions,
   comments,
 }: {
@@ -206,6 +207,7 @@ function LiveEditor({
   names: ReadonlyMap<string, string>;
   showAuthors: boolean;
   title: ReactNode;
+  header: ReactNode;
   suggestions: SuggestionActions;
   comments: CommentActions;
 }) {
@@ -333,7 +335,11 @@ function LiveEditor({
     >
       {editor && !readOnly ? <Toolbar editor={editor} /> : null}
       {editor && showAuthors ? <AuthorsLegend editor={editor} names={names} /> : null}
-      {title}
+      {/* The document menu sits next to the name it acts on. */}
+      <div className="bb-doc-titlebar">
+        {title}
+        {header}
+      </div>
       <div className="bb-editor__body">
         <SuggestionCards names={names} actions={readOnly ? { ...suggestions, decide: null, decideRun: null } : suggestions}>
           <EditorContent editor={editor} className="bb-editor__scroll" />
