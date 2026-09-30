@@ -355,7 +355,7 @@ class SessionTools:
             return {**result, "message": "Nothing changed: the Markdown you sent equals the current text of these blocks."}
         return {
             **result,
-            "message": "Your changes are suggestions now; the people in the workspace accept or reject them. When you are done, sum up what you suggested in one or two short sentences.",
+            "message": "Your changes are suggestions now; the people in the workspace accept or reject them. When you are done, sum up what you suggested in one or two short sentences, naming sections by their headings, not by block ids.",
         }
 
     async def ask(
@@ -454,7 +454,9 @@ class SessionTools:
                 "blackboard_read",
                 "Read a document as Markdown, as accepted (pending suggestions left out; `pending_suggestions` lists "
                 "them). Every top-level block starts with a <!-- block:<id> --> line, and `blocks` gives each block's "
-                "digest, which blackboard_edit needs. view 'proposed' shows pending suggestions as if accepted.",
+                "digest, which blackboard_edit needs. view 'proposed' shows pending suggestions as if accepted. Block, "
+                "document and workspace ids are for the tools only: when you talk to people, name documents and "
+                "sections by their titles and headings, never by id.",
                 {
                     "type": "object",
                     "properties": {
