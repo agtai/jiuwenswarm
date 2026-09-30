@@ -9,6 +9,7 @@ from contextvars import ContextVar
 from dataclasses import replace
 
 from openjiuwen.core.foundation.llm import ToolMessage
+from openjiuwen.core.runner.callback.errors import AbortError
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.single_agent.ability_manager import resolve_tool_message
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, RunContext
@@ -72,18 +73,20 @@ class UserHookRail(DeepAgentRail):
         config = getattr(agent, "deep_config", None)
         if config is None:
             return
+        active = [self, *agent.configured_rails()] if hasattr(agent, "configured_rails") else [self]
         specs = []
         for spec in config.subagents or []:
             if isinstance(spec, SubAgentConfig):
-                rails = spec.rails or []
+                rails = [rail for rail in spec.rails or [] if not self._stale(rail, active)]
                 if any(self._owns(rail) for rail in rails):
-                    specs.append(spec)
+                    specs.append(spec if len(rails) == len(spec.rails) else replace(spec, rails=rails))
                 else:
                     specs.append(replace(spec, rails=[*rails, self.fork_for_agent()]))
             else:
                 # The SDK also accepts preconstructed DeepAgent children.
                 # Activate queued forks through the public async API before
                 # delegation, even if this child was already initialized.
+                # init() alone only queues: the host must enter before_invoke.
                 if not any(self._owns(rail) for rail in spec.configured_rails()):
                     spec.add_rail(self.fork_for_agent())
                 specs.append(spec)
@@ -93,15 +96,27 @@ class UserHookRail(DeepAgentRail):
     def _owns(self, rail) -> bool:
         return isinstance(rail, UserHookRail) and rail._parent_hook is self
 
+    @staticmethod
+    def _stale(rail, active) -> bool:
+        # Keep custom rails and forks of other still-active parent hook rails.
+        # Only retire inheritance from a parent rail that has been detached.
+        return (isinstance(rail, UserHookRail) and rail._parent_hook is not None
+                and all(rail._parent_hook is not parent for parent in active))
+
     async def _activate_child_hooks(self, agent) -> None:
         config = getattr(agent, "deep_config", None)
+        active = [self, *agent.configured_rails()] if hasattr(agent, "configured_rails") else [self]
         for child in getattr(config, "subagents", None) or []:
             if isinstance(child, SubAgentConfig):
                 continue
             for rail in child.configured_rails():
-                if self._owns(rail) and child.is_pending_rail(rail):
+                if self._stale(rail, active):
+                    await child.unregister_rail(rail)
+                elif self._owns(rail) and child.is_pending_rail(rail):
                     # register_rail initializes once and routes tool callbacks
                     # to the inner agent. Remove the queue entry only on success.
+                    # Deliberately fail closed: registration errors abort the
+                    # parent turn rather than delegate without required hooks.
                     await child.register_rail(rail)
                     child.remove_pending_rail(rail)
 
@@ -122,8 +137,13 @@ class UserHookRail(DeepAgentRail):
     # ---- PreToolUse: BEFORE_TOOL_CALL ----
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
-        self._propagate_hooks(getattr(ctx, "agent", None))
-        await self._activate_child_hooks(getattr(ctx, "agent", None))
+        try:
+            self._propagate_hooks(getattr(ctx, "agent", None))
+            await self._activate_child_hooks(getattr(ctx, "agent", None))
+        except Exception as exc:
+            # The SDK logs ordinary callback exceptions and continues. Use its
+            # explicit abort signal to fail closed before any delegation.
+            raise AbortError("Cannot safely install inherited user hooks", cause=exc) from exc
         # HITL resumes execute tools before any model call. ContextVar also
         # bridges DeepAgent's outer callbacks to its inner ReAct/tool tasks,
         # while keeping concurrent invocations isolated.

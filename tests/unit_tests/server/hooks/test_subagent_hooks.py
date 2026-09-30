@@ -98,6 +98,7 @@ async def test_child_identity_on_all_events(event, method):
 
 
 def test_preserves_custom_hooks_and_follows_parent_policy():
+    """Simulate future policy replacement; the current host has no such caller."""
     custom = UserHookRail(HooksConfig())
     spec = SubAgentConfig(agent_card=AgentCard(name="code_agent"), system_prompt="", rails=[custom])
     parent = SimpleNamespace(deep_config=SimpleNamespace(subagents=[spec]))
@@ -193,6 +194,7 @@ async def _invoke_without_model(agent, monkeypatch):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("already_initialized", [False, True])
 async def test_preconstructed_child_activation_and_policy_refresh(tmp_path, monkeypatch, already_initialized):
+    """Exercise live attachment and simulate a future policy-reload integration."""
     child = DeepAgent(AgentCard(name="prebuilt")).configure(DeepAgentConfig())
     custom = UserHookRail(HooksConfig())
     child.add_rail(custom)
@@ -251,3 +253,75 @@ async def test_replacement_specs_propagate_through_real_invoke(monkeypatch):
     assert len([r for r in configured.rails if rail._owns(r)]) == 1
     await _invoke_without_model(parent, monkeypatch)
     assert parent.deep_config.subagents[0] is configured
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("preconstructed", [False, True])
+async def test_replacing_root_rail_retires_stale_child_hooks(tmp_path, monkeypatch, preconstructed):
+    """Defend against future host reloads that replace the root rail instance."""
+    old_log = tmp_path / "old-hook.jsonl"
+    old = UserHookRail(HooksConfig(events={"PreToolUse": [HookMatcher(
+        matcher="bash", hooks=[{"command": f"cat >> {shlex.quote(str(old_log))}; exit 2"}],
+    )]}))
+    custom = UserHookRail(HooksConfig())
+    if preconstructed:
+        spec = DeepAgent(AgentCard(name="worker")).configure(DeepAgentConfig(rails=[custom]))
+        await _invoke_without_model(spec, monkeypatch)
+    else:
+        spec = SubAgentConfig(agent_card=AgentCard(name="worker"), system_prompt="", rails=[custom])
+    parent = DeepAgent(AgentCard(name="parent")).configure(DeepAgentConfig(subagents=[spec], rails=[old]))
+    await _invoke_without_model(parent, monkeypatch)
+    replacement = UserHookRail(HooksConfig())
+    # Use SDK reconfiguration and stale-rail cleanup, not a hand-built callback.
+    parent.configure(DeepAgentConfig(subagents=parent.deep_config.subagents, rails=[replacement]))
+    await _invoke_without_model(parent, monkeypatch)
+    configured = parent.deep_config.subagents[0]
+    rails = configured.configured_rails() if preconstructed else configured.rails
+    assert custom in rails
+    assert not any(old._owns(r) for r in rails)
+    assert sum(replacement._owns(r) for r in rails) == 1
+    child = parent.create_subagent("worker", "replacement-session")
+    if not preconstructed:
+        for rail in child.configured_rails():
+            if isinstance(rail, UserHookRail):
+                await child.register_rail(rail)
+                child.remove_pending_rail(rail)
+    manager = child._react_agent.ability_manager
+    execute = AsyncMock(return_value=("executed", None))
+    monkeypatch.setattr(manager, "_execute_single_tool_call", execute)
+    session = SimpleNamespace(get_session_id=lambda: "replacement-session")
+    await manager.execute(
+        ctx=AgentCallbackContext(agent=child._react_agent, session=session),
+        tool_call=ToolCall(id="bash", type="function", name="bash", arguments='{}'),
+        session=session, parallel_tool_calls=False,
+    )
+    assert execute.await_count == 1
+    assert not old_log.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("preconstructed", [False, True])
+async def test_keeps_forks_of_other_active_parent_hooks(monkeypatch, preconstructed):
+    first, second = UserHookRail(HooksConfig()), UserHookRail(HooksConfig())
+    spec = (DeepAgent(AgentCard(name="worker")).configure(DeepAgentConfig()) if preconstructed
+            else SubAgentConfig(agent_card=AgentCard(name="worker"), system_prompt=""))
+    parent = DeepAgent(AgentCard(name="parent")).configure(DeepAgentConfig(subagents=[spec], rails=[first, second]))
+    await _invoke_without_model(parent, monkeypatch)
+    await _invoke_without_model(parent, monkeypatch)
+    configured = parent.deep_config.subagents[0]
+    rails = configured.configured_rails() if preconstructed else configured.rails
+    assert sum(first._owns(r) for r in rails) == 1
+    assert sum(second._owns(r) for r in rails) == 1
+
+
+@pytest.mark.asyncio
+async def test_child_registration_error_aborts_parent_turn(monkeypatch):
+    child = DeepAgent(AgentCard(name="worker")).configure(DeepAgentConfig())
+    rail = UserHookRail(HooksConfig())
+    parent = DeepAgent(AgentCard(name="parent")).configure(DeepAgentConfig(subagents=[child], rails=[rail]))
+    monkeypatch.setattr(child, "register_rail", AsyncMock(side_effect=RuntimeError("cannot register hook")))
+    with pytest.raises(RuntimeError, match="cannot register hook"):
+        await _invoke_without_model(parent, monkeypatch)
+    parent._run_single_round_invoke.assert_not_awaited()
+    inherited = next(r for r in child.configured_rails() if rail._owns(r))
+    assert child.is_pending_rail(inherited)
