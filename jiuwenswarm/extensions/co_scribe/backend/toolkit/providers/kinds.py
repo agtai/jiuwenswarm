@@ -117,11 +117,11 @@ def adopted_titles(doc_ids) -> list[str]:
     """The registered documents' titles, straight from the panel's persisted
     metadata -- synchronous and fail-soft like the priming above.
 
-    The tool cards put these in front of the model at routing time: a title
-    that looks like a filename ("README.md", a deck name) sent the model to
-    the local filesystem three campaigns in a row, because nothing in its
-    context said the name belongs to a cloud document. The titles themselves
-    are the signal; prose alone did not hold.
+    These are put in front of the model at routing time: a title that looks
+    like a filename ("README.md", a deck name) sent the model to the local
+    filesystem three campaigns in a row, because nothing in its context said
+    the name belongs to a cloud document. The titles themselves are the
+    signal; prose alone did not hold.
     """
     try:
         import json as _json
@@ -138,3 +138,28 @@ def adopted_titles(doc_ids) -> list[str]:
         return out
     except Exception:  # noqa: BLE001
         return []
+
+
+# How many titles the note names before it only counts the rest.
+MAX_TITLES_IN_NOTE = 12
+
+
+def adopted_titles_note(doc_ids) -> str:
+    """One line naming the adopted documents, or "" when there are none.
+
+    **Delivered as a prompt attachment, never as tool-card text.** Tool schemas
+    are rendered ahead of everything else in the prompt, so a card that names
+    the adopted documents changes the cached prefix whenever one is adopted --
+    measured: the next request reused nothing and took 20.5 s instead of 0.7 s.
+    An attachment is appended to the history instead, once, and again only when
+    the set changes. Capped so a large deployment does not bloat the context.
+    """
+    titles = adopted_titles(doc_ids)
+    if not titles:
+        return ""
+    shown = "、".join(f"《{x}》" for x in titles[:MAX_TITLES_IN_NOTE])
+    more = f" 等 {len(titles)} 篇" if len(titles) > MAX_TITLES_IN_NOTE else ""
+    return (
+        f"当前已纳管的云文档：{shown}{more}。这些名字都是云文档——哪怕像文件名——"
+        "直接用 clouddoc_* 工具处理，不要去本地文件系统里找。"
+    )

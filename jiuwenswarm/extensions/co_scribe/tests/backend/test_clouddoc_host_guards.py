@@ -145,17 +145,36 @@ def test_reads_are_still_admitted_by_position(cmd):
     assert _is_guarded_cli_command(cmd) is False
 
 
-def test_read_card_carries_the_adopted_titles(tmp_path, monkeypatch):
-    """The routing evidence: registered titles appear in the read card, capped."""
+def _adopted(tmp_path, monkeypatch, count):
+    """Persist ``count`` titled documents where the panel keeps them; return their ids."""
     from jiuwenswarm.extensions.co_scribe.backend.toolkit.providers import kinds as kinds_mod
-    from jiuwenswarm.extensions.co_scribe.backend.toolkit.clouddoc_tools import CloudDocToolkit
 
     state = tmp_path / "clouddoc-state.json"
-    docs = {f"d{i}": {"panel_meta": {"title": f"文档{i}"}} for i in range(14)}
+    docs = {f"d{i}": {"panel_meta": {"title": f"文档{i}"}} for i in range(count)}
     # The live file's top level IS the doc map (no wrapper) -- the shape that
     # slipped past the first version of adopted_titles. Assert on it directly.
     state.write_text(json.dumps(docs), encoding="utf-8")
     monkeypatch.setattr(kinds_mod, "get_clouddoc_state_path", lambda: state)
+    return list(docs)
+
+
+def test_the_titles_note_names_the_adopted_documents_and_is_capped(tmp_path, monkeypatch):
+    """The routing evidence: registered titles, capped, and nothing when none exist."""
+    from jiuwenswarm.extensions.co_scribe.backend.toolkit.providers.kinds import adopted_titles_note
+
+    ids = _adopted(tmp_path, monkeypatch, 14)
+    note = adopted_titles_note(ids)
+    assert "《文档0》" in note and "等 14 篇" in note
+    assert "《文档13》" not in note  # capped at 12
+    assert adopted_titles_note([]) == ""
+
+
+def test_tool_cards_do_not_change_with_what_is_adopted(tmp_path, monkeypatch):
+    """Tool schemas open the cached prefix, so adoption must not reach into them:
+    two deployments that differ only in their documents present identical cards."""
+    from jiuwenswarm.extensions.co_scribe.backend.toolkit.clouddoc_tools import CloudDocToolkit
+
+    ids = _adopted(tmp_path, monkeypatch, 3)
 
     class _P:
         kind = "fake"
@@ -163,15 +182,72 @@ def test_read_card_carries_the_adopted_titles(tmp_path, monkeypatch):
         def parse_doc_ref(self, r): return r
         def doc_url(self, d, k=""): return d
 
-    kit = CloudDocToolkit(_P(), turn_address=lambda: "x",
-                          watched_docs=lambda: [f"d{i}" for i in range(14)])
-    card = next(t.card for t in kit.get_tools() if t.card.name == "clouddoc_read")
-    assert "《文档0》" in card.description and "等 14 篇" in card.description
-    assert "《文档13》" not in card.description  # capped at 12
+    def cards(watched):
+        kit = CloudDocToolkit(_P(), turn_address=lambda: "x", watched_docs=lambda: watched)
+        return [(t.card.name, t.card.description, json.dumps(t.card.input_params, sort_keys=True))
+                for t in kit.get_tools()]
 
-    kit2 = CloudDocToolkit(_P(), turn_address=lambda: "x", watched_docs=lambda: [])
-    card2 = next(t.card for t in kit2.get_tools() if t.card.name == "clouddoc_read")
-    assert "当前已纳管" not in card2.description
+    assert cards(ids) == cards([])
+    assert not any("文档0" in description for _, description, _ in cards(ids))
+
+
+class _Attachments:
+    """The slice of the host's prompt-attachment manager the rail uses."""
+
+    def __init__(self, session_id):
+        self.session_id = session_id
+        self.sections: dict[str, str] = {}
+
+    def bind_context(self, ctx):
+        return self
+
+    async def add_section(self, section, content, kind, source, **_):
+        self.sections[section] = content
+
+    async def clear_section(self, section):
+        return 1 if self.sections.pop(section, None) is not None else 0
+
+
+def _enable_clouddoc(monkeypatch, documents):
+    import jiuwenswarm.common.config as config_mod
+
+    cfg = {"clouddoc": {"enabled": True, "connections": [
+        {"provider": "google", "credentials_file": "/k/sa.json", "documents": list(documents)},
+    ]}}
+    monkeypatch.setattr(config_mod, "get_config", lambda: cfg)
+
+
+@pytest.mark.asyncio
+async def test_a_chat_turn_gets_the_titles_as_a_prompt_attachment(tmp_path, monkeypatch):
+    ids = _adopted(tmp_path, monkeypatch, 2)
+    _enable_clouddoc(monkeypatch, ids)
+    manager = _Attachments("sess-chat")
+    ctx = _NS(agent=_NS(prompt_attachment_manager=manager), inputs={}, extra={})
+
+    await CloudDocFileGuardRail().before_invoke(ctx)
+    assert "《文档0》" in manager.sections["clouddoc.adopted_titles"]
+
+    # Nothing adopted any more: the note is withdrawn rather than left stale.
+    _enable_clouddoc(monkeypatch, [])
+    await CloudDocFileGuardRail().before_invoke(ctx)
+    assert manager.sections == {}
+
+
+@pytest.mark.asyncio
+async def test_an_unattended_turn_gets_no_document_list(tmp_path, monkeypatch):
+    """It is bound to one document; the others are none of its business."""
+    ids = _adopted(tmp_path, monkeypatch, 2)
+    _enable_clouddoc(monkeypatch, ids)
+    manager = _Attachments("clouddoc_d0_1")
+    ctx = _NS(agent=_NS(prompt_attachment_manager=manager), inputs={}, extra={})
+
+    await CloudDocFileGuardRail().before_invoke(ctx)
+    assert manager.sections == {}
+
+
+@pytest.mark.asyncio
+async def test_a_host_without_attachments_still_runs_the_turn():
+    await CloudDocFileGuardRail().before_invoke(_NS(agent=_NS(), inputs={}, extra={}))
 
 
 # ------------------------- review: the tools the host actually registers, and the wrappers

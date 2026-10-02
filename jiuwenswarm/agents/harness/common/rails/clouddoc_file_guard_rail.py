@@ -305,6 +305,33 @@ def _is_guarded_cli_command(command: Any) -> bool:
     return True
 
 
+_TITLES_SECTION = "clouddoc.adopted_titles"
+
+
+def _is_unattended_session(session_id: str | None) -> bool:
+    """The watcher's sessions are named ``clouddoc_<doc_id>_<generation>``."""
+    return str(session_id or "").startswith("clouddoc_")
+
+
+def _adopted_titles_note() -> str:
+    """The adopted documents of every connection, as one line; "" when the feature is
+    off, nothing is adopted, or the plugin is not installed."""
+    try:
+        from jiuwenswarm.common.config import get_config
+        from jiuwenswarm.extensions.co_scribe.backend.toolkit.providers.kinds import (
+            adopted_titles_note,
+        )
+        from jiuwenswarm.extensions.co_scribe.backend.toolkit.providers.provider import (
+            read_connection_specs,
+        )
+    except ImportError:
+        return ""
+    cfg = get_config().get("clouddoc") or {}
+    if not cfg.get("enabled"):
+        return ""
+    return adopted_titles_note([d for spec in read_connection_specs(cfg) for d in spec["documents"]])
+
+
 class CloudDocFileGuardRail(DeepAgentRail):
     """Refuse generic-tool writes to co-scribe's files, and to the documents themselves.
 
@@ -313,6 +340,34 @@ class CloudDocFileGuardRail(DeepAgentRail):
     """
 
     priority: int = 100
+
+    async def before_invoke(self, ctx: AgentCallbackContext) -> None:
+        """Tell the model which names are cloud documents, as a prompt attachment.
+
+        The other half of keeping generic file tools off cloud documents: a title
+        that looks like a filename sends the model to the local disk unless its
+        context says otherwise. The note used to sit in the read tool's card; it is
+        an attachment now because a card is part of the cached prefix and this text
+        changes with every adoption. The attachment manager appends it to the
+        history once and again only when it changes.
+
+        An unattended turn is bound to one document and gets no list. Any failure
+        here leaves the turn without the note, never without the turn.
+        """
+        manager = getattr(getattr(ctx, "agent", None), "prompt_attachment_manager", None)
+        if manager is None:
+            return
+        try:
+            writer = manager.bind_context(ctx)
+            note = "" if _is_unattended_session(writer.session_id) else _adopted_titles_note()
+            if note:
+                await writer.add_section(
+                    _TITLES_SECTION, note, "text", "jiuwenswarm.clouddoc", priority=90,
+                )
+            else:
+                await writer.clear_section(_TITLES_SECTION)
+        except Exception:  # noqa: BLE001 - routing evidence is help, not a gate
+            logger.debug("[CloudDocFileGuardRail] adopted-titles note skipped", exc_info=True)
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         inputs = ctx.inputs
