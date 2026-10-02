@@ -580,3 +580,42 @@ def test_the_sentence_tier_reaches_the_full_stop_the_selection_stopped_short_of(
                        [("agent 没有提供回退工具，也不会替用户去覆盖或撤销历史。", new)],
                        cfg, scope="sentence")
     assert over.verdict is RailVerdict.OUT_OF_RANGE, "放宽到句，不是放宽到段"
+
+
+# ------------------------------------------------ the passage a turn works from
+
+
+def _snap(text, kind="document"):
+    from jiuwenswarm.extensions.co_scribe.backend.toolkit.providers.provider import DocSnapshot
+
+    return DocSnapshot(doc_id="d", kind=kind, revision_id="r1", text=text)
+
+
+def test_anchor_context_is_the_enclosing_paragraph():
+    from jiuwenswarm.extensions.co_scribe.backend.toolkit.rails.range_rail import anchor_context
+
+    body = "第一段第一句。第一段第二句。\n\n第二段：目标句子在这里。还有一句。\n\n第三段。"
+    assert anchor_context(_snap(body), "目标句子") == "第二段：目标句子在这里。还有一句。"
+
+
+def test_anchor_context_narrows_to_nearby_lines_in_one_long_paragraph():
+    from jiuwenswarm.extensions.co_scribe.backend.toolkit.rails.range_rail import anchor_context
+
+    lines = [f"第{i}行 " + "甲" * 300 for i in range(40)]  # no blank line: one paragraph
+    lines[20] = "第20行 唯一的目标句子。"
+    passage = anchor_context(_snap("\n".join(lines)), "唯一的目标句子")
+    assert passage.split("\n")[2] == "第20行 唯一的目标句子。"
+    assert passage.startswith("第18行") and passage.split("\n")[-1].startswith("第22行")
+
+
+@pytest.mark.parametrize("body, quoted, kind", [
+    ("重复 重复", "重复", "document"),            # ambiguous anchor: fail closed
+    ("正文里没有这句", "不存在", "document"),       # anchor gone
+    ("甲\t乙", "甲", "spreadsheet"),               # addressed by cell, not position
+    ("唯一" + "长" * 9000, "唯一", "document"),    # too long even when narrowed
+    ("有正文", "", "document"),                    # nothing quoted
+])
+def test_anchor_context_declines_rather_than_guessing(body, quoted, kind):
+    from jiuwenswarm.extensions.co_scribe.backend.toolkit.rails.range_rail import anchor_context
+
+    assert anchor_context(_snap(body, kind), quoted) is None

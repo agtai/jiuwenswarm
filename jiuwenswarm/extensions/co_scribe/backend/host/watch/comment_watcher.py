@@ -774,6 +774,7 @@ class CloudDocCommentWatcher:
                 workmode_text=wm.text,
                 conventions=conventions,
                 reply_content=t.reply.content if t.reply else None,
+                anchor_context=await self._anchor_context(doc_id, t.comment),
                 # The discussion under the comment. find_triggers answers a thread as a
                 # whole on the first turn precisely so the agent can read all of it at
                 # once -- and until now nothing passed it, so it read none of it.
@@ -868,6 +869,26 @@ class CloudDocCommentWatcher:
                 doc_id, t.comment.comment_id, answer, dispatched_at
             )
             await self._store.end_inflight(doc_id, turn_id)
+
+    async def _anchor_context(self, doc_id: str, comment: Any) -> str | None:
+        """The passage this comment is anchored in, read now, for the turn's prompt.
+
+        One platform read here stands in for the read the turn would otherwise open
+        with -- which costs a model round trip as well and appends the whole body to
+        the session. Any failure returns None and the turn reads for itself, as before.
+        """
+        quoted = (getattr(comment, "quoted_text", "") or "").strip()
+        if not quoted:
+            return None
+        try:
+            from jiuwenswarm.extensions.co_scribe.backend.toolkit.rails.range_rail import (
+                anchor_context,
+            )
+
+            return anchor_context(await self._provider.read(doc_id), quoted)
+        except Exception:  # noqa: BLE001 - the passage is a shortcut, never a gate
+            logger.debug("[clouddoc] anchor context unavailable doc=%s", doc_id, exc_info=True)
+            return None
 
     async def _unhighlight_resolved(self, doc_id: str, comments: list) -> None:
         """D8.3's automatic half: a human resolving the thread is the acceptance, and

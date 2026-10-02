@@ -39,7 +39,7 @@ clouddoc_reply_comment。doc_id 和 comment_id 不用你填，系统已绑定。
 {domain_note}
 
 工作方式：
-1. 先用 clouddoc_read 读正文，确认引用范围的上下文。
+{read_step}
 2. **先判断这条评论要什么**：
    * 请求修改（改写、润色、更正、增删）→ clouddoc_apply_for_comment 直接落地。
      授权窗＝评论选区按 scope 档位扩到的结构边界，越界整批拒绝；**没被要求的顺手优化不要做**。
@@ -60,6 +60,16 @@ clouddoc_reply_comment。doc_id 和 comment_id 不用你填，系统已绑定。
 回帖只说明「本轮遇到内部错误未完成，在本线程 @ 我一句即可让我重试」。
 你在回帖里向对方提问或请对方补充信息时，**必须请对方 @ 你**——不带 @ 的回复不会让你醒来。\
 """
+
+# Step 1 of the contract. A turn used to open with a read of the whole document, every
+# time: one more model round trip, and the body appended to the session again. Where
+# the watcher can hand over the passage the comment is anchored in, the turn works
+# from that and reads only when the request reaches beyond it.
+_READ_FIRST = "1. 先用 clouddoc_read 读正文，确认引用范围的上下文。"
+_READ_IF_NEEDED = (
+    "1. 下面「批注所在的上下文」是批注锚定处的**当前原文**，修改以它为准，不必先读全文。"
+    "只有当要求涉及这段之外的内容时，才用 clouddoc_read。"
+)
 
 # One level, one contract. The ``reply_only`` contract ("建议权": answer in the
 # thread, never touch the body) is gone with the tier -- it described a turn
@@ -166,6 +176,7 @@ def build_turn_prompt(
     conventions: Conventions | None = None,
     reply_content: str | None = None,
     thread: "Sequence[Any] | None" = None,
+    anchor_context: str | None = None,
     nonce: str | None = None,
 ) -> TurnPrompt:
     """Assemble one turn's prompt.
@@ -188,8 +199,10 @@ def build_turn_prompt(
             f"unknown watch mode for an unattended turn: {mode!r} "
             f"(expected {sorted(_CONTRACTS_BY_MODE)})"
         )
+    passage = (anchor_context or "").strip()
     parts = [contract.format(
         domain_note=_DOMAIN_NOTES.get(text_domain, _DOMAIN_NOTES["plain"]),
+        read_step=_READ_IF_NEEDED if passage else _READ_FIRST,
     )]
 
     if workmode_text and workmode_text.strip():
@@ -225,6 +238,11 @@ def build_turn_prompt(
     quoted = (comment.quoted_text or "").strip()
     if quoted:
         parts.append(f"## 这条评论引用的原文\n{_fence(n, quoted)}")
+
+    if passage:
+        # Document text is whatever its collaborators typed, so it is fenced like the
+        # quote and the comment: content to work on, never an instruction.
+        parts.append(f"## 批注所在的上下文（文档当前原文）\n{_fence(n, passage)}")
 
     parts.append(f"## 评论正文\n{_UNTRUSTED_NOTICE}\n{_fence(n, comment.content)}")
 

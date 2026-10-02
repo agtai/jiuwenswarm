@@ -161,6 +161,39 @@ def anchor_quote(snapshot: DocSnapshot, quoted: str) -> tuple[int, int] | None:
     return first, first + len(quoted)
 
 
+# How much of the body travels with an unattended turn's prompt as the passage the
+# comment sits in. Past this the turn is told to read the document instead.
+MAX_ANCHOR_CONTEXT_CHARS = 4000
+
+
+def anchor_context(snapshot: DocSnapshot, quoted: str) -> str | None:
+    """The current text around a comment's anchor, or None when there is no safe one.
+
+    The enclosing paragraph -- the widest window a comment can authorize -- or, where
+    a body is one long paragraph, the anchored line with its two neighbours on each
+    side. None when the quote does not anchor uniquely, the format is addressed by
+    cell or shape rather than by position, or even the narrow form is too long: the
+    caller then falls back to having the document read.
+    """
+    if snapshot.kind != "document" or not quoted:
+        return None
+    hit = anchor_quote(snapshot, quoted)
+    if hit is None:
+        return None
+    text = snapshot.text
+    lo, hi = scope_window(text, hit[0], hit[1], "paragraph")
+    if hi - lo > MAX_ANCHOR_CONTEXT_CHARS:
+        lo, hi = scope_window(text, hit[0], hit[1], "line")
+        for _ in range(2):
+            lo = text.rfind("\n", 0, max(lo - 1, 0)) + 1
+            nxt = text.find("\n", min(hi + 1, len(text)))
+            hi = len(text) if nxt < 0 else nxt
+    passage = text[lo:hi].strip("\n")
+    if not passage or len(passage) > MAX_ANCHOR_CONTEXT_CHARS:
+        return None
+    return passage
+
+
 def _introduces_markup(old: str, new: str) -> str | None:
     """Whether the new text carries more markdown markers than the original.
 
