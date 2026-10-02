@@ -155,6 +155,45 @@ UNATTENDED_FORBIDDEN_PREFIXES = ("clouddoc_revert", "clouddoc_unhighlight")
 # dropped is reported, because a silently shortened list reads as the whole sheet.
 _MAX_CELLS_REPORTED = 200
 
+# A repeated read returns a short answer only while the earlier, full one is still
+# whole in the model's context. The host cuts a single tool result to its head and
+# tail once it passes about a tenth of the context window; a body past this size is
+# always returned in full, so "unchanged" never refers to text the model no longer has.
+_REPEAT_READ_MAX_CHARS = 60_000
+# A delta is worth sending only while it is much smaller than the body it replaces.
+_DELTA_MAX_HUNKS = 20
+_DELTA_MAX_RATIO = 0.5
+
+
+def _line_delta(before: str, after: str) -> list[dict] | None:
+    """The lines that differ between two bodies, or None when a full read is better.
+
+    Lines, because a document's paragraphs are its lines and the write tools quote
+    text by line or less. ``line`` is the 1-based position in the new body, and
+    ``after_line`` quotes the unchanged line just above, so an insertion can be placed
+    without counting.
+    """
+    import difflib
+
+    a, b = before.split("\n"), after.split("\n")
+    hunks: list[dict] = []
+    changed = 0
+    matcher = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        old, new = "\n".join(a[i1:i2]), "\n".join(b[j1:j2])
+        changed += len(old) + len(new)
+        hunk: dict = {"line": j1 + 1, "before": old, "after": new}
+        if j1 > 0:
+            hunk["after_line"] = _ellipsize(b[j1 - 1], 80)
+        hunks.append(hunk)
+        if len(hunks) > _DELTA_MAX_HUNKS:
+            return None
+    if changed > _DELTA_MAX_RATIO * max(len(after), 1):
+        return None
+    return hunks
+
 # A string that is mostly an A1 address, with or without a sheet prefix and with or
 # without something appended after a colon. Deliberately narrow: a cell may legitimately
 # contain the text "A1", and refusing that would be worse than the failure this catches.
@@ -552,6 +591,10 @@ class CloudDocToolkit:
         # clobbered. Formerly a per-persona rail; sunk here so every agent and
         # every surface carries it, not just the ones wearing the right card.
         self._read_docs: set[str] = set()
+        # What the model has already been shown of each document: the body and the
+        # addresses that came with it. A later read of the same content says so
+        # instead of sending it again -- see ``read``.
+        self._shown: dict[str, tuple[str, tuple]] = {}
         # Who commissions this surface's writes, for the receipt ledger. The chat
         # path's default is the person in the chat; an exported surface (the MCP
         # server) names its caller instead -- ``mcp:<client>`` -- so the history
@@ -915,7 +958,7 @@ class CloudDocToolkit:
             "请逐条处理——分多次调用，每次只改一处。"
         )
 
-    async def read(self, doc_id: str | None = None) -> dict:
+    async def read(self, doc_id: str | None = None, full: bool | None = None) -> dict:
         canonical, err = await self._resolve(doc_id)
         if err:
             return err
@@ -926,6 +969,42 @@ class CloudDocToolkit:
             return _fail(f"读取失败（{exc.kind}）：{exc}")
 
         self._read_docs.add(canonical)
+        # **A body the model already holds is not sent twice.** Every read appends the
+        # whole document to the conversation, and that text is new to the model's
+        # cache each time: measured, a 6,000-character document cost 7.4k prompt
+        # tokens and about five seconds per read, on a path whose contract asks for a
+        # read every turn. The comparison is on the content itself rather than the
+        # revision id: a revision moves for reasons the body does not show (a
+        # highlight, a comment), and where it does not exist at all -- spreadsheets --
+        # there would be nothing to compare.
+        #
+        # The platform is still asked every time; what is saved is the model's side.
+        # ``full`` is the way back for a context that no longer holds the earlier
+        # read (compressed, or cut by the host).
+        shown = (snap.text, tuple(
+            (seg.address, seg.char_start, seg.char_end) for seg in snap.segments if seg.address
+        ))
+        earlier = self._shown.get(canonical)
+        self._shown[canonical] = shown
+        if earlier is not None and not full and len(snap.text) <= _REPEAT_READ_MAX_CHARS:
+            if earlier == shown:
+                return _ok(
+                    doc_id=canonical, revision_id=snap.revision_id, unchanged=True,
+                    detail="正文与你上次读到的完全相同，这里不再重复返回。"
+                           "如果上次读到的内容已不在你的上下文里，传 full=true 取全文。",
+                )
+            # Addressed formats change by cell or text box, and their addresses are
+            # half of what a read is for; a line delta would drop them.
+            if snap.kind not in ("spreadsheet", "presentation"):
+                changes = _line_delta(earlier[0], snap.text)
+                if changes:
+                    return _ok(
+                        doc_id=canonical, revision_id=snap.revision_id, unchanged=False,
+                        changes=changes,
+                        detail=f"正文自你上次读取后有 {len(changes)} 处变化，逐处列在 changes 里"
+                               "（line 是新正文中的行号，before 为空表示新增，after 为空表示删除）；"
+                               "其余部分与你上次读到的完全相同。需要全文时传 full=true。",
+                    )
         out = _ok(text=snap.text, revision_id=snap.revision_id, doc_id=canonical)
         # **What the body is made of, said where it is about to matter.** The write tool's
         # description already warns that a plain-text body takes markdown markers
@@ -2568,12 +2647,19 @@ class CloudDocToolkit:
             make(
                 "clouddoc_read",
                 "读取云文档正文，返回纯文本与 revision。"
+                "同一篇文档在本会话里再次读取时：正文没变只返回 unchanged=true；"
+                "有少量变化只返回 changes（逐处 before→after）。这两种情况下，"
+                "正文以你之前读到的为准；确实需要全文时传 full=true。"
                 "**用户提到的标题哪怕像文件名（带 .md、.pdf、「幻灯片」「表格」字样）也是云文档**："
                 "先用 clouddoc_list_documents 找到它，不要去本地文件系统里搜。"
                 "表格与幻灯片另返回 cells：每项 {at, text}，at 是单元格地址（如 "
                 "'Sheet1'!B7）或幻灯片元素地址；formula_cells 列出不可写入的公式格。"
                 "改表格前先看 cells 确定坐标——纯文本里的制表符与换行不表示行列。",
-                {"type": "object", "properties": {"doc_id": doc_id_param},
+                {"type": "object", "properties": {
+                    "doc_id": doc_id_param,
+                    "full": {"type": "boolean",
+                             "description": "true 时总是返回全文，即使正文自上次读取后没有变化。"},
+                 },
                  "required": ["doc_id"]},
                 self.read,
             ),

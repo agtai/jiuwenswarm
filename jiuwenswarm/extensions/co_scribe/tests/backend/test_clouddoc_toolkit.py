@@ -2600,3 +2600,136 @@ async def test_the_writer_mutex_engages_on_the_owning_connections_address():
         doc_id=DOCID, edits=[{"old_string": "第一句", "new_string": "改后"}])
     assert not out["ok"] and "尚未处理的任务" in out["detail"]
     assert prov.submitted == []
+
+
+# ------------------------------------------------------- a body is not sent twice
+
+
+class _BodyProvider(FakeProvider):
+    """A document whose body the test changes between reads."""
+
+    def __init__(self, text: str, *, kind: str = "document", segments=()) -> None:
+        super().__init__()
+        self.text = text
+        self.doc_kind_ = kind
+        self.segments = tuple(segments)
+        self.reads = 0
+
+    async def read(self, doc_ref):
+        self.reads += 1
+        return DocSnapshot(
+            doc_id=doc_ref, kind=self.doc_kind_, revision_id=f"rev{self.reads}",
+            text=self.text, segments=self.segments,
+        )
+
+
+_BODY = "\n".join(f"第{i}段 本季度的推广计划分为三个阶段。" for i in range(1, 41))
+
+
+@pytest.mark.asyncio
+async def test_a_second_read_of_the_same_body_does_not_repeat_it():
+    """The revision moved (a highlight, a comment); the body did not."""
+    prov = _BodyProvider(_BODY)
+    kit = _kit(prov)
+    first = await kit.read(DOCID)
+    assert first["text"] == _BODY
+
+    again = await kit.read(DOCID)
+    assert again["ok"] and again["unchanged"] is True
+    assert "text" not in again
+    assert again["revision_id"] == "rev2", "the platform is still asked every time"
+    assert prov.reads == 2
+
+
+@pytest.mark.asyncio
+async def test_a_small_change_comes_back_as_the_lines_that_changed():
+    prov = _BodyProvider(_BODY)
+    kit = _kit(prov)
+    await kit.read(DOCID)
+
+    lines = _BODY.split("\n")
+    lines[4] = "第5段 本季度推广计划分三个阶段。"
+    lines.insert(10, "新增的一段。")
+    prov.text = "\n".join(lines)
+
+    out = await kit.read(DOCID)
+    assert out["ok"] and out["unchanged"] is False and "text" not in out
+    assert [c["line"] for c in out["changes"]] == [5, 11]
+    assert out["changes"][0]["before"].startswith("第5段 本季度的推广计划")
+    assert out["changes"][0]["after"] == "第5段 本季度推广计划分三个阶段。"
+    assert out["changes"][1] == {
+        "line": 11, "before": "", "after": "新增的一段。",
+        "after_line": "第10段 本季度的推广计划分为三个阶段。",
+    }
+
+    # The delta is now what the model holds: the same body again is unchanged.
+    assert (await kit.read(DOCID))["unchanged"] is True
+
+
+@pytest.mark.asyncio
+async def test_full_always_returns_the_body():
+    prov = _BodyProvider(_BODY)
+    kit = _kit(prov)
+    await kit.read(DOCID)
+    out = await kit.read(DOCID, full=True)
+    assert out["text"] == _BODY and "unchanged" not in out
+
+
+@pytest.mark.asyncio
+async def test_a_rewrite_is_sent_whole_rather_than_as_a_delta():
+    prov = _BodyProvider(_BODY)
+    kit = _kit(prov)
+    await kit.read(DOCID)
+    prov.text = "\n".join(f"完全不同的第{i}行。" for i in range(1, 41))
+    out = await kit.read(DOCID)
+    assert out["text"] == prov.text and "changes" not in out
+
+
+@pytest.mark.asyncio
+async def test_a_body_the_host_would_cut_is_never_abbreviated():
+    """Past the size where the host trims a tool result to its head and tail, the
+    earlier read may no longer be whole in the context -- so it is sent again."""
+    big = "\n".join("甲" * 200 for _ in range(400))  # 80k characters
+    prov = _BodyProvider(big)
+    kit = _kit(prov)
+    await kit.read(DOCID)
+    out = await kit.read(DOCID)
+    assert out["text"] == big and "unchanged" not in out
+
+
+@pytest.mark.asyncio
+async def test_a_changed_spreadsheet_is_sent_whole_with_its_addresses():
+    from jiuwenswarm.extensions.co_scribe.backend.toolkit.providers.provider import Segment
+
+    segs = [Segment(char_start=0, char_end=2, address="'Sheet1'!A1"),
+            Segment(char_start=3, char_end=5, address="'Sheet1'!B1")]
+    prov = _BodyProvider("甲乙\t丙丁", kind="spreadsheet", segments=segs)
+    kit = _kit(prov)
+    assert len((await kit.read(DOCID))["cells"]) == 2
+    assert (await kit.read(DOCID))["unchanged"] is True
+
+    prov.text = "甲乙\t戊己"
+    out = await kit.read(DOCID)
+    assert "changes" not in out
+    assert [c["text"] for c in out["cells"]] == ["甲乙", "戊己"]
+
+
+@pytest.mark.asyncio
+async def test_what_was_shown_is_remembered_per_document():
+    prov = _BodyProvider(_BODY)
+    kit = _kit(prov)
+    await kit.read(DOCID)
+    other = await kit.read(OTHER)
+    assert other["text"] == _BODY, "a first read of another document is always whole"
+
+
+@pytest.mark.asyncio
+async def test_an_abbreviated_read_still_opens_the_write_path():
+    """Read-before-write is about having looked at the current state, which an
+    unchanged answer is."""
+    prov = _BodyProvider(_BODY)
+    first = _kit(prov)
+    await first.read(DOCID)
+    assert DOCID in first._read_docs
+    await first.read(DOCID)
+    assert DOCID in first._read_docs
