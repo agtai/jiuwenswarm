@@ -155,11 +155,12 @@ UNATTENDED_FORBIDDEN_PREFIXES = ("clouddoc_revert", "clouddoc_unhighlight")
 # dropped is reported, because a silently shortened list reads as the whole sheet.
 _MAX_CELLS_REPORTED = 200
 
-# A repeated read returns a short answer only while the earlier, full one is still
-# whole in the model's context. The host cuts a single tool result to its head and
-# tail once it passes about a tenth of the context window; a body past this size is
-# always returned in full, so "unchanged" never refers to text the model no longer has.
-_REPEAT_READ_MAX_CHARS = 60_000
+# The most body one read returns. The host cuts a single tool result to its first and
+# last 2,000 characters once it passes about a tenth of the context window (measured
+# at roughly 78,000 characters), which leaves the middle of a long document out of
+# reach and makes "unchanged" refer to text the model no longer holds. A document
+# longer than this is returned a page at a time instead, each page whole.
+_READ_PAGE_CHARS = 50_000
 # A delta is worth sending only while it is much smaller than the body it replaces.
 _DELTA_MAX_HUNKS = 20
 _DELTA_MAX_RATIO = 0.5
@@ -958,7 +959,8 @@ class CloudDocToolkit:
             "请逐条处理——分多次调用，每次只改一处。"
         )
 
-    async def read(self, doc_id: str | None = None, full: bool | None = None) -> dict:
+    async def read(self, doc_id: str | None = None, full: bool | None = None,
+                   offset: int | None = None) -> dict:
         canonical, err = await self._resolve(doc_id)
         if err:
             return err
@@ -981,31 +983,63 @@ class CloudDocToolkit:
         # The platform is still asked every time; what is saved is the model's side.
         # ``full`` is the way back for a context that no longer holds the earlier
         # read (compressed, or cut by the host).
-        shown = (snap.text, tuple(
+        #
+        # **A long document comes a page at a time.** Each page is cut on a line
+        # boundary and small enough for the host to carry whole; the answer says where
+        # the next one starts. Only documents: a grid or a deck is addressed by cell
+        # or shape, and a page cut through its flat text would separate the two.
+        body, page = snap.text, None
+        if snap.kind == "document" and len(snap.text) > _READ_PAGE_CHARS:
+            try:
+                lo = max(0, min(int(offset or 0), len(snap.text)))
+            except (TypeError, ValueError):
+                lo = 0
+            hi = min(len(snap.text), lo + _READ_PAGE_CHARS)
+            if hi < len(snap.text):
+                cut = snap.text.rfind("\n", lo + _READ_PAGE_CHARS * 4 // 5, hi)
+                if cut > lo:
+                    hi = cut + 1
+            body = snap.text[lo:hi]
+            page = {"offset": lo, "next_offset": hi if hi < len(snap.text) else None,
+                    "total_chars": len(snap.text)}
+        key = f"{canonical}@{page['offset']}" if page else canonical
+        shown = (body, tuple(
             (seg.address, seg.char_start, seg.char_end) for seg in snap.segments if seg.address
         ))
-        earlier = self._shown.get(canonical)
-        self._shown[canonical] = shown
-        if earlier is not None and not full and len(snap.text) <= _REPEAT_READ_MAX_CHARS:
+        earlier = self._shown.get(key)
+        self._shown[key] = shown
+        if earlier is not None and not full and len(body) <= _READ_PAGE_CHARS:
+            scope = "这一页" if page else "正文"
             if earlier == shown:
                 return _ok(
                     doc_id=canonical, revision_id=snap.revision_id, unchanged=True,
-                    detail="正文与你上次读到的完全相同，这里不再重复返回。"
-                           "如果上次读到的内容已不在你的上下文里，传 full=true 取全文。",
+                    detail=f"{scope}与你上次读到的完全相同，这里不再重复返回。"
+                           "如果上次读到的内容已不在你的上下文里，传 full=true 重新取。",
+                    **(page or {}),
                 )
             # Addressed formats change by cell or text box, and their addresses are
             # half of what a read is for; a line delta would drop them.
             if snap.kind not in ("spreadsheet", "presentation"):
-                changes = _line_delta(earlier[0], snap.text)
+                changes = _line_delta(earlier[0], body)
                 if changes:
                     return _ok(
                         doc_id=canonical, revision_id=snap.revision_id, unchanged=False,
                         changes=changes,
-                        detail=f"正文自你上次读取后有 {len(changes)} 处变化，逐处列在 changes 里"
-                               "（line 是新正文中的行号，before 为空表示新增，after 为空表示删除）；"
-                               "其余部分与你上次读到的完全相同。需要全文时传 full=true。",
+                        detail=f"{scope}自你上次读取后有 {len(changes)} 处变化，逐处列在 changes 里"
+                               f"（line 是{'本页' if page else '新正文'}中的行号，before 为空表示新增，"
+                               "after 为空表示删除）；其余部分与你上次读到的完全相同。"
+                               "需要原文时传 full=true。",
+                        **(page or {}),
                     )
-        out = _ok(text=snap.text, revision_id=snap.revision_id, doc_id=canonical)
+        out = _ok(text=body, revision_id=snap.revision_id, doc_id=canonical)
+        if page:
+            out.update(page)
+            end = page["offset"] + len(body)
+            out["detail"] = (
+                f"正文共 {page['total_chars']} 字，这里是第 {page['offset'] + 1}–{end} 字。"
+                + ("继续往后读：把 next_offset 作为 offset 再调用一次。" if page["next_offset"]
+                   else "这是最后一页。")
+            )
         # **What the body is made of, said where it is about to matter.** The write tool's
         # description already warns that a plain-text body takes markdown markers
         # literally, but a description competes with the person's own phrasing: asked for
@@ -2650,6 +2684,8 @@ class CloudDocToolkit:
                 "同一篇文档在本会话里再次读取时：正文没变只返回 unchanged=true；"
                 "有少量变化只返回 changes（逐处 before→after）。这两种情况下，"
                 "正文以你之前读到的为准；确实需要全文时传 full=true。"
+                "正文很长时分页返回：结果带 total_chars 和 next_offset，"
+                "要读后面的内容，把 next_offset 作为 offset 再调用。"
                 "**用户提到的标题哪怕像文件名（带 .md、.pdf、「幻灯片」「表格」字样）也是云文档**："
                 "先用 clouddoc_list_documents 找到它，不要去本地文件系统里搜。"
                 "表格与幻灯片另返回 cells：每项 {at, text}，at 是单元格地址（如 "
@@ -2659,6 +2695,8 @@ class CloudDocToolkit:
                     "doc_id": doc_id_param,
                     "full": {"type": "boolean",
                              "description": "true 时总是返回全文，即使正文自上次读取后没有变化。"},
+                    "offset": {"type": "integer",
+                               "description": "长文档分页读取的起始位置；填上一次结果里的 next_offset。"},
                  },
                  "required": ["doc_id"]},
                 self.read,

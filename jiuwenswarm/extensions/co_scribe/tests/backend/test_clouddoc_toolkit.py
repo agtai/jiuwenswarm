@@ -2685,16 +2685,64 @@ async def test_a_rewrite_is_sent_whole_rather_than_as_a_delta():
     assert out["text"] == prov.text and "changes" not in out
 
 
+_LONG = "\n".join(f"第{i}行 " + "甲" * 195 for i in range(1, 601))  # about 120k characters
+
+
 @pytest.mark.asyncio
-async def test_a_body_the_host_would_cut_is_never_abbreviated():
+async def test_a_long_document_comes_a_page_at_a_time_and_every_page_is_whole():
     """Past the size where the host trims a tool result to its head and tail, the
-    earlier read may no longer be whole in the context -- so it is sent again."""
-    big = "\n".join("甲" * 200 for _ in range(400))  # 80k characters
-    prov = _BodyProvider(big)
+    middle of the document would be out of reach. Pages keep all of it readable."""
+    prov = _BodyProvider(_LONG)
     kit = _kit(prov)
-    await kit.read(DOCID)
-    out = await kit.read(DOCID)
-    assert out["text"] == big and "unchanged" not in out
+
+    pages, offset = [], 0
+    while offset is not None:
+        out = await kit.read(DOCID, offset=offset)
+        assert out["ok"] and out["total_chars"] == len(_LONG)
+        assert len(out["text"]) <= 50_000
+        pages.append(out["text"])
+        offset = out["next_offset"]
+
+    assert len(pages) == 3
+    assert "".join(pages) == _LONG, "nothing dropped, nothing repeated"
+    assert all(page.endswith("\n") for page in pages[:-1]), "cut on a line boundary"
+
+
+@pytest.mark.asyncio
+async def test_a_page_already_shown_is_not_sent_again_and_a_changed_one_is_a_delta():
+    prov = _BodyProvider(_LONG)
+    kit = _kit(prov)
+    first = await kit.read(DOCID)
+
+    again = await kit.read(DOCID)
+    assert again["unchanged"] is True and "text" not in again
+    assert again["next_offset"] == first["next_offset"]
+
+    # The second page was never shown: it comes whole.
+    second = await kit.read(DOCID, offset=first["next_offset"])
+    assert "text" in second and second["offset"] == first["next_offset"]
+
+    prov.text = _LONG.replace("第3行 ", "第3行（已改） ", 1)
+    changed = await kit.read(DOCID)
+    assert [c["line"] for c in changed["changes"]] == [3] and "text" not in changed
+
+
+@pytest.mark.asyncio
+async def test_a_short_document_is_not_paged():
+    out = await _kit(_BodyProvider(_BODY)).read(DOCID)
+    assert out["text"] == _BODY and "next_offset" not in out
+
+
+@pytest.mark.asyncio
+async def test_a_long_spreadsheet_is_sent_whole_with_its_addresses_never_paged():
+    from jiuwenswarm.extensions.co_scribe.backend.toolkit.providers.provider import Segment
+
+    text = "\t".join("值" * 100 for _ in range(700))  # about 70k characters
+    segs = [Segment(char_start=0, char_end=100, address="'Sheet1'!A1")]
+    kit = _kit(_BodyProvider(text, kind="spreadsheet", segments=segs))
+    first = await kit.read(DOCID)
+    assert first["text"] == text and "next_offset" not in first
+    assert (await kit.read(DOCID))["text"] == text, "too large to rely on the earlier copy"
 
 
 @pytest.mark.asyncio
