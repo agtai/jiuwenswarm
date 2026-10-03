@@ -40,6 +40,7 @@ def _mark_startup_import_phase(stage: str) -> None:
 
 from websockets.exceptions import ConnectionClosed, ConnectionClosedError
 
+from jiuwenswarm.clouddoc.host.gateway import CloudDocService
 from jiuwenswarm.common.ws_diagnostics import format_ws_diagnostics, describe_ws_peer, describe_ws_exception
 from jiuwenswarm.common.media_capability_config import (
     migrate_media_capability_switches,
@@ -1913,6 +1914,11 @@ async def _run(
     # Gateway keeps only the stable public-interface proxy wired to Web/TUI.
     heartbeat_controller = HeartbeatControllerProxy(client)
 
+    # Co-scribe: the connections and the panel, built now so the web handlers can
+    # bind the panel; polling starts once the channels are up.
+    clouddoc = CloudDocService()
+    await clouddoc.prepare(agent_client=client)
+
     full_cfg, health_check_cfg, channels_cfg = _load_gateway_runtime_config(
         message_handler
     )
@@ -2206,6 +2212,7 @@ async def _run(
             channel_manager=channel_manager,
             on_config_saved=_on_config_saved,
             heartbeat_service=heartbeat_service,
+            clouddoc_panel=clouddoc.panel,
             cron_controller=cron_controller,
             heartbeat_controller=heartbeat_controller,
             updater_service=updater_service,
@@ -3158,6 +3165,8 @@ async def _run(
     except Exception as e:  # noqa: BLE001 - 兜底
         logger.warning("[App] zen free models warm failed (non-fatal): %s", e)
 
+    await clouddoc.start()
+
     # 主动推荐：按 config 自动注册/删除 proactive.tick 定时 job
     try:
         from jiuwenswarm.gateway.cron.proactive_cron_sync import sync_proactive_tick_job
@@ -3491,6 +3500,8 @@ async def _run(
             _set_agentos_ssh_key_issuer(None)
 
         await cron_scheduler.stop()
+        # Before client.disconnect(): the watcher dispatches through the client.
+        await clouddoc.stop()
         await channel_manager.stop_dispatch()
         await heartbeat_service.stop()
         await message_handler.stop_forwarding()

@@ -535,6 +535,7 @@ from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (
     xiaoyi_gui_agent,
     image_reading,
 )
+from jiuwenswarm.clouddoc.host.agent import CloudDocSessionTools
 from jiuwenswarm.common.config import (
     get_config,
     get_available_models,
@@ -2012,6 +2013,8 @@ class JiuWenSwarmDeepAdapter:
         )
         self._avatar_rail: Any = None
         self._memory_forbidden_rail: Any = None
+        self._clouddoc_file_guard_rail: Any = None
+        self._report_ledger_rail: Any = None
         self._tool_cards = None
         self._evolution_watcher_tasks: set[asyncio.Task] = set()
         self._ttse_cleanup_tasks: set[asyncio.Task] = set()
@@ -2135,6 +2138,9 @@ class JiuWenSwarmDeepAdapter:
         self._send_file_toolkit: SendFileToolkit | None = None
         self._session_messaging_toolkit: SessionMessagingToolkit | None = None
         self._session_messaging_route_rail: SessionMessagingRouteRail | None = None
+        # Co-scribe: the session's toolkit and this turn's authorization snapshot,
+        # per adapter because the adapter itself is cached per session.
+        self._clouddoc = CloudDocSessionTools()
         self._runtime_state_write_task: asyncio.Task[None] | None = None
         self._channel_id: str | None = None
         self._is_cron_execution: bool = False
@@ -8895,6 +8901,19 @@ class JiuWenSwarmDeepAdapter:
             return None
 
     @staticmethod
+    def _build_clouddoc_file_guard_rail() -> Any | None:
+        """Build the guard that keeps generic file tools off co-scribe's own files."""
+        try:
+            from jiuwenswarm.clouddoc.host.file_guard import CloudDocFileGuardRail
+
+            rail = CloudDocFileGuardRail()
+            logger.info("[JiuWenSwarmDeepAdapter] CloudDocFileGuardRail create success")
+            return rail
+        except Exception as exc:
+            logger.warning("[JiuWenSwarmDeepAdapter] CloudDocFileGuardRail create failed: %s", exc)
+            return None
+
+    @staticmethod
     def _build_model_anomaly_detection_rail(
         config_base: dict[str, Any] | None = None,
     ) -> ModelAnomalyDetectionRail | None:
@@ -9228,6 +9247,17 @@ class JiuWenSwarmDeepAdapter:
             logger.warning("%s Failed to load UserHookRail: %s", log_prefix, exc)
         stage_timer.mark("user_hook_rail")
 
+        # Co-scribe: a closing claim of document modification must reconcile with
+        # the turn's write count. Self-gating, so attached unconditionally.
+        try:
+            from jiuwenswarm.clouddoc.host.report_ledger import ReportLedgerRail
+
+            self._report_ledger_rail = ReportLedgerRail()
+            rails_list.append(self._report_ledger_rail)
+        except Exception as exc:
+            self._report_ledger_rail = None
+            logger.warning("%s Failed to load ReportLedgerRail: %s", log_prefix, exc)
+
         # Observability rail: opens an agent-layer span (agent.<name>.task_iteration.<n>
         # for task-loop runs, or agent.<name>.invoke for single-round) under the root
         # run span per iteration/round. It is the only thing that creates the
@@ -9394,6 +9424,7 @@ class JiuWenSwarmDeepAdapter:
             _RailBuildInfo("_circuit_breaker_rail", self._build_circuit_breaker_rail),
             _RailBuildInfo("_avatar_rail", self._build_avatar_rail),
             _RailBuildInfo("_memory_forbidden_rail", self._build_memory_forbidden_rail),
+            _RailBuildInfo("_clouddoc_file_guard_rail", self._build_clouddoc_file_guard_rail),
             _RailBuildInfo(
                 "_subagent_rail",
                 self._build_subagent_rail,
@@ -9523,6 +9554,9 @@ class JiuWenSwarmDeepAdapter:
                     "permissions_changed_notifier": self._permissions_changed_notifier,
                     "browser_runtime_security_profile": self._browser_runtime_security_profile,
                     "trusted_search_urls": None,
+                    # An unattended cloud-document turn has nobody to answer a
+                    # prompt, so the rail decides from the turn's snapshot instead.
+                    "unattended_clouddoc": self._clouddoc.turn_snapshot,
                 },
             )
         ]
@@ -9674,6 +9708,7 @@ class JiuWenSwarmDeepAdapter:
                 .get("model_client_config", {})
                 .get("model_name", "gpt-4"),
                 session_id=session_id,
+                unattended_clouddoc=self._clouddoc.turn_snapshot,
             )
             if self._permission_rail is not None:
                 logger.info("[JiuWenSwarmDeepAdapter] _permission_rail newly created on hot-reload")
@@ -10123,6 +10158,10 @@ class JiuWenSwarmDeepAdapter:
             rails_list.append(self._avatar_rail)
         if self._memory_forbidden_rail is not None:
             rails_list.append(self._memory_forbidden_rail)
+        if self._clouddoc_file_guard_rail is not None:
+            rails_list.append(self._clouddoc_file_guard_rail)
+        if self._report_ledger_rail is not None:
+            rails_list.append(self._report_ledger_rail)
         if not self._permission_state.permission_update_in_progress and self._permission_rail is not None:
             rails_list.append(self._permission_rail)
         if self._heartbeat_rail is not None:
@@ -11833,6 +11872,16 @@ class JiuWenSwarmDeepAdapter:
                     project_dir=self._project_dir,
                     require_execution_authorization=require_send_authorization,
                 )
+
+        # Co-scribe: refresh the turn's snapshot, close the set on an unattended
+        # turn, register the tools. On every request, so a chat turn empties the
+        # snapshot and a session cannot carry the previous turn's authority.
+        self._clouddoc.update(
+            self._instance,
+            session_id,
+            config_base=config_base,
+            register=lambda tool: self._register_agent_owned_tool(tool, self._tool_owner_id()),
+        )
 
     def _refresh_acp_runtime_tools(
         self,
