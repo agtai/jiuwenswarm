@@ -49,3 +49,33 @@ def _jiuwenswarm_logs_reach_caplog(request: pytest.FixtureRequest) -> Generator[
         yield
     finally:
         logger.propagate = previous
+
+
+_WRITE_TOOL_TESTS = frozenset({
+    "test_apply_direct.py",
+    "test_lifecycle.py",
+    "test_structure.py",
+    "test_toolkit.py",
+    "test_feishu_provider.py",
+    "test_google_formats.py",
+    "test_feishu_formats.py",
+    "test_formats_tools.py",
+})
+
+
+@pytest.fixture(autouse=True)
+def _ask_channel_present(request, monkeypatch):
+    """Run every write-tool test in the attended world unless it says otherwise.
+
+    The write tools consult the session's confirmation channel; these tests were
+    written against a world where the ask machinery exists, and re-stating that per
+    test would be dozens of copies of one line. Tests that exercise the Full Access
+    floor override this with ``False`` explicitly.
+    """
+    if request.path.name not in _WRITE_TOOL_TESTS:
+        yield
+        return
+    import jiuwenswarm.clouddoc.tools.toolkit as ct
+
+    monkeypatch.setattr(ct, "_ask_channel_available", lambda: True)
+    yield
