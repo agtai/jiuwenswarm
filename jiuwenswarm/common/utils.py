@@ -753,6 +753,9 @@ def _install_default_builtin_skills(
     - xlsx: 电子表格创建/读取/分析/编辑/修复（零格式损失，中文/CJK 友好）
     - pdf-extraction: PDF 文本/表格/元数据提取
     - pptx-generator: PowerPoint 演示文稿生成与编辑
+    - co-scribe-collab: the cloud-document co-writing protocol. The skills library
+      is the one root directory every session scans, the watcher's unattended
+      turns included, which is why the protocol lands here.
 
     Args:
         builtin_dir: 内置技能目录路径
@@ -777,6 +780,7 @@ def _install_default_builtin_skills(
         "xlsx",
         "pdf-extraction",
         "pptx-generator",
+        "co-scribe-collab",
     ]
 
     if not builtin_dir.exists() or not builtin_dir.is_dir():
@@ -853,6 +857,10 @@ def ensure_default_builtin_skills() -> None:
         "xlsx",
         "pdf-extraction",
         "pptx-generator",
+        # The co-writing protocol is on the backfill list so that an existing
+        # workspace picks it up after an upgrade: the skills library is not
+        # refreshed by the upgrade itself, and this backfill runs on every start.
+        "co-scribe-collab",
     ]
 
     user_skills_dir.mkdir(parents=True, exist_ok=True)

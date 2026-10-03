@@ -188,6 +188,7 @@ def build_permission_rail(
     permissions_changed_notifier: Callable[[], None] | None = None,
     browser_runtime_security_profile: Any = None,
     trusted_search_urls: Any = None,
+    unattended_clouddoc: Callable[[], dict[str, Any] | None] | None = None,
 ) -> Any | None:
     """Build openjiuwen PermissionInterruptRail for tool permission checks.
 
@@ -197,6 +198,10 @@ def build_permission_rail(
         model_name: Model name for risk assessment
         session_id: Host identity for User/Session compose and persist
         installed_permissions: Complete installed snapshot for explicit auto mode
+        unattended_clouddoc: Returns this turn's cloud-document authorization
+            snapshot, or None when the turn is not an unattended one. The scene
+            hook runs while a tool is executing, where the request contextvars
+            are no longer bound, so the caller that owns the snapshot supplies it.
 
     Returns:
         PermissionInterruptRail instance or None if disabled
@@ -208,6 +213,7 @@ def build_permission_rail(
         ToolPermissionHost,
     )
 
+    from jiuwenswarm.clouddoc.host.permissions import unattended_scene
     from jiuwenswarm.agents.harness.common.rails.permissions.permission_compose import (
         compose_host_effective_permissions,
     )
@@ -496,6 +502,14 @@ def build_permission_rail(
                 return ("approve",)
 
             perm_ctx = TOOL_PERMISSION_CONTEXT.get()
+
+            # An unattended cloud-document turn has nobody to answer a prompt, so
+            # its decision comes first: before the ask_user bypass, which would
+            # wait for an answer that never comes, and before the perm_ctx early
+            # return, which such a turn always takes.
+            verdict = unattended_scene(inp.normalized_tool_name, unattended_clouddoc)
+            if verdict is not None:
+                return verdict
 
             # ask_user is an interactive control action owned by its dedicated
             # rail, not a Permission decision. Non-Permission continuation

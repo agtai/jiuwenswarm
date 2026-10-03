@@ -40,6 +40,7 @@ from openjiuwen.extensions.external_provider.openai_auth.openai_account_models i
     OpenAIAccountModelListError,
 )
 
+from jiuwenswarm.clouddoc.host.web import register_methods as register_clouddoc_methods
 from jiuwenswarm.common.config import (
     get_config,
     get_config_raw,
@@ -1549,6 +1550,7 @@ class WebHandlersBindParams:
     cron_controller: Any = None
     heartbeat_controller: Any = None
     updater_service: UpdaterService | None = None
+    clouddoc_panel: Any = None
 
 
 _CONTAINER_FILE_API_METHODS = (
@@ -5138,6 +5140,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("updater.get_conf", _updater_get_conf)
     channel.register_method("updater.reset_source", _updater_reset_source)
     channel.register_method("updater.set_conf", _updater_set_conf)
+    # Co-scribe: the clouddoc.* methods behind the Docs panel.
+    register_clouddoc_methods(channel, bind.clouddoc_panel)
     channel.register_method("health_check.get_conf", _health_check_get_conf)
     channel.register_method("health_check.set_conf", _health_check_set_conf)
     # Deprecated aliases for clients upgrading from the pre-split probe API.

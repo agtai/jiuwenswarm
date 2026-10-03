@@ -35,6 +35,7 @@ from jiuwenswarm.agents.harness.common.rails.avatar_rail import AvatarPromptRail
 from jiuwenswarm.agents.harness.common.rails.response_prompt_rail import ResponsePromptRail
 from jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail import RuntimePromptRail
 from jiuwenswarm.agents.harness.common.rails.stream_event_rail import JiuSwarmStreamEventRail
+from jiuwenswarm.clouddoc.tools.toolkit import ALL_TOOL_NAMES as ALL_CLOUDDOC_TOOL_NAMES
 from jiuwenswarm.agents.harness.common.rails.symphony.retrieval_context_processor import (
     symphony_retrieval_compact_processor_spec,
 )
@@ -152,6 +153,10 @@ TOOL_WHITELIST = frozenset({
     "web_paid_search",
     "skill_toolkit",
     "acp_chat",
+    # Co-scribe, taken from the toolkit's own list rather than copied: a tool
+    # added to the toolkit and forgotten here would disappear for a team member
+    # with nothing raising, since the filter below logs a miss at debug.
+    *ALL_CLOUDDOC_TOOL_NAMES,
 })
 
 

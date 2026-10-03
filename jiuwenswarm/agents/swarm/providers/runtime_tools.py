@@ -16,6 +16,9 @@ Covered runtime tools:
 * ``send_file`` — the ``send_file_to_user`` toolkit, gated by the channel's
   ``send_file_allowed`` config (web defaults to enabled, others disabled) and by
   the presence of a request id / channel id.
+* ``clouddoc_tools`` — the co-scribe toolkit, gated by ``clouddoc.enabled``, by a
+  configured connection, and by the turn being attended; see
+  ``jiuwenswarm.clouddoc.host.team`` for why the last is a refusal, not a filter.
 """
 
 from __future__ import annotations
@@ -43,6 +46,7 @@ logger = logging.getLogger(__name__)
 # Provider name constants; namespaced under the shared "swarm." prefix.
 CRON_TOOLS = "swarm.cron_tools"
 SEND_FILE = "swarm.send_file"
+CLOUDDOC_TOOLS = "swarm.clouddoc_tools"
 
 
 class CronToolsInput(ConstructionInput):
@@ -279,9 +283,46 @@ def build_send_file_tools(params: dict[str, Any], ctx: SwarmBuildContext) -> lis
         return []
 
 
+class CloudDocToolsInput(ConstructionInput):
+    """Construction inputs for the co-scribe toolkit."""
+
+    clouddoc_config: dict[str, Any] = param_field(
+        default_factory=dict,
+        description="The clouddoc config section: enable switch, connections, "
+        "working-style file.",
+    )
+    session_id: str | None = context_field(
+        attr="session_id",
+        description="Active session id; the ambiguity rail reads this session's own "
+        "user text as its only evidence.",
+    )
+    channel_id: str | None = context_field(
+        attr="channel_id",
+        description="Raw channel id. The co-scribe channel marks an unattended turn, "
+        "which this path refuses rather than serves.",
+    )
+
+
+@harness_element(
+    kind=ElementKind.TOOL,
+    name=CLOUDDOC_TOOLS,
+    description="The co-scribe cloud-document toolkit, gated by clouddoc.enabled, "
+    "a configured connection, and the turn being attended.",
+    input_model=CloudDocToolsInput,
+)
+def build_clouddoc_tools(params: dict[str, Any], ctx: SwarmBuildContext) -> list[Any]:
+    """Build the co-scribe toolkit for a team member; an unattended turn gets none."""
+    from jiuwenswarm.clouddoc.host.team import build_team_tools
+
+    inp = CloudDocToolsInput.resolve(params, ctx)
+    return build_team_tools(inp.clouddoc_config, channel_id=inp.channel_id)
+
+
 __all__ = [
+    "CLOUDDOC_TOOLS",
     "CRON_TOOLS",
     "SEND_FILE",
+    "build_clouddoc_tools",
     "build_cron_tools",
     "build_send_file_tools",
 ]
