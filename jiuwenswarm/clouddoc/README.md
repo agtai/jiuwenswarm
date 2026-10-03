@@ -15,7 +15,7 @@ asserts that), so each PR is inert and reviewable on its own.
 | `providers` | landed | the platform contract, the text map, shared format helpers, both platform implementations, the factory and the router |
 | `edits`, `receipts`, `workmode` | landed | range and result rails, the receipt ledger, the working-style file |
 | `authority`, `state` | landed | watch grants and the audit journal; the watcher's state |
-| `tools` | pending | the tools the agent calls |
+| `tools` | landed | the tools the agent calls |
 | `watch` | pending | the unattended path |
 | `panel` | pending | the owner's operations behind the WebSocket methods |
 | `host` | pending | the only module that imports the agent runtime and the gateway |

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 
+import pytest
 
 from jiuwenswarm.clouddoc.workmode import (
     WORKMODE_MAX_BYTES,
@@ -150,3 +151,50 @@ def test_prefer_zh_from_words():
     assert prefer_zh_from_words(("同意", "approve")) is True
     assert prefer_zh_from_words(("approve",)) is False
     assert prefer_zh_from_words(None) is True
+
+
+def test_workmode_tools_are_deny_listed():
+    from jiuwenswarm.clouddoc.tools.toolkit import (
+        UNATTENDED_ALLOWLIST,
+        UNATTENDED_DENYLIST,
+    )
+
+    assert "clouddoc_workmode_get" in UNATTENDED_DENYLIST
+    assert "clouddoc_workmode_edit" in UNATTENDED_DENYLIST
+    assert not (UNATTENDED_ALLOWLIST & UNATTENDED_DENYLIST)
+
+
+def test_toolkit_registers_both_workmode_tools_and_count():
+    from jiuwenswarm.clouddoc.tools.toolkit import (
+        CloudDocToolkit,
+    )
+
+    class _P:  # minimal provider stub; get_tools touches no provider methods
+        text_domain = "plain"
+
+    tools = CloudDocToolkit(_P()).get_tools()
+    names = [t.card.name for t in tools]
+    assert "clouddoc_workmode_get" in names
+    assert "clouddoc_workmode_edit" in names
+    # Thirteen: list, read, list_comments, reply_comment, batch_edit, apply_for_comment,
+    # write_region, add_page, create/share/trash, and the workmode pair.
+    assert len(names) == 13
+
+
+@pytest.mark.asyncio
+async def test_workmode_edit_tool_round_trip(tmp_path):
+    from jiuwenswarm.clouddoc.tools.toolkit import (
+        CloudDocToolkit,
+    )
+
+    class _P:
+        text_domain = "plain"
+
+    f = tmp_path / "wm.md"
+    f.write_text("旧风格。\n", encoding="utf-8")
+    kit = CloudDocToolkit(_P(), workmode_file=str(f), workmode_prefer_zh=True)
+    got = await kit.workmode_get()
+    assert got["ok"] and got["source"] == "file" and "旧风格" in got["text"]
+    r = await kit.workmode_edit(old_string="旧风格。", new_string="新风格。")
+    assert r["ok"], r
+    assert "新风格" in (await kit.workmode_get())["text"]
