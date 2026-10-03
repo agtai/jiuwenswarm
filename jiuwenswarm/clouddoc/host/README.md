@@ -15,19 +15,24 @@ the platform contract.
 | `turn` | which turn this is, read from the request binding: unattended or not, for which document, comment and watch level |
 | `agent` | the adapter's per-session state: the toolkit, the authorization snapshot, the closed-set strip, tool registration |
 | `team` | the toolkit for a team member on the declarative assembly path, which refuses an unattended turn |
+| `gateway` | the gateway's service: build the connections from the configuration, start and stop the watchers and discovery |
+| `web` | the `clouddoc.*` WebSocket method table |
 | `bridge` | the toolkit's tool cards as openjiuwen local functions |
 
 Everything here is a module nothing calls yet. The wiring PR adds the calls to the
 core files: the adapter holds a `CloudDocSessionTools` and calls `update` on every
 request, builds the two rails into its rail table and hands `turn_snapshot` to
 the permission rail; the permission rail's scene hook calls `unattended_scene`
-first; the team provider's harness element calls `build_team_tools`. The gateway
-service and the WebSocket method table follow in the next PR.
+first; the team provider's harness element calls `build_team_tools`; the gateway
+prepares a `CloudDocService`, binds its panel to the web handlers through
+`web.register_methods`, starts the service once the channels are up and stops
+it on the way down.
 
 **Public names.** `CloudDocFileGuardRail`, `ReportLedgerRail`, `unattended_scene`,
 `resolve_unattended_turn`, `set_fallback_snapshot`, `is_unattended_turn`,
 `turn_doc_id`, `turn_comment_id`, `turn_mode`, `turn_progress`,
-`CloudDocSessionTools`, `build_team_tools`, `to_openjiuwen`.
+`CloudDocSessionTools`, `build_team_tools`, `CloudDocService`, `build_connections`,
+`start_discovery`, `build_methods`, `register_methods`, `to_openjiuwen`.
 
 **Imports.** every package below; the host's rail base classes, permission table
 and request contextvars; `openjiuwen` rail, tool and message types.
