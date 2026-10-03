@@ -110,3 +110,6 @@ report/index.html
 /context/
 /.plans/
 /todo/
+# Per-session runtime state a test may write beside the packaged resources when
+# its config dir resolves there; never source.
+jiuwenswarm/resources/runtime_state/

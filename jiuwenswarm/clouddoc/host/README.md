@@ -19,8 +19,7 @@ the platform contract.
 | `web` | the `clouddoc.*` WebSocket method table |
 | `bridge` | the toolkit's tool cards as openjiuwen local functions |
 
-Everything here is a module nothing calls yet. The wiring PR adds the calls to the
-core files: the adapter holds a `CloudDocSessionTools` and calls `update` on every
+The core files call these at five places, a few lines each: the adapter holds a `CloudDocSessionTools` and calls `update` on every
 request, builds the two rails into its rail table and hands `turn_snapshot` to
 the permission rail; the permission rail's scene hook calls `unattended_scene`
 first; the team provider's harness element calls `build_team_tools`; the gateway

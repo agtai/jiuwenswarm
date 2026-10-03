@@ -12,6 +12,7 @@ import pytest
 from jiuwenswarm.agents.harness.common.tools.send_file_to_user import (
     SendFileToolkit,
 )
+from jiuwenswarm.clouddoc.host.agent import CloudDocSessionTools
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep as adapter_module
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
     JiuWenSwarmDeepAdapter,
@@ -52,6 +53,7 @@ def _adapter(*, registered_send_tool: bool = False) -> JiuWenSwarmDeepAdapter:
     adapter._enable_auto_permission = False
     adapter._last_mode = "agent.work.normal"
     adapter._session_messaging_toolkit = None
+    adapter._clouddoc = CloudDocSessionTools()
     return adapter
 
 

@@ -71,6 +71,7 @@ SYMPHONY_TOOLKIT = _tools.SYMPHONY_TOOLKIT
 A4P_INTENT_AUTHORIZATION = _tools.A4P_INTENT_AUTHORIZATION
 CRON_TOOLS = _runtime_tools.CRON_TOOLS
 SEND_FILE = _runtime_tools.SEND_FILE
+CLOUDDOC_TOOLS = _runtime_tools.CLOUDDOC_TOOLS
 MEMBER_SKILL_TOOLKIT = _skills.MEMBER_SKILL_TOOLKIT
 # Generic tools provided + registered by openjiuwen (referenced by bare name).
 WEB_SEARCH = _OJ_WEB_SEARCH
@@ -204,6 +205,7 @@ __all__ = [
     "AUDIO",
     "CRON_TOOLS",
     "SEND_FILE",
+    "CLOUDDOC_TOOLS",
     "MEMBER_SKILL_TOOLKIT",
     "RUNTIME_PROMPT",
     "TEAM_SKILL_STORAGE_POLICY",
