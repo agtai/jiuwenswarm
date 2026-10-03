@@ -50,3 +50,16 @@ def workspace_dir() -> Path:
     from jiuwenswarm.common.utils import get_user_workspace_dir
 
     return get_user_workspace_dir()
+
+
+def validate_model_name(name: str) -> str:
+    """Resolve a model name against the deployment's model table, or raise ValueError.
+
+    The watch path pins a model per document and per deployment; a stored name can
+    outlive the model it names, so every candidate is checked before it is handed to
+    the agentserver. The table and its rules belong to the host; this is the one
+    place below ``host`` that consults them.
+    """
+    from jiuwenswarm.runtime.cron.models import validate_cron_model
+
+    return str(validate_cron_model(name) or "")
