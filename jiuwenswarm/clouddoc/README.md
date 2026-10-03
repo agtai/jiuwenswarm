@@ -18,7 +18,7 @@ asserts that), so each PR is inert and reviewable on its own.
 | `tools` | landed | the tools the agent calls |
 | `watch` | landed | the unattended path |
 | `panel` | landed | the owner's operations behind the WebSocket methods |
-| `host` | rails landed | the only module that imports the agent runtime and the gateway |
+| `host` | landed | the only module that imports the agent runtime and the gateway |
 
 Imports go one way, bottom to top in that table; `tests/unit_tests/clouddoc/test_layering.py`
 enforces it.
