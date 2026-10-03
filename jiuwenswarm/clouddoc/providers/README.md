@@ -1,7 +1,7 @@
 # providers
 
-The platform contract and what both platforms share. The platform implementations,
-the factory and the router follow in later PRs.
+The platform contract, what both platforms share, the two platform implementations
+(`google/`, `feishu/`, each with its own README), and the two ways to get a provider.
 
 **Purpose.** Everything above this layer talks to a document through `DocProvider`
 and the types beside it, never through a platform client. A provider reads a body as
@@ -24,3 +24,9 @@ and answers comments, creates, shares and deletes, and reports its capabilities.
 
 **Imports.** `base` imports `wording`; `kinds` imports `settings`; nothing here
 imports the host application.
+
+- `factory`: `build_provider` reads a credentials file and builds the provider for
+  the vendor it finds (`type: service_account` → Google, `app_id`/`app_secret` →
+  Feishu); `credential_address` reads the agent's address from either kind.
+- `routing`: `RoutingProvider` and `build_routed_provider` forward each document to
+  the connection that adopted it, for a session that reaches several connections.
