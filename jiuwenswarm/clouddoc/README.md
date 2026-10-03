@@ -17,7 +17,7 @@ asserts that), so each PR is inert and reviewable on its own.
 | `authority`, `state` | landed | watch grants and the audit journal; the watcher's state |
 | `tools` | landed | the tools the agent calls |
 | `watch` | landed | the unattended path |
-| `panel` | pending | the owner's operations behind the WebSocket methods |
+| `panel` | landed | the owner's operations behind the WebSocket methods |
 | `host` | pending | the only module that imports the agent runtime and the gateway |
 
 Imports go one way, bottom to top in that table; `tests/unit_tests/clouddoc/test_layering.py`
