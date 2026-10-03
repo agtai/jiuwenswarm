@@ -1,8 +1,8 @@
 """Imports inside ``jiuwenswarm.clouddoc`` go one way only.
 
 The order, bottom to top: providers (base, kinds, textmap, formats, then the
-platforms, then factory and routing), the write rails and receipts, tools,
-authority and state, watch, panel, host. A module may import from its own layer or
+platforms, then factory and routing); the write rails, receipts, the work-mode
+file, authority and state; tools; watch; panel; host. A module may import from its own layer or
 below. Only ``host`` and ``settings`` may import the host application; the rest of
 the package must not know which program runs it.
 """
@@ -19,12 +19,11 @@ PKG = "jiuwenswarm.clouddoc."
 LAYERS = {
     "wording": 0, "settings": 0,
     "providers": 1,
-    "edits": 2, "receipts": 2, "workmode": 2,
+    "edits": 2, "receipts": 2, "workmode": 2, "authority": 2, "state": 2,
     "tools": 3,
-    "authority": 4, "state": 4,
-    "watch": 5,
-    "panel": 6,
-    "host": 7,
+    "watch": 4,
+    "panel": 5,
+    "host": 6,
 }
 PROVIDER_SUBLAYERS = {"base": 0, "kinds": 0, "textmap": 0, "formats": 0, "google": 1, "feishu": 1, "factory": 2, "routing": 2}
 HOST_PREFIXES = ("jiuwenswarm.", "openjiuwen")
