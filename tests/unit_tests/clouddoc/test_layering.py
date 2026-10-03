@@ -3,8 +3,9 @@
 The order, bottom to top: providers (base, kinds, textmap, formats, then the
 platforms, then factory and routing); the write rails, receipts, the work-mode
 file, authority and state; tools; watch; panel; host. A module may import from its own layer or
-below. Only ``host`` and ``settings`` may import the host application; the rest of
-the package must not know which program runs it.
+below. Only ``host`` and ``settings`` may import the agent runtime or the gateway;
+``jiuwenswarm.common`` is open to all. The rest of the package must not know which
+program runs it.
 """
 from __future__ import annotations
 
@@ -26,7 +27,9 @@ LAYERS = {
     "host": 6,
 }
 PROVIDER_SUBLAYERS = {"base": 0, "kinds": 0, "textmap": 0, "formats": 0, "google": 1, "feishu": 1, "factory": 2, "routing": 2}
-HOST_PREFIXES = ("jiuwenswarm.", "openjiuwen")
+# The agent runtime and the gateway. ``jiuwenswarm.common`` is the shared utility
+# layer (configuration helpers, message schema) and is open to every module.
+HOST_PREFIXES = ("jiuwenswarm.server", "jiuwenswarm.gateway", "jiuwenswarm.agents", "jiuwenswarm.runtime", "jiuwenswarm.extensions", "openjiuwen")
 MAY_IMPORT_HOST = ("settings", "host")
 
 
@@ -71,5 +74,5 @@ def test_a_module_imports_only_from_its_layer_or_below(rel, path):
                 a, b = _provider_sublayer(rel), _provider_sublayer(target)
                 if a is not None and b is not None:
                     assert b <= a, f"{rel} imports upward within providers from {target}"
-        elif mod.startswith(HOST_PREFIXES) and not mod.startswith("jiuwenswarm.clouddoc"):
+        elif mod.startswith(HOST_PREFIXES):
             assert rel.split(".")[0] in MAY_IMPORT_HOST, f"{rel} imports the host application ({mod}); only settings and host may"
